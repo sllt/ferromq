@@ -65,8 +65,6 @@ x86_64 architecture servers and ARM devices like Raspberry Pi.
 
 #### Run FerroMQ using Docker
 
-> The image will be published to Docker Hub as `sllt/ferromq`. The commands below become available after the first image push.
-
 * Single node
 
 ```bash

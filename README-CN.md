@@ -63,8 +63,6 @@ FerroMQ 基于 [RMQTT](https://github.com/rmqtt/rmqtt) 二次开发，独立演�
 
 #### 使用 Docker 运行 FerroMQ
 
-> 镜像计划发布到 Docker Hub 的 `sllt/ferromq`；首次推送完成前，以下拉取命令暂不可用。
-
 * 单节点
 
 ```bash
