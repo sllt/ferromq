@@ -528,6 +528,10 @@ fn request_host(req: &Request) -> Option<String> {
 /// Cookie CSRF: missing Origin and Referer is allowed (non-browser / API clients).
 /// When either header is present, its host must match the request `Host`.
 /// Bearer / API-key clients skip this check in [`AuthGuard`].
+///
+/// Reverse proxies that rewrite `Host` will fail this check. Preserve the
+/// original public Host at the proxy. `X-Forwarded-Host` is **not** trusted.
+/// Non-browser clients can use Bearer / API key instead of a session cookie.
 pub(crate) fn cookie_csrf_ok(req: &Request) -> bool {
     let origin = req.headers().get("origin").and_then(|v| v.to_str().ok());
     let referer = req.headers().get("referer").and_then(|v| v.to_str().ok());
@@ -670,9 +674,7 @@ impl Handler for AuthGuard {
             }
         };
         if let Some(id) = resolve_identity(req, &self.state, &cfg).await {
-            if id.source == AuthSource::Session
-                && is_unsafe_http_method(req.method())
-                && !cookie_csrf_ok(req)
+            if id.source == AuthSource::Session && is_unsafe_http_method(req.method()) && !cookie_csrf_ok(req)
             {
                 render_api_error(
                     res,

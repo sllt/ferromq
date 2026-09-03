@@ -11,8 +11,8 @@ Production build of the React admin console from
 | Field | Value |
 |-------|-------|
 | Repository | https://github.com/sllt/ferromq-dashboard |
-| Ref | `cursor/ferromq-p7-release-quality-586c` |
-| Commit | `ddd24eff604db942aad8ca79c44aa888eee8a557` |
+| Ref | `dev` |
+| Commit | `b38456ae71200f74eb776613b49c95c597ad2cdb` |
 | UI | React 19 + Vite (`base: './'`) + Hash Router (`#/overview`) |
 
 Do **not** copy `node_modules` here. Only the Vite `dist/` output
@@ -23,10 +23,11 @@ Do **not** copy `node_modules` here. Only the Vite `dist/` output
 From the FerroMQ repo root (Node 20+, pnpm 9+):
 
 ```bash
-./scripts/sync-dashboard-dist.sh
+FERROMQ_DASHBOARD_REF=dev ./scripts/sync-dashboard-dist.sh
 ```
 
-Override source with `FERROMQ_DASHBOARD_REPO` / `FERROMQ_DASHBOARD_REF`.
+Override source with `FERROMQ_DASHBOARD_REPO` / `FERROMQ_DASHBOARD_REF`
+(default ref is `dev`).
 
 Then `cargo build -p ferromq-http-api` so `rust-embed` picks up the new files.
 

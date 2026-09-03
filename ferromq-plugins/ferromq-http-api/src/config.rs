@@ -373,10 +373,10 @@ mod tests {
 
     #[test]
     fn changed_detects_bearer_token() {
-        let a = serde_json::from_value::<PluginConfig>(serde_json::json!({"http_bearer_token": "a"}))
-            .expect("a");
-        let b = serde_json::from_value::<PluginConfig>(serde_json::json!({"http_bearer_token": "b"}))
-            .expect("b");
+        let a =
+            serde_json::from_value::<PluginConfig>(serde_json::json!({"http_bearer_token": "a"})).expect("a");
+        let b =
+            serde_json::from_value::<PluginConfig>(serde_json::json!({"http_bearer_token": "b"})).expect("b");
         assert!(a.changed(&b));
         assert!(!a.restart_enable(&b));
     }

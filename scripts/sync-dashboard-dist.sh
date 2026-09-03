@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$ROOT/ferromq-plugins/ferromq-http-api/dashboard-dist"
 REPO="${FERROMQ_DASHBOARD_REPO:-https://github.com/sllt/ferromq-dashboard}"
-REF="${FERROMQ_DASHBOARD_REF:-cursor/ferromq-p7-release-quality-586c}"
+REF="${FERROMQ_DASHBOARD_REF:-dev}"
 WORKDIR="${TMPDIR:-/tmp}/ferromq-dashboard-sync-$$"
 
 if ! command -v pnpm >/dev/null 2>&1; then
@@ -66,10 +66,11 @@ Do **not** copy \`node_modules\` here. Only the Vite \`dist/\` output
 From the FerroMQ repo root (Node 20+, pnpm 9+):
 
 \`\`\`bash
-./scripts/sync-dashboard-dist.sh
+FERROMQ_DASHBOARD_REF=dev ./scripts/sync-dashboard-dist.sh
 \`\`\`
 
-Override source with \`FERROMQ_DASHBOARD_REPO\` / \`FERROMQ_DASHBOARD_REF\`.
+Override source with \`FERROMQ_DASHBOARD_REPO\` / \`FERROMQ_DASHBOARD_REF\`
+(default ref is \`dev\`).
 
 Then \`cargo build -p ferromq-http-api\` so \`rust-embed\` picks up the new files.
 
@@ -87,6 +88,9 @@ dashboard_static_dir = "/path/to/ferromq-dashboard/dist"
 \`dashboard_static_dir\` wins over the embedded assets when the directory
 exists. Relative paths are resolved against the process cwd.
 EOF
+
+printf '%s\n' "$SHA" > "$DEST/COMMIT"
+printf 'repo=%s\nref=%s\ncommit=%s\n' "$REPO" "$REF" "$SHA" > "$DEST/SOURCE"
 
 echo "Synced $DEST from $REPO@$SHA"
 find "$DEST" -type f | wc -l | awk '{print $1 " files"}'

@@ -12,6 +12,7 @@ FerroMQ HTTP API 提供 Broker 管理的 RESTful 端点，涵盖监控、客户�
 # ferromq-http-api.toml
 http_laddr = "0.0.0.0:6060"
 max_row_limit = 10_000
+# 请求日志（/auth/* 省略 body；密钥与 URL userinfo 脱敏；不记录 Authorization/Cookie）
 http_request_log = false
 message_expiry_interval = "5m"
 prometheus_metrics_cache_interval = "5s"
@@ -77,7 +78,7 @@ prometheus_metrics_cache_interval = "5s"
 | `GET` | `/api/v1/metrics` | 指标（JSON） |
 | `GET` | `/api/v1/metrics/prometheus` | 指标（Prometheus 格式） |
 
-完整端点列表含 `stats/history`、`metrics/history`、会话认证、API Key 与审计日志。`operator` 可踢人 / 发布 / 管理插件，但不能管理用户与 Key；`viewer` 只读。详情见英文版文档。
+完整端点列表含 `stats/history`、`metrics/history`、会话认证、API Key 与审计日志。`operator` 可踢人 / 发布 / 管理插件，但不能管理用户与 Key；`viewer` 只读。Cookie CSRF 用 Origin/Referer 对照 Host，反向代理须保留原始公网 Host（不信任 `X-Forwarded-Host`）。详情见英文版文档。
 
 ## 许可证
 

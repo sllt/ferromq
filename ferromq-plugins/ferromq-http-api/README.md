@@ -40,7 +40,7 @@ File: `ferromq-http-api.toml` (in the plugin config directory). Loaded via `scx.
 |--------|------|---------|-------------|
 | `max_row_limit` | `usize` | `10000` | Maximum number of rows returned by list endpoints |
 | `http_laddr` | `string` | `"0.0.0.0:6060"` | HTTP server listen address |
-| `http_request_log` | `bool` | `false` | Whether to print HTTP request logs |
+| `http_request_log` | `bool` | `false` | Log method/path (auth bodies omitted; JSON/TOML secrets and URL userinfo redacted; Authorization / Cookie headers are never logged) |
 | `http_reuseaddr` | `bool` | `true` | Enable `SO_REUSEADDR` socket option (Unix only) |
 | `http_reuseport` | `bool` | `false` | Enable `SO_REUSEPORT` socket option (Unix only) |
 | `http_bearer_token` | `string` | — | Bearer token for HTTP API authentication (optional; treated as admin/operator) |
@@ -48,7 +48,7 @@ File: `ferromq-http-api.toml` (in the plugin config directory). Loaded via `scx.
 | `dashboard_admin_password` | `string` | — | Bootstrap admin password (hashed with bcrypt on first login / `/auth/init`; never stored as plaintext) |
 | `dashboard_viewer_username` | `string` | — | Optional bootstrap viewer username |
 | `dashboard_viewer_password` | `string` | — | Optional bootstrap viewer password |
-| `dashboard_cookie_secure` | `bool` | `false` | Set `Secure` on the session cookie (enable behind HTTPS) |
+| `dashboard_cookie_secure` | `bool` | `false` | Set `Secure` on the session cookie (enable behind HTTPS). Cookie CSRF compares `Origin`/`Referer` to `Host`; reverse proxies must preserve the original public Host (`X-Forwarded-Host` is not trusted). Use Bearer / API key if Host is rewritten |
 | `dashboard_session_idle_timeout` | `string` | `"30m"` | Idle session expiry |
 | `dashboard_session_max_age` | `string` | `"12h"` | Absolute session lifetime |
 | `dashboard_login_rate_limit` | `u32` | `10` | Max login attempts per IP per window |

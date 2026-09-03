@@ -49,6 +49,8 @@ http_laddr = "0.0.0.0:6060"
 # dashboard_session_max_age = "12h"
 # dashboard_login_rate_limit = 10
 # dashboard_login_rate_window = "1m"
+## Cookie CSRF 用 Origin/Referer 对照 Host。反向代理须保留原始公网 Host。
+## 不信任 X-Forwarded-Host。若代理改写了 Host，非浏览器客户端请用 Bearer / API Key。
 # audit_max_events = 10000
 # audit_file = "/var/log/ferromq/http-api-audit.jsonl"
 # config_history_keep = 10
@@ -64,7 +66,9 @@ http_laddr = "0.0.0.0:6060"
 ## Default: false
 # http_reuseport = false
 
-## Indicates whether to print HTTP request logs
+## 打印 HTTP 请求 method/path。/auth/* 的请求体一律省略；其余 JSON/TOML
+## 会递归脱敏 password/token/secret 等字段以及 URL userinfo。
+## 从不记录 Authorization / Cookie 头。
 http_request_log = false
 
 ## Metrics sample interval for collecting and caching internal metrics.
@@ -166,7 +170,7 @@ HTTP API 接受以下凭证。**MQTT 客户端认证插件不受影响。**
 
 | 机制 | 用法 | 角色 |
 |------|------|------|
-| 会话 Cookie | `POST /api/v1/auth/login` 提交 `{ "username", "password" }`，设置 `ferromq_session`（`HttpOnly` / `SameSite=Lax`）。每次请求使用用户的**当前**角色；用户删除后会话失效。带 Cookie 的非安全方法在存在 `Origin`/`Referer` 时要求与 `Host` 同源（缺省 Origin 的非浏览器客户端放行；Bearer / API Key 不受此限）。 | 用户记录上的当前 `admin` / `operator` / `viewer` |
+| 会话 Cookie | `POST /api/v1/auth/login` 提交 `{ "username", "password" }`，设置 `ferromq_session`（`HttpOnly` / `SameSite=Lax`）。每次请求使用用户的**当前**角色；用户删除后会话失效。带 Cookie 的非安全方法在存在 `Origin`/`Referer` 时要求与 `Host` 同源（缺省 Origin 的非浏览器客户端放行；Bearer / API Key 不受此限）。反向代理须**保留原始公网 `Host`**；FerroMQ **不信任** `X-Forwarded-Host`。若代理改写了 `Host`，非浏览器客户端请改用 Bearer / API Key。 | 用户记录上的当前 `admin` / `operator` / `viewer` |
 | 静态 Bearer | `Authorization: Bearer <http_bearer_token>` | 始终为 `admin`（用户名 `operator`） |
 | API Key Bearer | `Authorization: Bearer <fmqk_…>`（`POST /api/v1/api-keys` 创建） | 绑定的角色 |
 | 开放访问 | 未配置 bearer / API Key / `dashboard_admin_password`，且尚无用户 | 匿名 `admin` |

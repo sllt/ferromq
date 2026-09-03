@@ -790,9 +790,9 @@ pub(crate) fn assign_object_preserving_secrets(dst: &mut Value, patch: &Value) {
 fn reject_literal_redacted_secrets(value: &Value) -> Result<()> {
     fn walk(v: &Value, key: &str) -> Result<()> {
         match v {
-            Value::String(s) if is_secret_key(key) && s == REDACTED => Err(anyhow!(
-                "refusing to write redacted secret placeholder '{REDACTED}' for '{key}'"
-            )),
+            Value::String(s) if is_secret_key(key) && s == REDACTED => {
+                Err(anyhow!("refusing to write redacted secret placeholder '{REDACTED}' for '{key}'"))
+            }
             Value::Object(map) => {
                 for (k, child) in map {
                     walk(child, k)?;

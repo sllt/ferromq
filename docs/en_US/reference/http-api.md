@@ -16,7 +16,8 @@ http_laddr = "0.0.0.0:6060"
 # Maximum number of rows returned in list queries
 max_row_limit = 10_000
 
-# Log HTTP requests
+# Log HTTP requests (auth bodies omitted; secrets/URL userinfo redacted;
+# Authorization / Cookie headers are never logged)
 http_request_log = false
 
 # Message expiry interval
@@ -38,7 +39,7 @@ prometheus_metrics_cache_interval = "5s"
 
 ### Authentication
 
-- **Session:** `POST /api/v1/auth/login` `{ username, password }` → `ferromq_session` cookie (`HttpOnly`, `SameSite=Lax`). Role is read live from the user store (deleted user → 401). Cookie-authenticated unsafe methods check `Origin`/`Referer` against `Host` when present. Also `POST /logout`, `GET /me`, `POST /change-password` (revokes other sessions), `POST /init`.
+- **Session:** `POST /api/v1/auth/login` `{ username, password }` → `ferromq_session` cookie (`HttpOnly`, `SameSite=Lax`). Role is read live from the user store (deleted user → 401). Cookie-authenticated unsafe methods check `Origin`/`Referer` against `Host` when present. Reverse proxies must preserve the original public `Host` (FerroMQ does not trust `X-Forwarded-Host`). If Host is rewritten, use Bearer / API key. Also `POST /logout`, `GET /me`, `POST /change-password` (revokes other sessions), `POST /init`.
 - **Bearer:** `Authorization: Bearer <http_bearer_token>` is still a superuser admin credential (username `operator`). Created API keys also use Bearer with a bound role.
 - **Open access:** if neither token nor `dashboard_admin_password` is set (and no users/keys), the API stays open.
 - **Roles:** `admin` manages users / keys / audit / broker config write / `?reveal=1`; `operator` can kick / publish / plugin config write+reload; `viewer` is read-only (`403`, secrets redacted).

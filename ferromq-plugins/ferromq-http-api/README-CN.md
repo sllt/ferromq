@@ -40,7 +40,7 @@ ferromq_http_api::register_named(&scx, "ferromq-http-api", true, false).await?;
 |------|------|--------|------|
 | `max_row_limit` | `usize` | `10000` | 列表端点返回的最大行数 |
 | `http_laddr` | `string` | `"0.0.0.0:6060"` | HTTP 服务器监听地址 |
-| `http_request_log` | `bool` | `false` | 是否打印 HTTP 请求日志 |
+| `http_request_log` | `bool` | `false` | 打印 method/path（`/auth/*` 请求体省略；JSON/TOML 密钥与 URL userinfo 脱敏；从不记录 Authorization / Cookie 头） |
 | `http_reuseaddr` | `bool` | `true` | 启用 `SO_REUSEADDR` socket 选项（仅 Unix） |
 | `http_reuseport` | `bool` | `false` | 启用 `SO_REUSEPORT` socket 选项（仅 Unix） |
 | `http_bearer_token` | `string` | — | HTTP API Bearer 令牌认证（可选；视为 admin/operator） |
@@ -48,7 +48,7 @@ ferromq_http_api::register_named(&scx, "ferromq-http-api", true, false).await?;
 | `dashboard_admin_password` | `string` | — | 引导管理员密码（首次登录 / `/auth/init` 时 bcrypt 哈希，从不存明文） |
 | `dashboard_viewer_username` | `string` | — | 可选引导只读用户名 |
 | `dashboard_viewer_password` | `string` | — | 可选引导只读密码 |
-| `dashboard_cookie_secure` | `bool` | `false` | 会话 Cookie 是否设置 `Secure`（HTTPS 时启用） |
+| `dashboard_cookie_secure` | `bool` | `false` | 会话 Cookie 是否设置 `Secure`（HTTPS 时启用）。Cookie CSRF 用 Origin/Referer 对照 Host；反向代理须保留原始公网 Host（不信任 `X-Forwarded-Host`）。若 Host 被改写，请用 Bearer / API Key |
 | `dashboard_session_idle_timeout` | `string` | `"30m"` | 会话空闲过期 |
 | `dashboard_session_max_age` | `string` | `"12h"` | 会话绝对寿命 |
 | `dashboard_login_rate_limit` | `u32` | `10` | 每个 IP 在窗口内的最大登录次数 |

@@ -1007,18 +1007,122 @@ fn get_history_caches(depot: &Depot) -> Option<HistoryCaches> {
     }
 }
 
+/// Auth endpoints whose bodies are never written to request logs.
+fn is_auth_body_path(path: &str) -> bool {
+    let p = path.split('?').next().unwrap_or(path).trim_end_matches('/');
+    p.ends_with("/auth/login")
+        || p.ends_with("/auth/change-password")
+        || p.ends_with("/auth/init")
+        || p.ends_with("/auth/logout")
+}
+
+/// Extra keys the request logger redacts on top of [`config_mgmt::is_secret_key`].
+fn is_request_log_secret_key(key: &str) -> bool {
+    if config_mgmt::is_secret_key(key) {
+        return true;
+    }
+    let k = key.trim().to_ascii_lowercase().replace('-', "_");
+    k == "authorization"
+        || k == "cookie"
+        || k == "set_cookie"
+        || k == "api_key"
+        || k == "apikey"
+        || k.ends_with("_authorization")
+        || k.ends_with("_api_key")
+        || k.ends_with("_apikey")
+        || k.contains("authorization")
+        || k.contains("api_key")
+        || k.contains("apikey")
+}
+
+fn redact_log_secret_value(v: serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Null => serde_json::Value::Null,
+        serde_json::Value::String(s) if s.is_empty() => serde_json::Value::String(String::new()),
+        serde_json::Value::Object(_) | serde_json::Value::Array(_) => redact_request_log_value(v),
+        _ => serde_json::Value::String("***".into()),
+    }
+}
+
+fn redact_request_log_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in map {
+                if is_request_log_secret_key(&k) {
+                    out.insert(k, redact_log_secret_value(v));
+                } else {
+                    out.insert(k, redact_request_log_value(v));
+                }
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(redact_request_log_value).collect())
+        }
+        serde_json::Value::String(s) if s.contains("://") => {
+            serde_json::Value::String(integrations::redact_url_userinfo(&s))
+        }
+        other => other,
+    }
+}
+
+/// Render a request-body fragment for `http_request_log`.
+///
+/// Auth endpoints omit the body entirely. JSON/TOML is parsed and secret
+/// fields plus URL userinfo are redacted. Unparsed bodies are length-only
+/// so plaintext secrets never reach the log.
+pub(crate) fn summarize_request_body(path: &str, body: &str) -> String {
+    let bytes = body.len();
+    if is_auth_body_path(path) {
+        return format!("[omitted; {bytes} bytes]");
+    }
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return format!("[empty; {bytes} bytes]");
+    }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return redact_request_log_value(v).to_string();
+    }
+    if let Ok(v) = config_mgmt::toml_to_json(trimmed) {
+        return format!("(toml) {}", redact_request_log_value(v));
+    }
+    format!("[unparsed; {bytes} bytes]")
+}
+
+/// Safe one-line request summary. Does not accept or render headers
+/// (`Authorization` / `Cookie` are never logged).
+pub(crate) fn request_log_summary(
+    remote: &str,
+    version: &str,
+    method: &str,
+    uri: &str,
+    body: Option<&str>,
+) -> String {
+    let uri = integrations::redact_url_userinfo(uri);
+    let path = uri.split('?').next().unwrap_or(uri.as_str());
+    let base = format!("Request {remote}, {version}, {method}, {uri}");
+    match body {
+        Some(b) => format!("{base}, body: {}", summarize_request_body(path, b)),
+        None => base,
+    }
+}
+
 #[handler]
 async fn api_logger(req: &mut Request, depot: &mut Depot) -> std::result::Result<(), salvo::Error> {
     let (_, cfg) = get_scx_cfg(depot)?;
     if !cfg.read().await.http_request_log {
         return Ok(());
     }
-    let log_data =
-        format!("Request {}, {:?}, {}, {}", req.remote_addr(), req.version(), req.method(), req.uri());
+    // Headers (Authorization, Cookie, …) are intentionally not read or logged.
+    let remote = req.remote_addr().to_string();
+    let version = format!("{:?}", req.version());
+    let method = req.method().to_string();
+    let uri = req.uri().to_string();
     let txt_body = if let Some(m) = req.content_type() {
         if let mime::PLAIN | mime::JSON | mime::TEXT = m.subtype() {
             if let Ok(body) = req.payload().await {
-                Some(String::from_utf8_lossy(body))
+                Some(String::from_utf8_lossy(body).into_owned())
             } else {
                 None
             }
@@ -1028,11 +1132,7 @@ async fn api_logger(req: &mut Request, depot: &mut Depot) -> std::result::Result
     } else {
         None
     };
-    if let Some(txt_body) = txt_body {
-        log::info!("{log_data}, body: {txt_body}");
-    } else {
-        log::info!("{log_data}");
-    }
+    log::info!("{}", request_log_summary(&remote, &version, &method, &uri, txt_body.as_deref()));
     Ok(())
 }
 
@@ -5151,11 +5251,12 @@ listener.tcp.external.addr = "0.0.0.0:1883"
             assert_eq!(denied.status_code, Some(StatusCode::FORBIDDEN), "{path}");
         }
 
-        let validate = TestClient::post("http://127.0.0.1:0/api/v1/plugins/1/ferromq-http-api/config/validate")
-            .add_header("cookie", &ops, true)
-            .json(&json!({"http_bearer_token": "stolen"}))
-            .send(&env.svc)
-            .await;
+        let validate =
+            TestClient::post("http://127.0.0.1:0/api/v1/plugins/1/ferromq-http-api/config/validate")
+                .add_header("cookie", &ops, true)
+                .json(&json!({"http_bearer_token": "stolen"}))
+                .send(&env.svc)
+                .await;
         assert_eq!(validate.status_code, Some(StatusCode::FORBIDDEN));
 
         let rollback = TestClient::post(
@@ -5508,5 +5609,95 @@ topics = ["#"]
         assert!(spec_body["paths"]["/api/v1/acl/rules"].is_object());
         assert!(spec_body["paths"]["/api/v1/webhooks"].is_object());
         assert!(spec_body["paths"]["/api/v1/bridges"].is_object());
+    }
+
+    #[test]
+    fn request_log_omits_auth_bodies_and_redacts_secrets() {
+        let login = request_log_summary(
+            "127.0.0.1:1",
+            "HTTP/1.1",
+            "POST",
+            "/api/v1/auth/login",
+            Some(r#"{"username":"admin","password":"change-me-secret"}"#),
+        );
+        assert!(login.contains("[omitted;"), "{login}");
+        assert!(!login.contains("change-me-secret"), "{login}");
+        assert!(!login.contains("password"), "{login}");
+        assert!(!login.to_ascii_lowercase().contains("authorization"), "{login}");
+        assert!(!login.to_ascii_lowercase().contains("cookie"), "{login}");
+
+        let change_pw = request_log_summary(
+            "127.0.0.1:1",
+            "HTTP/1.1",
+            "POST",
+            "/api/v1/auth/change-password",
+            Some(r#"{"old_password":"old-secret-value","new_password":"new-secret-value"}"#),
+        );
+        assert!(change_pw.contains("[omitted;"), "{change_pw}");
+        assert!(!change_pw.contains("old-secret-value"), "{change_pw}");
+        assert!(!change_pw.contains("new-secret-value"), "{change_pw}");
+
+        let plugin = request_log_summary(
+            "127.0.0.1:1",
+            "HTTP/1.1",
+            "PUT",
+            "/api/v1/plugins/1/ferromq-http-api/config",
+            Some(r#"{"http_bearer_token":"super-bearer-secret","http_laddr":"0.0.0.0:6060"}"#),
+        );
+        assert!(!plugin.contains("super-bearer-secret"), "{plugin}");
+        assert!(plugin.contains("***"), "{plugin}");
+        assert!(plugin.contains("0.0.0.0:6060"), "{plugin}");
+
+        let plugin_toml = request_log_summary(
+            "127.0.0.1:1",
+            "HTTP/1.1",
+            "PUT",
+            "/api/v1/plugins/1/ferromq-http-api/config",
+            Some("http_bearer_token = \"toml-bearer-secret\"\nmax_row_limit = 10\n"),
+        );
+        assert!(!plugin_toml.contains("toml-bearer-secret"), "{plugin_toml}");
+        assert!(plugin_toml.contains("***"), "{plugin_toml}");
+
+        let webhook = request_log_summary(
+            "127.0.0.1:1",
+            "HTTP/1.1",
+            "POST",
+            "/api/v1/webhooks/urls",
+            Some(r#"{"url":"https://hookuser:hookpass@hooks.example.com/x"}"#),
+        );
+        assert!(!webhook.contains("hookuser"), "{webhook}");
+        assert!(!webhook.contains("hookpass"), "{webhook}");
+        assert!(webhook.contains("***:***@hooks.example.com"), "{webhook}");
+
+        let provider = request_log_summary(
+            "127.0.0.1:1",
+            "HTTP/1.1",
+            "PUT",
+            "/api/v1/auth-providers/jwt",
+            Some(r#"{"hmac_secret":"jwt-secret-value","encrypt":"hmac-based"}"#),
+        );
+        assert!(!provider.contains("jwt-secret-value"), "{provider}");
+        assert!(provider.contains("***"), "{provider}");
+        assert!(provider.contains("hmac-based"), "{provider}");
+
+        let uri_userinfo = request_log_summary(
+            "127.0.0.1:1",
+            "HTTP/1.1",
+            "GET",
+            "https://alice:bob@127.0.0.1:6060/api/v1/brokers",
+            None,
+        );
+        assert!(!uri_userinfo.contains("alice"), "{uri_userinfo}");
+        assert!(!uri_userinfo.contains("bob"), "{uri_userinfo}");
+
+        let raw = request_log_summary(
+            "127.0.0.1:1",
+            "HTTP/1.1",
+            "POST",
+            "/api/v1/clients",
+            Some("not-json password=should-not-leak"),
+        );
+        assert!(raw.contains("[unparsed;"), "{raw}");
+        assert!(!raw.contains("should-not-leak"), "{raw}");
     }
 }

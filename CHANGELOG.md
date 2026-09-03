@@ -23,11 +23,13 @@ FerroMQ is based on [RMQTT](https://github.com/rmqtt/rmqtt) at upstream commit `
 - **Viewer-first bootstrap** no longer consumes the empty-store bootstrap when admin credentials are configured, so a viewer login cannot lock out admin init.
 - **TCP probe SSRF**: webhook / HTTP-auth tests resolve the hostname first and refuse blocked IPs (loopback / RFC1918 / metadata) unless `allow_private=1`. Still no HTTP GET.
 - **Open-access warning**: when auth is unset, the HTTP API logs that requests are treated as anonymous admin (behavior unchanged).
+- **CSRF behind a reverse proxy**: cookie CSRF compares `Origin`/`Referer` to `Host`. Preserve the original public Host at the proxy; `X-Forwarded-Host` is not trusted. Non-browser clients can use Bearer / API key.
 - **Config logging**: `PluginConfig` Debug / startup logs redact bearer and dashboard passwords.
+- **Request-body logging**: when `http_request_log=true`, `/auth/*` bodies are omitted; other JSON/TOML bodies recursively redact password/token/secret/private_key/jwt/authorization/api_key/cookie fields and URL userinfo. Unparsed bodies log length only. `Authorization` / `Cookie` headers are never logged.
 
 ### Changed
 
-- **React Dashboard embedded (P7)**: `ferromq-http-api` now rust-embeds the Vite production build of [`sllt/ferromq-dashboard`](https://github.com/sllt/ferromq-dashboard) from crate-local `dashboard-dist/` (source commit `291588afd211cd8a79e38f920811b4eea7ed6baa`, Hash Router + `base: './'`). The old Vue SPA under `dashboard/` is removed. `dashboard_static_dir` still overrides the embed when the directory exists. Dashboard responses add `Cache-Control` (no-cache for `index.html`, immutable for hashed `assets/*`), gzip when requested, and admin-SPA headers (`X-Content-Type-Options`, `X-Frame-Options`, pragmatic CSP). Rebuild with `./scripts/sync-dashboard-dist.sh`. `/api/v1` and OpenAPI/docs are unchanged.
+- **React Dashboard embedded (P7)**: `ferromq-http-api` now rust-embeds the Vite production build of [`sllt/ferromq-dashboard`](https://github.com/sllt/ferromq-dashboard) from crate-local `dashboard-dist/` (source commit `b38456ae71200f74eb776613b49c95c597ad2cdb` on `dev`, Hash Router + `base: './'`). The old Vue SPA under `dashboard/` is removed. `dashboard_static_dir` still overrides the embed when the directory exists. Dashboard responses add `Cache-Control` (no-cache for `index.html`, immutable for hashed `assets/*`), gzip when requested, and admin-SPA headers (`X-Content-Type-Options`, `X-Frame-Options`, pragmatic CSP). Rebuild with `./scripts/sync-dashboard-dist.sh`. `/api/v1` and OpenAPI/docs are unchanged.
 - Renamed the product, crates, plugins, binary, default config, metrics, and runtime paths from RMQTT to FerroMQ.
 - Binary is `ferromqd`. Default config is `ferromq.toml`. Environment prefix is `FERROMQ_*` / `FERROMQ_PLUGIN_*`.
 - Prometheus metrics are `ferromq_nodes`, `ferromq_stats`, and `ferromq_metrics`.

@@ -49,6 +49,9 @@ http_laddr = "0.0.0.0:6060"
 # dashboard_session_max_age = "12h"
 # dashboard_login_rate_limit = 10
 # dashboard_login_rate_window = "1m"
+## Cookie CSRF compares Origin/Referer to Host. Reverse proxies must
+## preserve the original public Host. X-Forwarded-Host is not trusted.
+## If Host is rewritten, use Bearer / API key for non-browser clients.
 ## In-memory audit ring buffer (newest first). Optional JSONL file:
 # audit_max_events = 10000
 # audit_file = "/var/log/ferromq/http-api-audit.jsonl"
@@ -65,7 +68,9 @@ http_laddr = "0.0.0.0:6060"
 ## Default: false
 # http_reuseport = false
 
-## Indicates whether to print HTTP request logs
+## Print HTTP request method/path. Bodies on /auth/* are omitted; other
+## JSON/TOML bodies have secret fields and URL userinfo redacted.
+## Authorization / Cookie headers are never logged.
 http_request_log = false
 
 ## Metrics sample interval for collecting and caching internal metrics.
@@ -167,7 +172,7 @@ Credentials accepted on the HTTP API. **MQTT client auth plugins are unchanged.*
 
 | Mechanism | How | Role |
 |-----------|-----|------|
-| Session cookie | `POST /api/v1/auth/login` with `{ "username", "password" }` sets `ferromq_session` (`HttpOnly`, `SameSite=Lax`, `Secure` when `dashboard_cookie_secure`). Each request uses the **live** user role (and `enabled`); a deleted user invalidates the session. Cookie-authenticated `POST`/`PUT`/`PATCH`/`DELETE` require `Origin`/`Referer` to match `Host` when those headers are present (missing Origin is allowed for non-browser clients). Bearer / API keys skip this check. | `admin`, `operator`, or `viewer` from the **current** user record |
+| Session cookie | `POST /api/v1/auth/login` with `{ "username", "password" }` sets `ferromq_session` (`HttpOnly`, `SameSite=Lax`, `Secure` when `dashboard_cookie_secure`). Each request uses the **live** user role (and `enabled`); a deleted user invalidates the session. Cookie-authenticated `POST`/`PUT`/`PATCH`/`DELETE` require `Origin`/`Referer` to match `Host` when those headers are present (missing Origin is allowed for non-browser clients). Bearer / API keys skip this check. Reverse proxies must **preserve the original public `Host`**; FerroMQ does **not** trust `X-Forwarded-Host`. If the proxy rewrites `Host`, use Bearer / API key for non-browser clients. | `admin`, `operator`, or `viewer` from the **current** user record |
 | Static Bearer | `Authorization: Bearer <http_bearer_token>` | Always `admin` (username `operator`) for automation |
 | API key Bearer | `Authorization: Bearer <fmqk_…>` created via `POST /api/v1/api-keys` | Bound role (`admin` / `operator` / `viewer`) |
 | Open access | Neither bearer, API keys, nor `dashboard_admin_password` is set, and no users exist yet | Anonymous `admin` (backward compatible) |
