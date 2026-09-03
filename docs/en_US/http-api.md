@@ -122,6 +122,32 @@ The possible status codes are as follows:
 | 404  | The requested path cannot be found or the requested object does not exist |
 | 500  | An internal error occurred while the server was processing the request |
 
+Failed API calls return **JSON** (not plain text / HTML):
+
+```json
+{"code": 404, "message": "plugin not found: ferromq-web-hook"}
+```
+
+| Field   | Type    | Description                                      |
+|---------|---------|--------------------------------------------------|
+| `code`  | Integer | Same value as the HTTP status code               |
+| `message` | String | Human-readable error description               |
+
+Successful `2xx` bodies are unchanged (including existing plain-text successes such as `ok`).
+
+## List pagination metadata
+
+List endpoints used by the dashboard (`GET /clients`, `/clients/offlines`, `/subscriptions`, `/routes`, `/retains`, `/plugins`, `/plugins/{node}`) keep their existing JSON schema.
+
+- **Default body:** a bare JSON array (except `/retains`, which already returns `{ items, has_more }`).
+- **`_limit` / `limit`:** maximum rows returned. If omitted or `0`, the plugin `max_row_limit` is used (`10000` by default). `/retains` uses `limit` (no underscore).
+- **`_offset` / `offset`:** optional skip count applied after the backend fetch. `/retains` already documents `offset`.
+- **Response headers (non-breaking):**
+  - `X-Row-Count`: number of rows in this response (`items.length` for `/retains`).
+  - `X-Truncated`: `true` when the result was cut off by `_limit` / `max_row_limit` (or `has_more` for `/retains`); otherwise `false`.
+
+Old clients that ignore unknown headers continue to work.
+
 ## API Endpoints
 
 ## /api/v1
@@ -402,7 +428,8 @@ Returns the information of all clients under the cluster.
 
 | Name   | Type | Required | Default | Description                                                                                                                                                             |
 | ------ | --------- | -------- | ------- |-------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| _limit | Integer   | False | 10000   | The maximum number of data items returned at one time. If not specified, it is determined by the configuration item `max_row_limit` of the `ferromq-http-api.toml` plugin |
+| _limit | Integer   | False | 10000   | The maximum number of data items returned at one time. Alias: `limit`. If omitted or `0`, uses `max_row_limit` from `ferromq-http-api.toml` |
+| _offset | Integer  | False | 0       | Number of matching rows to skip. Alias: `offset`. Applied after the backend fetch (capped by `max_row_limit`) |
 
 | Name            | Type   | Required | Description                     |
 | --------------- | ------ | -------- |---------------------------------|
@@ -579,7 +606,8 @@ Returns all subscription information under the cluster.
 
 | Name   | Type | Required | Default | Description                                                                                                  |
 | ------ | --------- | -------- | ------- |--------------------------------------------------------------------------------------------------------------|
-| _limit | Integer   | False | 10000   | The maximum number of data items returned at one time, if not specified, it is determined by the configuration item `max_row_limit` of the `ferromq-http-api.toml` plugin |
+| _limit | Integer   | False | 10000   | The maximum number of data items returned at one time. Alias: `limit`. If omitted or `0`, uses `max_row_limit` from `ferromq-http-api.toml` |
+| _offset | Integer  | False | 0       | Number of matching rows to skip. Alias: `offset`. Applied after the backend fetch (capped by `max_row_limit`) |
 
 | Name         | Type    | Description |
 | ------------ | ------- | ----------- |
@@ -598,8 +626,9 @@ Returns all subscription information under the cluster.
 | [0].clientid    | String           | Client identifier      |
 | [0].client_addr | String           | Client IP address and port  |
 | [0].topic       | String           | Subscribe to topic        |
-| [0].qos         | Integer          | QoS level      |
-| [0].share       | String           | Shared subscription group name    |
+| [0].qos         | Integer          | QoS level (alias of `opts.qos`, added for dashboard compatibility) |
+| [0].share       | String           | Shared subscription group name (alias of `opts.group`) |
+| [0].opts        | Object           | Subscription options; the embedded dashboard reads `opts.qos` / `opts.group` |
 
 **Examples:**
 
@@ -649,7 +678,8 @@ List all routes
 
 | Name   | Type | Required | Default | Description |
 | ------ | --------- | -------- | ------- |  ---- |
-| _limit | Integer   | False | 10000   | The maximum number of data items returned at one time, if not specified, it is determined by the configuration item `max_row_limit` of the `ferromq-http-api.toml` plugin |
+| _limit | Integer   | False | 10000   | The maximum number of data items returned at one time. Alias: `limit`. If omitted or `0`, uses `max_row_limit` from `ferromq-http-api.toml` |
+| _offset | Integer  | False | 0       | Number of matching rows to skip. Alias: `offset`. Applied after the backend fetch (capped by `max_row_limit`) |
 
 **Success Response Body (JSON):**
 
@@ -752,6 +782,35 @@ $ curl -i -X GET "http://localhost:6060/api/v1/retains?topic_filter=%2Fiot%2Fb%2
 ```
 
 > Note: the `topic_filter=#` (full) path is paginated at the storage layer and includes `remaining_ttl` (remaining seconds); the filter path is paginated in memory and `remaining_ttl` is `null`. Requires the `ferromq-retainer` plugin to be enabled.
+
+Also returns `X-Row-Count` (length of `items`) and `X-Truncated` (same as `has_more`).
+
+### DELETE /api/v1/retains
+
+Delete a retained message by **exact topic**. Wildcards `#` / `+` are not allowed. Deletion follows MQTT semantics (empty-payload retain) and is broadcast to cluster peers.
+
+**Query String Parameters:**
+
+| Name  | Type   | Required | Description |
+|-------|--------|----------|-------------|
+| topic | String | True     | Concrete topic name, e.g. `/iot/b/x` |
+
+**Responses:**
+
+| Status | Body | Description |
+|--------|------|-------------|
+| 200 | `ok` (plain text) | Deleted successfully |
+| 400 | `{ "code": 400, "message": "..." }` | Missing `topic`, or topic contains wildcards |
+| 404 | `{ "code": 404, "message": "..." }` | No retained message for the topic |
+| 503 | `{ "code": 503, "message": "..." }` | Retain storage is not enabled or unavailable |
+
+**Examples:**
+
+```bash
+$ curl -i -X DELETE "http://localhost:6060/api/v1/retains?topic=%2Fiot%2Fb%2Fx"
+
+ok
+```
 
 ## Publish message
 
@@ -875,7 +934,7 @@ Returns information of all plugins in the cluster.
 | [0].plugins.homepage  | String           | Plugin homepage                                                                                                     |
 | [0].plugins.license   | String           | Plugin license                                                                                                      |
 | [0].plugins.repository| String           | Plugin repository                                                                                                   |
-| [0].plugins.active    | Boolean          | Whether the plugin is active                                                                                        |
+| [0].plugins.active    | Boolean          | Whether the plugin is active (started). **There is no `running` field** — use `active`. |
 | [0].plugins.inited    | Boolean          | Whether the plugin is initialized                                                                                   |
 | [0].plugins.immutable | Boolean          | Whether the plugin is immutable, Immutable plugins will not be able to be stopped, config modified, restarted, etc. |
 | [0].plugins.attrs     | Json             | Other additional properties of the plugin              |
@@ -954,6 +1013,8 @@ $ curl -i -X GET "http://localhost:6060/api/v1/plugins/1/ferromq-web-hook"
 
 {"active":false,"attrs":null,"descr":null,"immutable":false,"inited":false,"name":"ferromq-web-hook","version":null}
 ```
+
+A missing plugin returns HTTP 404 with `{"code":404,"message":"plugin not found: ..."}` (not JSON `null`).
 
 ### GET /api/v1/plugins/{node}/{plugin}/config
 

@@ -105,6 +105,7 @@ prometheus_metrics_cache_interval = "5s"
 | GET | `/routes/{topic}` | 获取指定主题的路由信息 |
 | **保留消息** | | |
 | GET | `/retains` | 查询保留消息，支持 `topic_filter` / `offset` / `limit` 参数 |
+| DELETE | `/retains?topic=` | 按精确主题删除一条保留消息 |
 | **MQTT 操作** | | |
 | POST | `/mqtt/publish` | 发布 MQTT 消息 |
 | POST | `/mqtt/subscribe` | 为会话订阅 MQTT 主题 |

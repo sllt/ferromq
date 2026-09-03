@@ -32,6 +32,7 @@ prometheus_metrics_cache_interval = "5s"
 | `GET` | `/api/v1/subscriptions` | 订阅列表 |
 | `GET` | `/api/v1/routes` | 路由表 |
 | `GET` | `/api/v1/retains` | 查询保留消息 |
+| `DELETE` | `/api/v1/retains?topic=` | 按精确主题删除保留消息 |
 | `POST` | `/api/v1/mqtt/publish` | 发布消息 |
 | `POST` | `/api/v1/mqtt/subscribe` | 订阅主题 |
 | `POST` | `/api/v1/mqtt/unsubscribe` | 取消订阅 |

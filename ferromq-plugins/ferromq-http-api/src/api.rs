@@ -45,6 +45,10 @@ use salvo::serve_static::{static_embed, StaticDir};
 use super::embed::DashboardAssets;
 use super::flusher::{HistoryCache, HistoryCaches};
 use super::prome::{Monitor, PROME_MONITOR};
+use super::response::{
+    apply_list_headers, render_api_error, render_not_found, status_for_plugin_error, subscription_to_json,
+    ListPaging,
+};
 use super::types::{
     ClientSearchParams, ClientSearchResult, FeatureConflict, FeatureValueGroup, Features, FeaturesInfo,
     FeaturesInfoOrError, FeaturesSummary, HistoryData, HistoryQuery, Message, MessageReply,
@@ -70,13 +74,13 @@ impl Handler for BearerValidator {
         if req.headers().get("authorization").is_some_and(|token| token == &self.token) {
             ctrl.call_next(req, depot, res).await;
         } else {
-            res.status_code(StatusCode::UNAUTHORIZED);
+            render_api_error(res, StatusCode::UNAUTHORIZED, "unauthorized");
             ctrl.skip_rest()
         }
     }
 }
 
-fn route(
+pub(crate) fn route(
     scx: ServerContext,
     cfg: PluginConfigType,
     token: Option<String>,
@@ -574,16 +578,16 @@ async fn get_brokers(
             Ok(Some(broker_info)) => res.render(Json(broker_info)),
             Ok(None) => {
                 //| Err(MqttError::None)
-                res.status_code(StatusCode::NOT_FOUND);
+                render_not_found(res, "not found");
             }
             Err(e) => {
-                res.render(StatusError::service_unavailable().detail(e.to_string()));
+                render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string());
             }
         }
     } else {
         match _get_brokers(scx, message_type).await {
             Ok(brokers) => res.render(Json(brokers)),
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
     }
     Ok(())
@@ -686,9 +690,9 @@ async fn get_nodes(
         match get_node(scx, message_type, id).await {
             Ok(Some(node_info)) => res.render(Json(node_info.to_json())),
             Ok(None) => {
-                res.status_code(StatusCode::NOT_FOUND);
+                render_not_found(res, "not found");
             }
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
     } else {
         match get_nodes_all(scx, message_type).await {
@@ -706,7 +710,7 @@ async fn get_nodes(
                 }
                 res.render(Json(nodes))
             }
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
     }
     Ok(())
@@ -1001,9 +1005,9 @@ async fn get_features(
         match get_feature(scx, message_type, id).await {
             Ok(Some(features_info)) => res.render(Json(features_info)),
             Ok(None) => {
-                res.status_code(StatusCode::NOT_FOUND);
+                render_not_found(res, "not found");
             }
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
     } else {
         match get_features_all(scx, message_type).await {
@@ -1034,7 +1038,7 @@ async fn get_features(
                     nodes,
                 }))
             }
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
     }
     Ok(())
@@ -1051,8 +1055,8 @@ async fn check_health(
     let id = req.param::<NodeId>("id");
     if let Some(id) = id {
         match check_health_one(scx, message_type, id).await {
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
-            Ok(None) => res.render(StatusError::not_found()),
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Ok(None) => render_not_found(res, "not found"),
             Ok(Some(health_status)) => {
                 if health_status.is_running() {
                     res.render(Json(health_status.to_json()))
@@ -1065,7 +1069,7 @@ async fn check_health(
         }
     } else {
         match scx.extends.shared().await.check_health().await {
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
             Ok(health_info) => res.render(Json(health_info.to_json())),
         }
     }
@@ -1128,12 +1132,12 @@ async fn get_client(
             Ok(Some(reply)) => res.render(Json(reply)),
             Ok(None) => {
                 //| Err(MqttError::None)
-                res.status_code(StatusCode::NOT_FOUND);
+                render_not_found(res, "not found");
             }
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
     } else {
-        res.render(StatusError::bad_request())
+        render_api_error(res, StatusCode::BAD_REQUEST, "bad request")
     }
     Ok(())
 }
@@ -1195,20 +1199,21 @@ async fn search_clients(
     let mut q = match req.parse_queries::<ClientSearchParams>() {
         Ok(q) => q,
         Err(e) => {
-            res.render(StatusError::bad_request().detail(e.to_string()));
+            render_api_error(res, StatusCode::BAD_REQUEST, e.to_string());
             return Ok(());
         }
     };
 
-    if q._limit == 0 || q._limit > max_row_limit {
-        q._limit = max_row_limit;
-    }
+    let paging = ListPaging::from_request(req, q._limit, max_row_limit);
+    q._limit = paging.fetch_limit;
     match _search_clients(scx, message_type, q).await {
         Ok(replys) => {
-            let replys = replys.iter().map(|res| res.to_json()).collect::<Vec<_>>();
+            let (page, truncated) = paging.apply(replys);
+            let replys = page.iter().map(|res| res.to_json()).collect::<Vec<_>>();
+            apply_list_headers(res, replys.len(), truncated);
             res.render(Json(replys))
         }
-        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+        Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
     }
     Ok(())
 }
@@ -1225,21 +1230,22 @@ async fn search_offlines(
     let mut q = match req.parse_queries::<ClientSearchParams>() {
         Ok(q) => q,
         Err(e) => {
-            res.render(StatusError::bad_request().detail(e.to_string()));
+            render_api_error(res, StatusCode::BAD_REQUEST, e.to_string());
             return Ok(());
         }
     };
     q.connected = Some(false);
 
-    if q._limit == 0 || q._limit > max_row_limit {
-        q._limit = max_row_limit;
-    }
+    let paging = ListPaging::from_request(req, q._limit, max_row_limit);
+    q._limit = paging.fetch_limit;
     match _search_clients(scx, message_type, q).await {
         Ok(replys) => {
-            let replys = replys.iter().map(|res| res.to_json()).collect::<Vec<_>>();
+            let (page, truncated) = paging.apply(replys);
+            let replys = page.iter().map(|res| res.to_json()).collect::<Vec<_>>();
+            apply_list_headers(res, replys.len(), truncated);
             res.render(Json(replys))
         }
-        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+        Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
     }
     Ok(())
 }
@@ -1301,14 +1307,14 @@ async fn kick_client(
         let s = entry.session();
         if let Some(s) = s {
             match entry.kick(true, true, true).await {
-                Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+                Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
                 Ok(_) => res.render(Json(s.id.to_json())),
             }
         } else {
-            res.status_code(StatusCode::NOT_FOUND);
+            render_not_found(res, "not found");
         }
     } else {
-        res.render(StatusError::bad_request())
+        render_api_error(res, StatusCode::BAD_REQUEST, "bad request")
     }
     Ok(())
 }
@@ -1325,7 +1331,7 @@ async fn kick_offlines(
     let mut q = match req.parse_queries::<ClientSearchParams>() {
         Ok(q) => q,
         Err(e) => {
-            res.render(StatusError::bad_request().detail(e.to_string()));
+            render_api_error(res, StatusCode::BAD_REQUEST, e.to_string());
             return Ok(());
         }
     };
@@ -1386,7 +1392,7 @@ async fn check_online(
         let online = entry.online().await;
         res.render(Json(online));
     } else {
-        res.render(StatusError::bad_request())
+        render_api_error(res, StatusCode::BAD_REQUEST, "bad request")
     }
     Ok(())
 }
@@ -1402,13 +1408,12 @@ async fn query_subscriptions(
     let mut q = match req.parse_queries::<SubsSearchParams>() {
         Ok(q) => q,
         Err(e) => {
-            res.render(StatusError::bad_request().detail(e.to_string()));
+            render_api_error(res, StatusCode::BAD_REQUEST, e.to_string());
             return Ok(());
         }
     };
-    if q._limit == 0 || q._limit > max_row_limit {
-        q._limit = max_row_limit;
-    }
+    let paging = ListPaging::from_request(req, q._limit, max_row_limit);
+    q._limit = paging.fetch_limit;
     let replys = scx
         .extends
         .shared()
@@ -1416,9 +1421,11 @@ async fn query_subscriptions(
         .query_subscriptions(&q)
         .await
         .into_iter()
-        .map(|res| res.to_json())
+        .map(|res| subscription_to_json(res.to_json()))
         .collect::<Vec<serde_json::Value>>();
-    res.render(Json(replys));
+    let (page, truncated) = paging.apply(replys);
+    apply_list_headers(res, page.len(), truncated);
+    res.render(Json(page));
     Ok(())
 }
 
@@ -1433,13 +1440,17 @@ async fn get_client_subscriptions(
     if let Some(clientid) = clientid {
         let entry = scx.extends.shared().await.entry(Id::from(scx.node.id(), ClientId::from(clientid)));
         if let Some(subs) = entry.subscriptions().await {
-            let subs = subs.into_iter().map(|res| res.to_json()).collect::<Vec<serde_json::Value>>();
+            let subs = subs
+                .into_iter()
+                .map(|res| subscription_to_json(res.to_json()))
+                .collect::<Vec<serde_json::Value>>();
+            apply_list_headers(res, subs.len(), false);
             res.render(Json(subs));
         } else {
-            res.status_code(StatusCode::NOT_FOUND);
+            render_not_found(res, "client not found");
         }
     } else {
-        res.render(StatusError::bad_request());
+        render_api_error(res, StatusCode::BAD_REQUEST, "bad request");
     }
     Ok(())
 }
@@ -1452,18 +1463,12 @@ async fn get_routes(
 ) -> std::result::Result<(), salvo::Error> {
     let (scx, cfg) = get_scx_cfg(depot)?;
     let max_row_limit = cfg.read().await.max_row_limit;
-    let limit = req.query::<usize>("_limit");
-    let limit = if let Some(limit) = limit {
-        if limit > max_row_limit {
-            max_row_limit
-        } else {
-            limit
-        }
-    } else {
-        max_row_limit
-    };
-    let replys = scx.extends.router().await.gets(limit).await;
-    res.render(Json(replys));
+    let requested = req.query::<usize>("_limit").or_else(|| req.query::<usize>("limit")).unwrap_or(0);
+    let paging = ListPaging::from_request(req, requested, max_row_limit);
+    let replys = scx.extends.router().await.gets(paging.fetch_limit).await;
+    let (page, truncated) = paging.apply(replys);
+    apply_list_headers(res, page.len(), truncated);
+    res.render(Json(page));
     Ok(())
 }
 
@@ -1477,11 +1482,14 @@ async fn get_route(
     let topic = req.param::<String>("topic");
     if let Some(topic) = topic {
         match scx.extends.router().await.get(&topic).await {
-            Ok(replys) => res.render(Json(replys)),
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Ok(replys) => {
+                apply_list_headers(res, replys.len(), false);
+                res.render(Json(replys))
+            }
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
     } else {
-        res.render(StatusError::bad_request())
+        render_api_error(res, StatusCode::BAD_REQUEST, "bad request")
     }
     Ok(())
 }
@@ -1510,7 +1518,7 @@ async fn get_retains(
     let mut q = match req.parse_queries::<RetainQueryParams>() {
         Ok(q) => q,
         Err(e) => {
-            res.render(StatusError::bad_request().detail(e.to_string()));
+            render_api_error(res, StatusCode::BAD_REQUEST, e.to_string());
             return Ok(());
         }
     };
@@ -1528,7 +1536,7 @@ async fn get_retains(
                 has_more,
             ),
             Err(e) => {
-                res.render(StatusError::service_unavailable().detail(e.to_string()));
+                render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string());
                 return Ok(());
             }
         }
@@ -1547,12 +1555,13 @@ async fn get_retains(
                 (items, has_more)
             }
             Err(e) => {
-                res.render(StatusError::service_unavailable().detail(e.to_string()));
+                render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string());
                 return Ok(());
             }
         }
     };
 
+    apply_list_headers(res, items.len(), has_more);
     res.render(Json(json!({"items": items, "has_more": has_more})));
     Ok(())
 }
@@ -1584,7 +1593,7 @@ async fn delete_retain(
     let topic = match req.query::<String>("topic") {
         Some(t) if !t.trim().is_empty() => TopicName::from(t.trim()),
         _ => {
-            res.render(StatusError::bad_request().detail("topic is required"));
+            render_api_error(res, StatusCode::BAD_REQUEST, "topic is required");
             return Ok(());
         }
     };
@@ -1592,16 +1601,17 @@ async fn delete_retain(
     // Deletion requires a concrete topic; wildcards are not supported.
     let topic_str = topic.to_string();
     if topic_str.contains('#') || topic_str.contains('+') {
-        res.render(
-            StatusError::bad_request()
-                .detail("topic must be a concrete topic, wildcards '#' and '+' are not allowed"),
+        render_api_error(
+            res,
+            StatusCode::BAD_REQUEST,
+            "topic must be a concrete topic, wildcards '#' and '+' are not allowed",
         );
         return Ok(());
     }
 
     let retain_mgr = scx.extends.retain().await;
     if !retain_mgr.enable() {
-        res.render(StatusError::service_unavailable().detail("retain storage is not enabled"));
+        render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, "retain storage is not enabled");
         return Ok(());
     }
 
@@ -1609,14 +1619,12 @@ async fn delete_retain(
     match retain_mgr.get(&topic).await {
         Ok(list) => {
             if !list.iter().any(|(t, _)| t == &topic) {
-                res.render(
-                    StatusError::not_found().detail(format!("retain message not found for topic: {topic}")),
-                );
+                render_not_found(res, format!("retain message not found for topic: {topic}"));
                 return Ok(());
             }
         }
         Err(e) => {
-            res.render(StatusError::service_unavailable().detail(e.to_string()));
+            render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string());
             return Ok(());
         }
     }
@@ -1642,7 +1650,7 @@ async fn delete_retain(
     let retain = Retain { msg_id: None, from, publish: <CodecPublish as Into<Publish>>::into(p) };
 
     if let Err(e) = retain_mgr.set(&topic, retain.clone(), None).await {
-        res.render(StatusError::service_unavailable().detail(e.to_string()));
+        render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string());
         return Ok(());
     }
 
@@ -1677,13 +1685,13 @@ async fn publish(
     let params = match req.parse_json::<PublishParams>().await {
         Ok(p) => p,
         Err(e) => {
-            res.render(StatusError::bad_request().detail(e.to_string()));
+            render_api_error(res, StatusCode::BAD_REQUEST, e.to_string());
             return Ok(());
         }
     };
     match _publish(scx, params, remote_addr, http_laddr, expiry_interval).await {
         Ok(()) => res.render(Text::Plain("ok")),
-        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+        Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
     }
     Ok(())
 }
@@ -1779,7 +1787,7 @@ async fn subscribe(
     let params = match req.parse_json::<SubscribeParams>().await {
         Ok(p) => p,
         Err(e) => {
-            res.render(StatusError::bad_request().detail(e.to_string()));
+            render_api_error(res, StatusCode::BAD_REQUEST, e.to_string());
             return Ok(());
         }
     };
@@ -1788,11 +1796,11 @@ async fn subscribe(
         if status.online {
             status.id.node_id
         } else {
-            res.render(StatusError::service_unavailable().detail("the session is offline"));
+            render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, "the session is offline");
             return Ok(());
         }
     } else {
-        res.render(StatusError::not_found().detail("session does not exist"));
+        render_not_found(res, "session does not exist");
         return Ok(());
     };
 
@@ -1812,7 +1820,7 @@ async fn subscribe(
                     .collect::<HashMap<_, _>>();
                 res.render(Json(replys))
             }
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
     } else {
         // let cfg = get_cfg(depot)?;
@@ -1834,7 +1842,7 @@ async fn subscribe(
                     .collect::<HashMap<_, _>>();
                 res.render(Json(replys))
             }
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
     }
     Ok(())
@@ -1878,7 +1886,7 @@ async fn unsubscribe(
     let params = match req.parse_json::<UnsubscribeParams>().await {
         Ok(p) => p,
         Err(e) => {
-            res.render(StatusError::bad_request().detail(e.to_string()));
+            render_api_error(res, StatusCode::BAD_REQUEST, e.to_string());
             return Ok(());
         }
     };
@@ -1887,18 +1895,18 @@ async fn unsubscribe(
         if status.online {
             status.id.node_id
         } else {
-            res.render(StatusError::service_unavailable().detail("the session is offline"));
+            render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, "the session is offline");
             return Ok(());
         }
     } else {
-        res.render(StatusError::not_found().detail("session does not exist"));
+        render_not_found(res, "session does not exist");
         return Ok(());
     };
 
     if node_id == scx.node.id() {
         match subs::unsubscribe(scx, params).await {
             Ok(()) => res.render(Json(true)),
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
     } else {
         // let cfg = get_cfg(depot)?;
@@ -1906,7 +1914,7 @@ async fn unsubscribe(
         //The session is on another node
         match _unsubscribe_on_other_node(scx, message_type, node_id, params).await {
             Ok(()) => res.render(Text::Plain("ok")),
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
     }
     Ok(())
@@ -1946,8 +1954,11 @@ async fn all_plugins(depot: &mut Depot, res: &mut Response) -> std::result::Resu
     let message_type = cfg.read().await.message_type;
 
     match _all_plugins(scx, message_type).await {
-        Ok(pluginss) => res.render(Json(pluginss)),
-        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+        Ok(pluginss) => {
+            apply_list_headers(res, pluginss.len(), false);
+            res.render(Json(pluginss))
+        }
+        Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
     }
     Ok(())
 }
@@ -2015,12 +2026,15 @@ async fn node_plugins(
     let node_id = if let Some(node_id) = req.param::<NodeId>("node") {
         node_id
     } else {
-        res.status_code(StatusCode::NOT_FOUND);
+        render_not_found(res, "node not found");
         return Ok(());
     };
     match _node_plugins(scx, node_id, message_type).await {
-        Ok(plugins) => res.render(Json(plugins)),
-        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+        Ok(plugins) => {
+            apply_list_headers(res, plugins.len(), false);
+            res.render(Json(plugins))
+        }
+        Err(e) => render_api_error(res, status_for_plugin_error(&e), e.to_string()),
     }
     Ok(())
 }
@@ -2067,19 +2081,20 @@ async fn node_plugin_info(
     let node_id = if let Some(node_id) = req.param::<NodeId>("node") {
         node_id
     } else {
-        res.status_code(StatusCode::NOT_FOUND);
+        render_not_found(res, "node not found");
         return Ok(());
     };
     let name = if let Some(name) = req.param::<String>("plugin") {
         name
     } else {
-        res.status_code(StatusCode::NOT_FOUND);
+        render_not_found(res, "plugin not found");
         return Ok(());
     };
 
     match _node_plugin_info(scx, node_id, &name, message_type).await {
-        Ok(plugin) => res.render(Json(plugin)),
-        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+        Ok(Some(plugin)) => res.render(Json(plugin)),
+        Ok(None) => render_not_found(res, format!("plugin not found: {name}")),
+        Err(e) => render_api_error(res, status_for_plugin_error(&e), e.to_string()),
     }
 
     Ok(())
@@ -2132,13 +2147,13 @@ async fn node_plugin_config(
     let node_id = if let Some(node_id) = req.param::<NodeId>("node") {
         node_id
     } else {
-        res.status_code(StatusCode::NOT_FOUND);
+        render_not_found(res, "node not found");
         return Ok(());
     };
     let name = if let Some(name) = req.param::<String>("plugin") {
         name
     } else {
-        res.status_code(StatusCode::NOT_FOUND);
+        render_not_found(res, "plugin not found");
         return Ok(());
     };
 
@@ -2148,7 +2163,7 @@ async fn node_plugin_config(
                 .insert(CONTENT_TYPE, HeaderValue::from_static("application/json; charset=utf-8"));
             res.write_body(cfg).ok();
         }
-        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+        Err(e) => render_api_error(res, status_for_plugin_error(&e), e.to_string()),
     }
     Ok(())
 }
@@ -2196,19 +2211,19 @@ async fn node_plugin_config_reload(
     let node_id = if let Some(node_id) = req.param::<NodeId>("node") {
         node_id
     } else {
-        res.status_code(StatusCode::NOT_FOUND);
+        render_not_found(res, "node not found");
         return Ok(());
     };
     let name = if let Some(name) = req.param::<String>("plugin") {
         name
     } else {
-        res.status_code(StatusCode::NOT_FOUND);
+        render_not_found(res, "plugin not found");
         return Ok(());
     };
 
     match _node_plugin_config_reload(scx, node_id, &name, message_type).await {
         Ok(r) => res.render(Json(r)),
-        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+        Err(e) => render_api_error(res, status_for_plugin_error(&e), e.to_string()),
     }
     Ok(())
 }
@@ -2258,19 +2273,19 @@ async fn node_plugin_load(
     let node_id = if let Some(node_id) = req.param::<NodeId>("node") {
         node_id
     } else {
-        res.status_code(StatusCode::NOT_FOUND);
+        render_not_found(res, "node not found");
         return Ok(());
     };
     let name = if let Some(name) = req.param::<String>("plugin") {
         name
     } else {
-        res.status_code(StatusCode::NOT_FOUND);
+        render_not_found(res, "plugin not found");
         return Ok(());
     };
 
     match _node_plugin_load(scx, node_id, &name, message_type).await {
         Ok(r) => res.render(Json(r)),
-        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+        Err(e) => render_api_error(res, status_for_plugin_error(&e), e.to_string()),
     }
     Ok(())
 }
@@ -2319,19 +2334,19 @@ async fn node_plugin_unload(
     let node_id = if let Some(node_id) = req.param::<NodeId>("node") {
         node_id
     } else {
-        res.status_code(StatusCode::NOT_FOUND);
+        render_not_found(res, "node not found");
         return Ok(());
     };
     let name = if let Some(name) = req.param::<String>("plugin") {
         name
     } else {
-        res.status_code(StatusCode::NOT_FOUND);
+        render_not_found(res, "plugin not found");
         return Ok(());
     };
 
     match _node_plugin_unload(scx, node_id, &name, message_type).await {
         Ok(r) => res.render(Json(r)),
-        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+        Err(e) => render_api_error(res, status_for_plugin_error(&e), e.to_string()),
     }
     Ok(())
 }
@@ -2376,7 +2391,7 @@ async fn get_stats_sum(depot: &mut Depot, res: &mut Response) -> std::result::Re
 
     match _get_stats_sum(scx, message_type, false).await {
         Ok(stats_sum) => res.render(Json(stats_sum)),
-        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+        Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
     }
     Ok(())
 }
@@ -2465,9 +2480,9 @@ async fn get_stats(
             }
             Ok(None) => {
                 //| Err(MqttError::None)
-                res.status_code(StatusCode::NOT_FOUND);
+                render_not_found(res, "not found");
             }
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
     } else {
         match get_stats_all(scx, message_type).await {
@@ -2486,7 +2501,7 @@ async fn get_stats(
                 }
                 res.render(Json(stat_infos))
             }
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
     }
     Ok(())
@@ -2619,9 +2634,9 @@ async fn get_sys_stats(
                 res.render(Json(stat_info))
             }
             Ok(None) => {
-                res.status_code(StatusCode::NOT_FOUND);
+                render_not_found(res, "not found");
             }
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
     } else {
         match get_stats_all(scx, message_type).await {
@@ -2640,7 +2655,7 @@ async fn get_sys_stats(
                 }
                 res.render(Json(stat_infos))
             }
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
     }
     Ok(())
@@ -2654,7 +2669,7 @@ async fn get_sys_stats_sum(depot: &mut Depot, res: &mut Response) -> std::result
 
     match _get_stats_sum(scx, message_type, true).await {
         Ok(stats_sum) => res.render(Json(stats_sum)),
-        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+        Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
     }
     Ok(())
 }
@@ -2677,9 +2692,9 @@ async fn get_metrics(
                 res.render(Json(metrics))
             }
             Ok(None) => {
-                res.status_code(StatusCode::NOT_FOUND);
+                render_not_found(res, "not found");
             }
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
     } else {
         match get_metrics_all(scx, message_type).await {
@@ -2697,7 +2712,7 @@ async fn get_metrics(
                 }
                 res.render(Json(metrics_infos))
             }
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
     }
     Ok(())
@@ -2797,7 +2812,7 @@ async fn get_metrics_sum(depot: &mut Depot, res: &mut Response) -> std::result::
 
     match _get_metrics_sum(scx, message_type).await {
         Ok(metrics_sum) => res.render(Json(metrics_sum)),
-        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+        Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
     }
     Ok(())
 }
@@ -2872,7 +2887,7 @@ async fn get_prometheus_metrics(
                 res.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
                 res.write_body(metrics).ok();
             }
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
     } else {
         match prome::to_metrics(scx, monitor, message_type, cache_interval, PrometheusDataType::All).await {
@@ -2880,7 +2895,7 @@ async fn get_prometheus_metrics(
                 res.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
                 res.write_body(metrics).ok();
             }
-            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
     }
     Ok(())
@@ -2902,7 +2917,7 @@ async fn get_prometheus_metrics_sum(
             res.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
             res.write_body(metrics).ok();
         }
-        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+        Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
     }
     Ok(())
 }
@@ -3391,4 +3406,95 @@ fn aggregate_history_data(nodes_data: &HashMap<NodeId, HistoryData>) -> (Vec<ser
 
     let data: Vec<serde_json::Value> = result.into_iter().map(|(_, v)| v).collect();
     (data, node_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use salvo::test::{ResponseExt, TestClient};
+    use tokio::sync::RwLock;
+
+    use crate::config::PluginConfig;
+
+    fn test_cfg() -> PluginConfig {
+        serde_json::from_value(json!({"http_bearer_token": null})).expect("PluginConfig defaults")
+    }
+
+    async fn test_service() -> Service {
+        let scx = ServerContext::new().node_id(1).busy_check_enable(false).build().await;
+        let cfg = Arc::new(RwLock::new(test_cfg()));
+        let router = route(scx, cfg, None, prome::Monitor::new(), None);
+        Service::new(router)
+    }
+
+    #[tokio::test]
+    async fn plugins_cluster_list_is_node_grouped_array() {
+        let svc = test_service().await;
+        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/plugins").send(&svc).await;
+        assert_eq!(resp.status_code, Some(StatusCode::OK));
+        assert_eq!(resp.headers().get("X-Row-Count").map(|v| v.as_bytes()), Some(&b"1"[..]));
+        assert_eq!(resp.headers().get("X-Truncated").map(|v| v.as_bytes()), Some(&b"false"[..]));
+        let body: serde_json::Value = resp.take_json().await.unwrap();
+        assert!(body.is_array(), "GET /plugins must remain a bare array");
+        assert_eq!(body[0]["node"], 1);
+        assert!(body[0]["plugins"].is_array());
+    }
+
+    #[tokio::test]
+    async fn node_plugin_missing_returns_json_404_not_null() {
+        let svc = test_service().await;
+        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/plugins/1/no-such-plugin").send(&svc).await;
+        assert_eq!(resp.status_code, Some(StatusCode::NOT_FOUND));
+        let body: serde_json::Value = resp.take_json().await.unwrap();
+        assert_eq!(body["code"], 404);
+        assert!(body["message"].as_str().unwrap().contains("plugin"));
+        assert!(body.get("name").is_none(), "error body is code+message only");
+    }
+
+    #[tokio::test]
+    async fn plugin_config_missing_returns_json_error() {
+        let svc = test_service().await;
+        let mut resp =
+            TestClient::get("http://127.0.0.1:0/api/v1/plugins/1/no-such-plugin/config").send(&svc).await;
+        assert_eq!(resp.status_code, Some(StatusCode::NOT_FOUND));
+        let body: serde_json::Value = resp.take_json().await.unwrap();
+        assert_eq!(body["code"], 404);
+        assert!(body["message"].is_string());
+    }
+
+    #[tokio::test]
+    async fn clients_list_keeps_bare_array_and_adds_headers() {
+        let svc = test_service().await;
+        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/clients?_limit=10").send(&svc).await;
+        assert_eq!(resp.status_code, Some(StatusCode::OK));
+        assert_eq!(resp.headers().get("X-Row-Count").map(|v| v.as_bytes()), Some(&b"0"[..]));
+        assert_eq!(resp.headers().get("X-Truncated").map(|v| v.as_bytes()), Some(&b"false"[..]));
+        let body: serde_json::Value = resp.take_json().await.unwrap();
+        assert_eq!(body, json!([]));
+    }
+
+    #[tokio::test]
+    async fn delete_retains_without_topic_is_json_400() {
+        let svc = test_service().await;
+        let mut resp = TestClient::delete("http://127.0.0.1:0/api/v1/retains").send(&svc).await;
+        assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+        let body: serde_json::Value = resp.take_json().await.unwrap();
+        assert_eq!(body["code"], 400);
+        assert!(body["message"].as_str().unwrap().contains("topic"));
+    }
+
+    #[tokio::test]
+    async fn bearer_required_returns_json_401() {
+        let scx = ServerContext::new().node_id(1).busy_check_enable(false).build().await;
+        let cfg = Arc::new(RwLock::new(test_cfg()));
+        let router = route(scx, cfg, Some("secret".into()), prome::Monitor::new(), None);
+        let svc = Service::new(router);
+        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/plugins").send(&svc).await;
+        assert_eq!(resp.status_code, Some(StatusCode::UNAUTHORIZED));
+        let body: serde_json::Value = resp.take_json().await.unwrap();
+        assert_eq!(body["code"], 401);
+        assert_eq!(body["message"], "unauthorized");
+    }
 }

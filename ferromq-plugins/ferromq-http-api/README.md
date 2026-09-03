@@ -105,6 +105,7 @@ All endpoints are prefixed with `/api/v1`.
 | GET | `/routes/{topic}` | Get routing information for a specific topic |
 | **Retained Messages** | | |
 | GET | `/retains` | Query retained messages with `topic_filter` / `offset` / `limit` params |
+| DELETE | `/retains?topic=` | Delete a retained message by exact topic |
 | **MQTT Operations** | | |
 | POST | `/mqtt/publish` | Publish an MQTT message |
 | POST | `/mqtt/subscribe` | Subscribe to an MQTT topic for a session |

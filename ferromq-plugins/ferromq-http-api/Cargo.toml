@@ -34,3 +34,7 @@ prometheus.workspace = true
 postcard.workspace = true
 rust-embed = "8"
 lru = "0.18"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+salvo = { version = "0.90", features = ["affix-state", "serve-static", "test"] }

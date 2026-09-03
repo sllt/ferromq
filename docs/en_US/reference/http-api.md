@@ -212,6 +212,16 @@ Query parameters:
 
 Returns `{ "items": [...], "has_more": bool }`. The payload is base64-encoded. On the full pagination path (`topic_filter=#`) items include `remaining_ttl` (seconds); on the filter path `remaining_ttl` is `null`. Requires the `ferromq-retainer` plugin.
 
+List endpoints also set `X-Row-Count` and `X-Truncated` response headers (see the full [HTTP API](../http-api.md) document). Failed calls return JSON `{ "code", "message" }`.
+
+### Delete Retained Message
+
+```
+DELETE /api/v1/retains?topic={topic}
+```
+
+`topic` must be a concrete topic (wildcards `#` / `+` are rejected). Success body is the plain string `ok`.
+
 ---
 
 ## 6. MQTT Operations

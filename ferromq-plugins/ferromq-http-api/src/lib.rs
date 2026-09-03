@@ -29,6 +29,7 @@ mod flusher;
 mod handler;
 mod plugin;
 mod prome;
+mod response;
 mod subs;
 mod types;
 

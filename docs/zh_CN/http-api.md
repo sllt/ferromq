@@ -122,6 +122,32 @@ FerroMQ 接口在调用成功时总是返回 200 OK，响应内容主要以 JSON
 | 404  | 找不到请求的路径或者请求的对象不存在                        |
 | 500  | 服务端处理请求时发生内部错误                            |
 
+API 失败时返回 **JSON**（不再使用纯文本 / HTML）：
+
+```json
+{"code": 404, "message": "plugin not found: ferromq-web-hook"}
+```
+
+| Field   | Type    | Description |
+|---------|---------|-------------|
+| `code`  | Integer | 与 HTTP 状态码相同 |
+| `message` | String | 错误说明 |
+
+成功的 `2xx` 响应体保持不变（包括已有的纯文本成功响应，如 `ok`）。
+
+## 列表分页元数据
+
+仪表盘使用的列表接口（`GET /clients`、`/clients/offlines`、`/subscriptions`、`/routes`、`/retains`、`/plugins`、`/plugins/{node}`）**不改变**原有 JSON 结构。
+
+- **默认响应体：** 裸 JSON 数组（`/retains` 除外，它已返回 `{ items, has_more }`）。
+- **`_limit` / `limit`：** 最多返回行数。省略或为 `0` 时使用插件配置 `max_row_limit`（默认 `10000`）。`/retains` 使用不带下划线的 `limit`。
+- **`_offset` / `offset`：** 可选跳过条数。`/retains` 已文档化 `offset`。
+- **响应头（非破坏性）：**
+  - `X-Row-Count`：本次返回的行数（`/retains` 为 `items` 长度）。
+  - `X-Truncated`：因 `_limit` / `max_row_limit` 截断时为 `true`（`/retains` 与 `has_more` 一致），否则为 `false`。
+
+忽略未知响应头的旧客户端可继续工作。
+
 ## API Endpoints
 
 ## /api/v1
@@ -755,6 +781,35 @@ $ curl -i -X GET "http://localhost:6060/api/v1/retains?topic_filter=%2Fiot%2Fb%2
 
 > 说明：`topic_filter=#`（全量）路径由存储层分页并附带 `remaining_ttl`（剩余秒数）；指定 `topic_filter` 的过滤路径在内存分页，`remaining_ttl` 为 `null`。查询需要启用 `ferromq-retainer` 插件。
 
+同时返回 `X-Row-Count`（`items` 长度）和 `X-Truncated`（与 `has_more` 一致）。
+
+### DELETE /api/v1/retains
+
+按**精确主题**删除一条保留消息。不允许使用通配符 `#` / `+`。删除遵循 MQTT 语义（空 payload 的 retain），并广播到集群其他节点。
+
+**Query String Parameters:**
+
+| Name  | Type   | Required | Description |
+|-------|--------|----------|-------------|
+| topic | String | True     | 具体主题名，例如 `/iot/b/x` |
+
+**Responses:**
+
+| Status | Body | Description |
+|--------|------|-------------|
+| 200 | `ok`（纯文本） | 删除成功 |
+| 400 | `{ "code": 400, "message": "..." }` | 缺少 `topic`，或主题包含通配符 |
+| 404 | `{ "code": 404, "message": "..." }` | 该主题没有保留消息 |
+| 503 | `{ "code": 503, "message": "..." }` | 保留消息存储未启用或不可用 |
+
+**Examples:**
+
+```bash
+$ curl -i -X DELETE "http://localhost:6060/api/v1/retains?topic=%2Fiot%2Fb%2Fx"
+
+ok
+```
+
 ## 消息发布
 
 ### POST /api/v1/mqtt/publish
@@ -877,7 +932,7 @@ true
 | [0].plugins.homepage  | String           | 插件主页                             |
 | [0].plugins.license   | String           | 插件许可证                            |
 | [0].plugins.repository| String           | 插件仓库                             |
-| [0].plugins.active    | Boolean          | 插件是否启动                           |
+| [0].plugins.active    | Boolean          | 插件是否已启动。**没有 `running` 字段**，请使用 `active`。 |
 | [0].plugins.inited    | Boolean          | 插件是否已经初始化                        |
 | [0].plugins.immutable | Boolean          | 插件是否不可变，不可变插件将不能被停止，不能修改配置，不能重启等 |
 | [0].plugins.attrs     | Json             | 插件其它附加属性                         |
@@ -956,6 +1011,8 @@ $ curl -i -X GET "http://localhost:6060/api/v1/plugins/1/ferromq-web-hook"
 
 {"active":false,"attrs":null,"descr":null,"immutable":false,"inited":false,"name":"ferromq-web-hook","version":null}
 ```
+
+插件不存在时返回 HTTP 404 和 `{"code":404,"message":"plugin not found: ..."}`（不再返回 JSON `null`）。
 
 ### GET /api/v1/plugins/{node}/{plugin}/config
 
