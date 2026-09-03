@@ -4933,7 +4933,7 @@ listener.tcp.external.addr = "0.0.0.0:1883"
             .await;
         assert_eq!(versions.status_code, Some(StatusCode::OK));
         let vers: serde_json::Value = versions.take_json().await.unwrap();
-        assert!(vers.as_array().unwrap().len() >= 1);
+        assert!(!vers.as_array().unwrap().is_empty());
         let ver = vers[0]["version"].as_str().unwrap().to_string();
 
         let mut rb = TestClient::post(format!(

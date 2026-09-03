@@ -168,6 +168,7 @@ pub(crate) async fn record(
 }
 
 /// Record without requiring a resolved identity (login failure, etc.).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_raw(
     req: &Request,
     depot: &Depot,

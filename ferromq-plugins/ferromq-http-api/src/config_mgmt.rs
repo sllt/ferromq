@@ -66,6 +66,7 @@ pub(crate) struct ConfigDiff {
 }
 
 impl ConfigDiff {
+    #[cfg(test)]
     fn is_empty(&self) -> bool {
         self.added.is_empty() && self.removed.is_empty() && self.changed.is_empty()
     }
@@ -372,7 +373,7 @@ fn prune_history(hist: &Path, keep: usize) -> Result<()> {
     if vers.len() <= keep {
         return Ok(());
     }
-    vers.sort_by(|a, b| b.version.cmp(&a.version));
+    vers.sort_by_key(|a| std::cmp::Reverse(a.version.clone()));
     for extra in vers.into_iter().skip(keep) {
         let p = hist.join(format!("{}.toml", extra.version));
         let _ = fs::remove_file(p);
@@ -399,7 +400,7 @@ fn list_history(hist: &Path) -> Result<Vec<VersionInfo>> {
             }
         }
     }
-    out.sort_by(|a, b| b.version.cmp(&a.version));
+    out.sort_by_key(|a| std::cmp::Reverse(a.version.clone()));
     Ok(out)
 }
 
@@ -692,10 +693,8 @@ fn validate_broker_section(section: &str, value: &Value) -> Result<()> {
                 }
             }
         }
-        "listener" => {
-            if !value.is_object() {
-                return Err(anyhow!("listener must be a table / object"));
-            }
+        "listener" if !value.is_object() => {
+            return Err(anyhow!("listener must be a table / object"));
         }
         _ => {}
     }

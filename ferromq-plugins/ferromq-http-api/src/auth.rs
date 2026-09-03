@@ -244,7 +244,7 @@ impl AuthState {
 
     async fn list_users(&self) -> Vec<DashboardUser> {
         let mut users: Vec<_> = self.users.read().await.values().cloned().collect();
-        users.sort_by(|a, b| a.username.cmp(&b.username));
+        users.sort_by_key(|a| a.username.clone());
         users
     }
 
@@ -328,7 +328,7 @@ impl AuthState {
 
     async fn list_api_keys(&self) -> Vec<ApiKeyRecord> {
         let mut keys: Vec<_> = self.api_keys.read().await.values().cloned().collect();
-        keys.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        keys.sort_by_key(|a| std::cmp::Reverse(a.created_at));
         keys
     }
 
