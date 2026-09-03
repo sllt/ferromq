@@ -1,0 +1,10 @@
+/.catch/*
+/.idea/*
+/Cargo.lock
+/*.iml
+
+/target
+/.cargo
+/.workbuddy/memory
+/overview.md
+/.workbuddy

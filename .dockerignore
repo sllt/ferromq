@@ -1,0 +1,7 @@
+.git
+.github
+**/*.rs.bk
+
+target/
+!target/aarch64-unknown-linux-musl/release/ferromqd
+!target/x86_64-unknown-linux-musl/release/ferromqd

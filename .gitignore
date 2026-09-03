@@ -1,0 +1,33 @@
+target/
+.idea/
+.*
+*/.idea/
+*/Cargo.lock
+*/target/
+*/*.iml
+*/*/.idea/
+*/*/target/
+*/*/Cargo.lock
+*/*/*.iml
+/readme.txt
+/publishs-dry-run.bat
+/publishs-login.bat
+
+# Exclusions:
+!.dockerignore
+!.gitignore
+!.github
+!ferromq-storage/.gitignore
+!ferromq-raft/.gitignore
+!ferromq-raft/raft-rs/.gitignore
+/CODEBUDDY.md
+/code-review-report
+/docs/architecture
+/overview.md
+/DMyWorkspaceMyProjectsrustworkspacermqtt-rsrmqtt.workbuddymemory2026-06-22.md
+/designs
+/git-commit-message.md
+/*.log
+
+# Test runtime data (sled) — never commit
+.sled/

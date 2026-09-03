@@ -1,0 +1,36 @@
+[package]
+name = "ferromq-http-api"
+version.workspace = true
+description = "This plugin provides HTTP APIs for integration with external systems, enabling operations like querying client information and publishing messages."
+repository.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["ferromq-storage"]
+redb = ["ferromq-storage/redb", "circuit-breaker"]
+sled = ["ferromq-storage/sled", "circuit-breaker"]
+redis = ["ferromq-storage/redis", "circuit-breaker"]
+redis-cluster = ["redis", "ferromq-storage/redis-cluster"]
+circuit-breaker = ["ferromq-storage/circuit-breaker"]
+
+[dependencies]
+ferromq = { workspace = true, features = ["plugin", "metrics", "stats", "grpc", "shared-subscription", "retain", "msgstore", "delayed", "auto-subscription"] }
+tokio = { workspace = true, features = ["sync", "time" ] }
+serde = { workspace = true, features = ["derive"] }
+salvo = { version = "0.90", features = ["affix-state", "serve-static"] }
+ferromq-storage = { workspace = true, default-features = false, features = ["ttl"], optional = true}
+async-trait.workspace = true
+log.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+bytes.workspace = true
+futures.workspace = true
+socket2.workspace = true
+prometheus.workspace = true
+postcard.workspace = true
+rust-embed = "8"
+lru = "0.18"

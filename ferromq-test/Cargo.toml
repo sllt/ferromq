@@ -1,0 +1,40 @@
+[package]
+name = "ferromq-test"
+publish = false
+version = "0.1.0"
+description = "Industrial-grade test harness and chaos engine for FerroMQ broker"
+repository.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+exclude.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ferromq_harness"
+path = "src/main.rs"
+
+[dependencies]
+ferromq-codec.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true, features = ["codec"] }
+bytes = { workspace = true, features = ["serde"] }
+bytestring = { workspace = true, features = ["serde"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+chrono = { workspace = true, features = ["clock"] }
+rand = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+clap = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+# TLS / WebSocket transports (G27)
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+# socket options for raw-socket tests (G32 RST)
+socket2 = { workspace = true }

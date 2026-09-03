@@ -1,0 +1,27 @@
+[package]
+name = "ferromq-macros"
+version = "0.1.2"
+description = "Procedural Macro Utilities"
+repository.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+exclude.workspace = true
+rust-version.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+metrics = []
+plugin = []
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = "2.0"

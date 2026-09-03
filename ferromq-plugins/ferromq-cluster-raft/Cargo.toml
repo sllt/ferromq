@@ -1,0 +1,40 @@
+[package]
+name = "ferromq-cluster-raft"
+version.workspace = true
+description = "The FerroMQ cluster, powered by the `ferromq-cluster-raft` plugin, uses RAFT for consistency and fault tolerance. Nodes share state to ensure reliable messaging and support scalable, resilient deployments."
+repository.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ferromq = { workspace = true, features = ["plugin", "grpc", "stats", "msgstore", "retain", "shared-subscription"] }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["sync"] }
+ferromq-raft = { workspace = true, features = ["reuse"] }
+#ferromq-raft = { path = "../../../ferromq-raft", features = ["reuse"] }
+backoff = { workspace = true, features = ["futures", "tokio"] }
+rust-box = { workspace = true, features = ["task-exec-queue"] }
+serde_json.workspace = true
+log.workspace = true
+async-trait.workspace = true
+anyhow.workspace = true
+bytes.workspace = true
+bytestring.workspace = true
+futures.workspace = true
+rand.workspace = true
+dashmap.workspace = true
+ahash.workspace = true
+postcard.workspace = true
+rayon.workspace = true
+
+slog = "2.7"
+slog-term = "2.9"
+slog-stdlog = "4.1"
+
+lz4_flex = { version = "0.11" }
+lz4 = "1.27.0"
+zstd = "0.13"
+flate2 = { version = "1.0.30" }
+snap = { version = "1.1.1" }

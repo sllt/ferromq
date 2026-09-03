@@ -1,0 +1,676 @@
+//! Shared types for the HTTP API plugin.
+//!
+//! Defines gRPC [`Message`] / [`MessageReply`] enums, API parameter structs
+//! ([`ClientSearchParams`], [`PublishParams`], [`SubscribeParams`],
+//! [`UnsubscribeParams`]), result types ([`ClientSearchResult`]), and
+//! [`PrometheusDataType`].
+
+use std::time::Duration;
+
+use anyhow::anyhow;
+use base64::prelude::{Engine, BASE64_STANDARD};
+use serde::{de, ser, Deserialize, Serialize};
+
+use ferromq::types::NodeHealthStatus;
+use ferromq::{
+    codec::v5::PublishProperties,
+    metrics::Metrics,
+    node::{BrokerInfo, NodeInfo, NodeStatus},
+    plugin::PluginInfo,
+    stats::Stats,
+    types::{
+        ClientId, From, HashMap, MsgID, NodeId, Publish, QoS, Retain, Timestamp, TopicFilter, TopicName,
+        UserName,
+    },
+    utils::{deserialize_datetime_option, format_timestamp, serialize_datetime_option},
+    Result,
+};
+
+/// gRPC messages for the HTTP API plugin.
+///
+/// Each variant corresponds to a request type that can be forwarded to
+/// remote nodes.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum Message<'a> {
+    BrokerInfo,
+    NodeInfo,
+    NodeHealthStatus,
+    StatsInfo,
+    MetricsInfo,
+    ClientSearch(Box<ClientSearchParams>),
+    ClientGet {
+        clientid: &'a str,
+    },
+    Subscribe(SubscribeParams),
+    Unsubscribe(UnsubscribeParams),
+    GetPlugins,
+    GetPlugin {
+        name: &'a str,
+    },
+    GetPluginConfig {
+        name: &'a str,
+    },
+    ReloadPluginConfig {
+        name: &'a str,
+    },
+    LoadPlugin {
+        name: &'a str,
+    },
+    UnloadPlugin {
+        name: &'a str,
+    },
+    // ── History query messages ─────────────────────────────────────────
+    /// Query another node's Stats history
+    StatsHistoryQuery(HistoryQuery),
+    /// Query another node's Metrics history
+    MetricsHistoryQuery(HistoryQuery),
+    // ── Feature support query ──────────────────────────────────────────
+    /// Query another node's supported features
+    Features,
+}
+
+impl Message<'_> {
+    /// Encodes this message into a byte vector using postcard.
+    /// Encodes this message into a byte vector using postcard.
+    #[inline]
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        postcard::to_stdvec(self).map_err(anyhow::Error::new)
+    }
+    /// Decodes this message from a byte slice.
+    #[inline]
+    pub fn decode(data: &[u8]) -> Result<Message<'_>> {
+        postcard::from_bytes::<Message>(data).map_err(anyhow::Error::new)
+    }
+}
+
+/// gRPC reply messages for the HTTP API plugin.
+#[derive(Serialize, Deserialize, Debug)]
+pub enum MessageReply {
+    BrokerInfo(BrokerInfo),
+    NodeInfo(NodeInfo),
+    NodeHealthStatus(NodeHealthStatus),
+    StatsInfo(NodeStatus, Box<Stats>),
+    MetricsInfo(Box<Metrics>),
+    ClientSearch(Vec<ClientSearchResult>),
+    ClientGet(Option<ClientSearchResult>),
+    Subscribe(HashMap<TopicFilter, (bool, Option<String>)>),
+    Unsubscribe,
+    GetPlugins(Vec<PluginInfo>),
+    GetPlugin(Option<PluginInfo>),
+    GetPluginConfig(Vec<u8>),
+    ReloadPluginConfig,
+    LoadPlugin,
+    UnloadPlugin(bool),
+    // ── History query replies ──────────────────────────────────────────
+    /// Stats history data from a node.
+    ///
+    /// The [`HistoryData`] is transported as its **JSON string** because
+    /// postcard cannot deserialize `serde_json::Value` (it requires
+    /// `deserialize_any`, which postcard explicitly does not implement).
+    StatsHistoryReply(String),
+    /// Metrics history data from a node (same JSON-string transport).
+    MetricsHistoryReply(String),
+    // ── Feature support reply ──────────────────────────────────────────
+    /// Feature support state of a node.
+    Features(FeaturesInfo),
+}
+
+impl MessageReply {
+    /// Encodes this reply into a byte vector using postcard.
+    /// Encodes this reply into a byte vector using postcard.
+    #[inline]
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        postcard::to_stdvec(self).map_err(anyhow::Error::new)
+    }
+    /// Decodes this reply from a byte slice.
+    #[inline]
+    pub fn decode(data: &[u8]) -> Result<MessageReply> {
+        postcard::from_bytes::<MessageReply>(data).map_err(anyhow::Error::new)
+    }
+}
+
+/// Search/filter parameters for listing clients via the HTTP API.
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+pub struct ClientSearchParams {
+    #[serde(default)]
+    pub _limit: usize,
+    pub clientid: Option<String>,
+    pub username: Option<String>,
+    pub ip_address: Option<String>,
+    pub connected: Option<bool>,
+    pub clean_start: Option<bool>,
+    pub session_present: Option<bool>,
+    pub proto_ver: Option<u8>,
+    pub _like_clientid: Option<String>,
+    //Substring fuzzy search
+    pub _like_username: Option<String>,
+    //Substring fuzzy search
+    #[serde(
+        default,
+        deserialize_with = "deserialize_datetime_option",
+        serialize_with = "serialize_datetime_option"
+    )]
+    pub _gte_created_at: Option<Duration>,
+    //Greater than or equal search
+    #[serde(
+        default,
+        deserialize_with = "deserialize_datetime_option",
+        serialize_with = "serialize_datetime_option"
+    )]
+    pub _lte_created_at: Option<Duration>,
+    //Less than or equal search
+    #[serde(
+        default,
+        deserialize_with = "deserialize_datetime_option",
+        serialize_with = "serialize_datetime_option"
+    )]
+    pub _gte_connected_at: Option<Duration>,
+    //Greater than or equal search
+    #[serde(
+        default,
+        deserialize_with = "deserialize_datetime_option",
+        serialize_with = "serialize_datetime_option"
+    )]
+    pub _lte_connected_at: Option<Duration>,
+    //Less than or equal search
+    pub _gte_mqueue_len: Option<usize>,
+    //Current length of message queue, Greater than or equal search
+    pub _lte_mqueue_len: Option<usize>, //Current length of message queue, Less than or equal search
+}
+
+/// A single client's information returned by the search API.
+#[derive(Deserialize, Serialize, Debug, Default)]
+pub struct ClientSearchResult {
+    pub node_id: NodeId,
+    pub clientid: ClientId,
+    pub username: UserName,
+    pub superuser: bool,
+    pub proto_ver: u8,
+    pub ip_address: Option<String>,
+    pub port: Option<u16>,
+    pub connected: bool,
+    pub connected_at: Timestamp,
+    pub disconnected_at: Timestamp,
+    pub disconnected_reason: String,
+    pub keepalive: u16,
+    pub clean_start: bool,
+    pub session_present: bool,
+    pub expiry_interval: i64,
+    pub created_at: Timestamp,
+    pub subscriptions_cnt: usize,
+    pub max_subscriptions: usize,
+    // pub extra_attrs: usize,
+    #[serde(
+        default,
+        serialize_with = "ClientSearchResult::serialize_last_will",
+        deserialize_with = "ClientSearchResult::deserialize_last_will"
+    )]
+    pub last_will: serde_json::Value,
+
+    pub inflight: usize,
+    pub max_inflight: u16,
+    //    pub inflight_dropped: usize,
+    pub mqueue_len: usize,
+    pub max_mqueue: usize,
+    //     pub mqueue_dropped: usize,
+
+    //    pub awaiting_rel:0,
+    //    pub max_awaiting_rel:s.listen_cfg.max_awaiting_rel,
+    //    pub awaiting_rel_dropped:0,
+
+    //     pub recv_msg:0,	//Number of received PUBLISH packets
+    //     pub send_msg:0,	//Number of sent PUBLISH packets
+    //     pub resend_msg:0, //Resent message data
+    //     pub ackeds:0,  //Number of Acked received
+}
+
+impl ClientSearchResult {
+    /// Serializes the last will as a JSON byte vector.
+    #[inline]
+    fn serialize_last_will<S>(last_will: &serde_json::Value, s: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: ser::Serializer,
+    {
+        serde_json::to_vec(last_will).map_err(ser::Error::custom)?.serialize(s)
+    }
+
+    /// Deserializes the last will from a JSON byte vector.
+    #[inline]
+    pub fn deserialize_last_will<'de, D>(d: D) -> std::result::Result<serde_json::Value, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        serde_json::from_slice(&Vec::deserialize(d)?).map_err(de::Error::custom)
+    }
+
+    /// Converts this search result to a JSON value for API responses.
+    #[inline]
+    pub fn to_json(&self) -> serde_json::Value {
+        let data = serde_json::json!({
+            "node_id": self.node_id,
+            "clientid": self.clientid,
+            "username": self.username,
+            "superuser": self.superuser,
+            "proto_ver": self.proto_ver,
+            "ip_address": self.ip_address,
+            "port": self.port,
+            "connected": self.connected,
+            "connected_at": format_timestamp(self.connected_at),
+            "disconnected_at": format_timestamp(self.disconnected_at),
+            "disconnected_reason": self.disconnected_reason,
+            "keepalive": self.keepalive,
+            "clean_start": self.clean_start,
+            "session_present": self.session_present,
+            "expiry_interval": self.expiry_interval,
+            "created_at": format_timestamp(self.created_at),
+            "subscriptions_cnt": self.subscriptions_cnt,
+            "max_subscriptions": self.max_subscriptions,
+            // "extra_attrs": self.extra_attrs,
+            "last_will": self.last_will,
+
+            "inflight": self.inflight,
+            "max_inflight": self.max_inflight,
+            //"inflight_dropped": 0,
+
+            "mqueue_len": self.mqueue_len,
+            "max_mqueue": self.max_mqueue,
+            // "mqueue_dropped": 0,
+
+            //"awaiting_rel": 0,
+            //"max_awaiting_rel": s.listen_cfg.max_awaiting_rel,
+            //"awaiting_rel_dropped": 0,
+
+            // "recv_msg": 0,	//Number of received PUBLISH packets
+            // "send_msg": 0,	//Number of sent PUBLISH packets
+            // "resend_msg": 0, //Resent message data
+            // "ackeds": 0,  //Number of Acked received
+
+        });
+        data
+    }
+}
+
+/// Parameters for publishing an MQTT message via the HTTP API.
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+pub struct PublishParams {
+    //For topic and topics, with at least one of them specified
+    pub topic: Option<TopicName>,
+    //Multiple topics separated by ,. This field is used to publish messages to multiple topics at the same time
+    pub topics: Option<TopicName>,
+    //Client identifier. Default:　system
+    #[serde(default = "PublishParams::clientid_default")]
+    pub clientid: ClientId,
+    //Message body
+    pub payload: String,
+    //The encoding used in the message body. Currently only plain and base64 are supported. Default:　plain
+    #[serde(default = "PublishParams::encoding_default")]
+    pub encoding: String,
+    //QoS level, Default: 0
+    #[serde(default = "PublishParams::qos_default")]
+    pub qos: u8,
+    //Whether it is a retained message, Default: false
+    #[serde(default = "PublishParams::retain_default")]
+    pub retain: bool,
+    //Publish Properties
+    pub properties: Option<PublishProperties>,
+}
+
+impl PublishParams {
+    fn clientid_default() -> ClientId {
+        "system".into()
+    }
+
+    fn encoding_default() -> String {
+        "plain".into()
+    }
+
+    fn qos_default() -> u8 {
+        0
+    }
+
+    fn retain_default() -> bool {
+        false
+    }
+}
+
+/// Parameters for subscribing to MQTT topics via the HTTP API.
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+pub struct SubscribeParams {
+    //For topic and topics, with at least one of them specified
+    pub topic: Option<TopicFilter>,
+    //Multiple topics separated by,. This field is used to subscribe to multiple topics at the same time
+    pub topics: Option<TopicFilter>,
+    //Client identifier, Required
+    pub clientid: ClientId,
+    //QoS level, Default: 0
+    #[serde(default = "SubscribeParams::qos_default")]
+    pub qos: u8,
+}
+
+impl SubscribeParams {
+    fn qos_default() -> u8 {
+        0
+    }
+
+    /// Returns the list of topic filters from the `topic` and/or `topics`
+    /// fields.
+    /// Returns the list of topic filters from the `topic` and/or `topics`
+    /// fields.
+    #[inline]
+    pub fn topics(&self) -> Result<Vec<TopicFilter>> {
+        let mut topics = if let Some(topics) = &self.topics {
+            topics.split(',').collect::<Vec<_>>().iter().map(|t| TopicName::from(t.trim())).collect()
+        } else {
+            Vec::new()
+        };
+        if let Some(topic) = &self.topic {
+            topics.push(topic.clone());
+        }
+        if topics.is_empty() {
+            return Err(anyhow!("topics or topic is empty"));
+        }
+        Ok(topics)
+    }
+
+    /// Returns the QoS level parsed from the raw u8 value.
+    #[inline]
+    pub fn qos(&self) -> Result<QoS> {
+        QoS::try_from(self.qos).map_err(|e| anyhow!(e))
+    }
+}
+
+/// Parameters for unsubscribing from an MQTT topic via the HTTP API.
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+pub struct UnsubscribeParams {
+    pub topic: TopicFilter,
+    pub clientid: ClientId,
+}
+
+/// Feature support state of a single node.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct FeaturesInfo {
+    pub node_id: NodeId,
+    pub node_name: String,
+    pub features: Features,
+}
+
+/// Runtime capability flags of a broker node.
+///
+/// A feature is `true` when the backing implementation is loaded and
+/// enabled at runtime (e.g. the corresponding plugin is started).
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Features {
+    /// Retained messages (`ferromq-retainer` plugin).
+    pub retain: bool,
+    /// Persistent message storage (`ferromq-message-storage` plugin).
+    pub message_storage: bool,
+    /// Persistent session storage (`ferromq-session-storage` plugin).
+    pub session_storage: bool,
+    /// Delayed message publishing (`$delayed/...` topics).
+    pub delayed: bool,
+    /// Shared subscriptions `$share` (`ferromq-shared-subscription` plugin).
+    pub shared_subscription: bool,
+    /// Automatic subscriptions (`ferromq-auto-subscription` plugin).
+    pub auto_subscription: bool,
+}
+
+/// Aggregated feature support state across all cluster nodes.
+///
+/// `consistent` is `false` when at least one feature field differs between
+/// nodes; the differing fields are reported in `conflicts` so operators can
+/// locate mis-configured / partially-failed nodes.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct FeaturesSummary {
+    /// Whether all successfully-reached nodes report identical feature flags.
+    pub consistent: bool,
+    /// Number of nodes that successfully reported their features.
+    pub node_count: usize,
+    /// Feature fields whose values differ across nodes (empty when `consistent`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<FeatureConflict>,
+    /// Per-node feature details. Unreachable nodes are represented as an
+    /// error string and do not participate in the consistency check.
+    pub nodes: Vec<FeaturesInfoOrError>,
+}
+
+/// A feature field whose reported value differs across cluster nodes.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FeatureConflict {
+    pub feature: String,
+    /// Nodes grouped by their reported value of this feature field.
+    pub values: Vec<FeatureValueGroup>,
+}
+
+/// Nodes that reported the same value for a conflicting feature field.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FeatureValueGroup {
+    pub value: bool,
+    pub node_ids: Vec<NodeId>,
+}
+
+/// Per-node entry of the features summary: either the feature state of a
+/// reachable node, or an error string for an unreachable one.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(untagged)]
+pub enum FeaturesInfoOrError {
+    Info(FeaturesInfo),
+    Error(String),
+}
+
+/// Query parameters for listing retained messages.
+///
+/// - When `topic_filter` is empty or `#`, the storage backend's paginated
+///   snapshot is used directly (`RetainStorage::get_all_paginated`), which
+///   includes the remaining TTL of each message.
+/// - Otherwise all messages matching the filter are fetched via
+///   `RetainStorage::get` and paginated in memory (no TTL information).
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+pub struct RetainQueryParams {
+    /// Topic filter, supports `#` / `+` wildcards. Default: `#` (all messages).
+    #[serde(default = "RetainQueryParams::topic_filter_default")]
+    pub topic_filter: TopicFilter,
+    /// Pagination offset. Default: 0.
+    #[serde(default)]
+    pub offset: usize,
+    /// Page size. `0` or values above `max_row_limit` are capped by the caller.
+    #[serde(default)]
+    pub limit: usize,
+}
+
+impl RetainQueryParams {
+    fn topic_filter_default() -> TopicFilter {
+        "#".into()
+    }
+}
+
+/// A single retained message entry returned by the HTTP API.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RetainInfo {
+    pub topic: TopicName,
+    pub msg_id: Option<MsgID>,
+    pub from: From,
+    pub publish: RetainPublishInfo,
+    /// Remaining time-to-live in seconds. `null` when the storage backend
+    /// does not expose TTL information (the topic-filtered `get()` path).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining_ttl: Option<u64>,
+    /// Client ID of the publisher, extracted from `from.id.client_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+}
+
+impl RetainInfo {
+    /// Build an entry from a `(TopicName, Retain)` pair (no TTL info).
+    #[inline]
+    pub fn from_get(topic: TopicName, retain: Retain) -> Self {
+        Self {
+            topic,
+            msg_id: retain.msg_id,
+            from: retain.from.clone(),
+            publish: RetainPublishInfo::from_publish(retain.publish),
+            remaining_ttl: None,
+            client_id: publisher_client_id(&retain.from),
+        }
+    }
+
+    /// Build an entry from a `(TopicName, Retain, Option<Duration>)` triple.
+    #[inline]
+    pub fn from_paginated(topic: TopicName, retain: Retain, remaining: Option<Duration>) -> Self {
+        Self {
+            topic,
+            msg_id: retain.msg_id,
+            from: retain.from.clone(),
+            publish: RetainPublishInfo::from_publish(retain.publish),
+            remaining_ttl: remaining.map(|d| d.as_secs()),
+            client_id: publisher_client_id(&retain.from),
+        }
+    }
+}
+
+/// Extract the publisher client ID from a `From` (empty -> `None`).
+#[inline]
+fn publisher_client_id(from: &From) -> Option<String> {
+    let client_id = from.id.client_id.to_string();
+    if client_id.is_empty() {
+        None
+    } else {
+        Some(client_id)
+    }
+}
+
+/// Serialized form of a retained publish packet for the HTTP API response.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RetainPublishInfo {
+    pub topic: TopicName,
+    pub qos: u8,
+    pub retain: bool,
+    pub dup: bool,
+    /// Message payload encoded as base64.
+    pub payload: String,
+    pub create_time: Option<i64>,
+    pub properties: Option<PublishProperties>,
+}
+
+impl RetainPublishInfo {
+    #[inline]
+    fn from_publish(p: Publish) -> Self {
+        let inner = p.inner;
+        Self {
+            topic: inner.topic,
+            qos: inner.qos as u8,
+            retain: inner.retain,
+            dup: inner.dup,
+            payload: BASE64_STANDARD.encode(inner.payload.as_ref()),
+            create_time: p.create_time,
+            properties: inner.properties,
+        }
+    }
+}
+
+/// Specifies which nodes' Prometheus data to include.
+///
+/// - `All`: data from every node.
+/// - `Sum`: aggregated sum across all nodes.
+/// - `Node(id)`: data from a specific node.
+#[derive(Deserialize, Serialize, Debug, Copy, Clone, Hash, Eq, PartialEq)]
+pub enum PrometheusDataType {
+    All,
+    Node(NodeId),
+    Sum,
+}
+
+/// Query parameters for fetching history data from a remote node via gRPC.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct HistoryQuery {
+    /// Start timestamp (milliseconds, inclusive)
+    pub start_ts: u64,
+    /// End timestamp (milliseconds, inclusive)
+    pub end_ts: u64,
+    /// Maximum number of data points to return
+    pub limit: usize,
+    /// Merge window in seconds — returns data merged at this granularity.
+    /// When `None`, uses the node's `flush_interval`.
+    pub merge_window: Option<u64>,
+}
+
+/// History data returned by a node for a history query.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct HistoryData {
+    /// Node that produced this data
+    pub node: NodeId,
+    /// Start of the query window
+    pub from: u64,
+    /// End of the query window
+    pub to: u64,
+    /// Number of data points returned
+    pub count: usize,
+    /// JSON data points, each is a flattened Stats/Metrics snapshot
+    /// with a "ts" field for the timestamp.
+    pub data: Vec<serde_json::Value>,
+}
+
+// #[inline]
+// fn format_timestamp(t: i64) -> String {
+//     if t <= 0 {
+//         "".into()
+//     } else {
+//         use chrono::TimeZone;
+//         if let LocalResult::Single(t) = chrono::Local.timestamp_opt(t, 0) {
+//             t.format("%Y-%m-%d %H:%M:%S").to_string()
+//         } else {
+//             "".into()
+//         }
+//     }
+// }
+
+// ════════════════════════════════════════════════════════════════════════
+//  LRU Cache types for history optimisation
+// ════════════════════════════════════════════════════════════════════════
+
+/// Bit flags for cache entry persistence state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EntryFlags(u8);
+
+impl EntryFlags {
+    pub const NONE: u8 = 0b00;
+    pub const PENDING: u8 = 0b01;
+    pub const FAILED: u8 = 0b10;
+
+    #[inline]
+    pub const fn new(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    pub fn is_pending(self) -> bool {
+        self.0 & Self::PENDING != 0
+    }
+    #[inline]
+    #[allow(dead_code)]
+    pub fn is_failed(self) -> bool {
+        self.0 & Self::FAILED != 0
+    }
+
+    /// Returns `true` if the entry needs recovery attention (has FAILED bit set).
+    #[inline]
+    pub fn needs_recovery(self) -> bool {
+        self.0 & Self::FAILED != 0
+    }
+}
+
+/// A single history data point in the LRU cache.
+#[derive(Clone, Debug)]
+pub(crate) struct CacheEntry {
+    /// JSON-serialised Stats or Metrics snapshot.
+    pub json: String,
+    /// Persistence state flags.
+    pub flags: EntryFlags,
+}
+
+impl CacheEntry {
+    #[inline]
+    pub fn new(json: String) -> Self {
+        Self { json, flags: EntryFlags::new(EntryFlags::PENDING) }
+    }
+}

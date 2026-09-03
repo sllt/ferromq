@@ -1,0 +1,25 @@
+[package]
+name = "ferromq-cluster-broadcast"
+version.workspace = true
+description = "A cluster broadcast plugin for FerroMQ that enables lightweight, dependency-free communication between nodes."
+repository.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ferromq = { workspace = true, features = ["plugin", "grpc", "stats", "msgstore", "retain", "shared-subscription"] }
+tokio = { workspace = true, features = ["sync"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+log.workspace = true
+async-trait.workspace = true
+anyhow.workspace = true
+bytes.workspace = true
+bytestring.workspace = true
+futures.workspace = true
+rust-box = { workspace = true, features = ["task-exec-queue"] }
+ahash.workspace = true
+itertools.workspace = true
+postcard.workspace = true

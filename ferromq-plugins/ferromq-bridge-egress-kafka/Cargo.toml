@@ -1,0 +1,24 @@
+[package]
+name = "ferromq-bridge-egress-kafka"
+version.workspace = true
+description = "Bridge remote KAFKA in egress mode."
+repository.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ferromq = { workspace = true, features = ["plugin"] }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["sync", "rt"] }
+serde_json.workspace = true
+log.workspace = true
+async-trait.workspace = true
+anyhow.workspace = true
+bytestring.workspace = true
+itoa.workspace = true
+rand.workspace = true
+rust-box = { workspace = true, features = ["task-exec-queue"] }
+rdkafka = { version = "0.38", features = ["cmake-build"] }
+rdkafka-sys = "=4.9.0"

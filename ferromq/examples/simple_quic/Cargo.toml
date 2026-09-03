@@ -1,0 +1,11 @@
+[package]
+name = "simple_quic"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+ferromq = { workspace = true, features = ["quic", "tls"] }
+tokio = { version = "1", features = ["full"] }
+simple_logger = { workspace = true }
+log = "0.4"
+

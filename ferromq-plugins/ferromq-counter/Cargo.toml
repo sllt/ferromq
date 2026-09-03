@@ -1,0 +1,16 @@
+[package]
+name = "ferromq-counter"
+version.workspace = true
+description = "This plugin collects key MQTT server metrics, enhancing observability and operational insight."
+repository.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ferromq = { workspace = true, features = ["plugin", "metrics"] }
+async-trait.workspace = true
+log.workspace = true

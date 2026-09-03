@@ -1,0 +1,342 @@
+[**English**](testing.md) | [简体中文](../../zh_CN/development/testing.md)
+
+# FerroMQ Testing Guide
+
+This document describes the FerroMQ testing strategy, test layers, and how to run and extend the test suite.
+
+---
+
+## Test Layers
+
+FerroMQ has three testing layers:
+
+```mermaid
+graph TD
+    subgraph L1["Layer 1: Unit Tests"]
+        UT1["ferromq-codec tests v3/v5 encode decode"]
+        UT2["ferromq-net tests builder stream"]
+        UT3["ferromq-utils tests Bytesize NodeAddr parse"]
+        UT4["Other crate tests cfg test modules"]
+    end
+
+    subgraph L2["Layer 2: Integration Tests"]
+        IT1["ferromq_harness 5 suite types"]
+        IT2["functional v3 311 v5 Protocol compliance"]
+        IT3["stress Load performance"]
+        IT4["chaos Fault injection"]
+    end
+
+    subgraph L3["Layer 3: Interoperability"]
+        IP1["paho.mqtt.testing V3.1.1 11 tests"]
+        IP2["paho.mqtt.testing V5.0 24 tests"]
+    end
+
+    UT1 --> IT1
+    UT2 --> IT1
+    UT3 --> IT1
+    IT1 --> IP1
+    IT1 --> IP2
+```
+
+---
+
+## Layer 1: Unit Tests
+
+Each crate contains standard `#[cfg(test)]` modules alongside the production code.
+
+### Running Unit Tests
+
+```bash
+# All unit tests
+cargo test
+
+# Tests for a specific crate
+cargo test -p ferromq-codec
+
+# Tests matching a name pattern
+cargo test -p ferromq-codec -- qos
+
+# Run without parallel execution (helpful for debugging)
+cargo test -- --test-threads=1
+
+# Show output of passing tests
+cargo test -- --nocapture
+```
+
+### Where to Find Unit Tests
+
+| Crate | Test Focus | Key Test Files |
+|-------|-----------|----------------|
+| `ferromq-codec` | MQTT encode/decode round-trips, version detection, QoS flows | `src/v3/packet.rs`, `src/v5/packet.rs`, `tests/` |
+| `ferromq-net` | Builder defaults, listener binding, protocol upgrade guards | `src/builder.rs` |
+| `ferromq-conf` | CLI argument parsing, default values | `src/options.rs` |
+| `ferromq-utils` | Bytesize parsing, duration parsing, NodeAddr, Counter | `src/lib.rs`, `src/counter.rs` |
+| `ferromq` | Session management, inflight tracking, subscription trie | Various modules |
+| `ferromq-macros` | Macro expansion correctness | `src/metrics.rs`, `src/plugin.rs` |
+
+---
+
+## Layer 2: Integration Test Harness
+
+The `ferromq-test` crate provides a comprehensive test harness named `ferromq_harness`. It is a standalone binary that starts an FerroMQ broker, runs test suites against it, and outputs structured reports.
+
+### Building the Test Harness
+
+```bash
+# Build release binary (required — the harness runs ferromqd)
+cargo build --release
+
+# Build the test harness
+cargo build -p ferromq-test --release
+```
+
+### Running Test Suites
+
+```bash
+# Run all test suites (auto-starts broker)
+./target/release/ferromq_harness --workspace .
+
+# Run specific suites (--suites supports prefix matching, see below)
+./target/release/ferromq_harness --workspace . --suites functional_v5
+./target/release/ferromq_harness --workspace . --suites stress --suites chaos
+
+# Connect to an already-running broker
+./target/release/ferromq_harness --no-broker
+
+# Generate reports
+./target/release/ferromq_harness --workspace . --json report.json --html report.html
+```
+
+> **Broker config**: the harness uses the self-contained
+> `ferromq-test/configs/default/ferromq.toml` by default (independent from the
+> repository-root `ferromq.toml` / `ferromq-plugins/*.toml`; all TCP/TLS/WS/WSS/QUIC
+> listeners kept enabled). Test cases that need a different broker config
+> declare it via `TestCase::broker_config()`; at build time they are split into
+> `{suite}@{config}` sub-suites (e.g. `functional_v5@retain-disabled`), and the
+> scheduler restarts the broker to switch configs **only at suite boundaries**.
+> An explicit config can be given:
+>
+> ```bash
+> ./target/release/ferromq_harness --workspace . --config ferromq-test/configs/retain-disabled/ferromq.toml
+> ./target/release/ferromq_harness --workspace . --suites functional_v5@retain-disabled
+> ```
+
+### Test Suite Reference
+
+| Suite | Cases | What It Tests |
+|-------|-------|---------------|
+| `functional_v3` | 47 | MQTT 3.1 spec conformance: connect (wrong name/level/reserved flag/empty client id/long id), QoS 0/1/2 pub/sub, QoS 2 dedup & PUBREL resend, retained messages, last will, keep alive, session persistence, wildcards (incl. `$SYS`), boundary payloads, protocol errors |
+| `functional_v311` | 64 | MQTT 3.1.1 spec conformance: connect (incl. second-CONNECT rejection [MQTT-3.1.0-2]), QoS 0/1/2, retained edge cases, will QoS2, keep-alive 1.5× timeout, session present/resume, wildcard matching, shared subscriptions, protocol errors |
+| `functional_v5` | 63 | MQTT 5.0 spec conformance: CONNACK capability advertisement, session expiry (incl. DISCONNECT SEI=0 [MQTT-3.14.2-2]), topic alias (incl. unknown alias → 0x94), flow control, max packet size, subscription identifiers, retain handling, will delay, enhanced-auth rejection (0x8C), protocol errors |
+| `stress` | 3 | Connection load (100 clients), publish QPS (1000 msgs), fan-out (1→N) |
+| `chaos` | 6 | Broker restart, connection churn, reconnect storm, QoS 1 reliability, slow consumer |
+
+> Of the 63 `functional_v5` cases, `will_retain_rejected_when_retain_unavailable_v5`
+> (requires the retainer plugin to be disabled) and `qos2_pubrel_resume_collision`
+> (requires message-storage) are automatically split into the
+> `functional_v5@retain-disabled` and `functional_v5@pubrel-collision`
+> sub-suites; the remaining 61 run in the default-config group
+> `functional_v5`. Config switches happen only at suite boundaries.
+
+### Test Case Architecture
+
+Each test case implements the `TestCase` trait:
+
+```rust
+pub trait TestCase: Send + Sync {
+    fn name(&self) -> &str;
+    fn execute(&self, ctx: &mut TestContext) -> TestResult;
+    fn broker_config(&self) -> Option<PathBuf> { None } // required broker config (grouping hint)
+    // defaults: timeout() = 60s, max_retries() = 0, depends_on() = []
+}
+```
+
+The test scheduler uses DAG-based dependency ordering with timeout and retry support.
+
+### Custom MQTT Client
+
+The test harness includes a custom MQTT client implementation with zero third-party MQTT dependencies:
+
+- **Transport**: Async TCP via `tokio::net::TcpStream`
+- **Codec**: Based on `ferromq-codec` for v3/v5 protocol
+- **QoS State Machine**: Automatic PUBACK/PUBREC/PUBCOMP handling
+- **Packet Types**: All standard MQTT packet types supported
+
+---
+
+## Layer 3: Interoperability Testing
+
+FerroMQ is tested against the [paho.mqtt.testing](https://github.com/eclipse/paho.mqtt.testing) suite.
+
+### Setup
+
+```bash
+git clone https://github.com/eclipse/paho.mqtt.testing.git
+cd paho.mqtt.testing
+```
+
+### MQTT v3.1.1 Tests
+
+```bash
+# Start broker in one terminal
+./target/release/ferromqd
+
+# In another terminal
+cd paho.mqtt.testing/interoperability
+python client_test.py
+```
+
+All 11 tests pass.
+
+### MQTT v5.0 Tests
+
+```bash
+cd paho.mqtt.testing/interoperability
+python client_test5.py
+```
+
+All 24 tests pass.
+
+**Note**: For the `test_subscribe_failure` and `test_server_keep_alive` tests, minor configuration adjustments are needed — see the test output for details.
+
+---
+
+## Performance Benchmarking
+
+### Environment
+
+The test harness supports stress testing out of the box:
+
+```bash
+# Connection load test (100 clients)
+./target/release/ferromq_harness --no-broker --suites stress \
+  --stress-clients 100
+
+# Custom client count
+./target/release/ferromq_harness --no-broker --suites stress \
+  --stress-clients 10000
+```
+
+For comprehensive benchmarking, see the [Benchmark Testing Guide](../benchmark-testing.md).
+
+---
+
+## Writing New Tests
+
+### Adding a Unit Test
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_my_feature() {
+        let result = my_function();
+        assert_eq!(result, expected_value);
+    }
+
+    #[tokio::test]
+    async fn test_async_feature() {
+        let result = my_async_function().await;
+        assert!(result.is_ok());
+    }
+}
+```
+
+### Adding an Integration Test Case
+
+```rust
+use ferromq_test::framework::testcase::{TestCase, TestResult};
+use ferromq_test::framework::context::TestContext;
+
+struct MyCustomTest;
+
+impl TestCase for MyCustomTest {
+    fn name(&self) -> &str { "my_custom_test" }
+
+    fn suite(&self) -> &str { "functional_v5" }
+
+    fn execute(&self, ctx: &mut TestContext) -> TestResult {
+        let start = std::time::Instant::now();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(async {
+            let mut client = ctx.create_client("test-client");
+            client.connect().await?;
+            client.subscribe("test/topic").await?;
+            client.publish("test/topic", b"hello", 1, false).await?;
+            client.disconnect().await?;
+            Ok::<(), anyhow::Error>(())
+        });
+        match result {
+            Ok(()) => TestResult::passed(self.name(), self.suite(), start.elapsed()),
+            Err(e) => TestResult::failed(self.name(), self.suite(), start.elapsed(), e.to_string()),
+        }
+    }
+}
+```
+
+Then register it in `ferromq-test/src/tests/mod.rs` or the main entry point.
+
+---
+
+## CI/CD
+
+The project's GitHub CI workflow:
+
+```yaml
+# .github/workflows/ci.yml
+# Runs on: push to master, pull requests
+# Steps:
+#   1. Install system dependencies (protoc, etc.)
+#   2. cargo check
+#   3. cargo clippy --all-targets
+#   4. cargo test
+#   5. cargo build --release
+```
+
+Before pushing, always run:
+
+```bash
+cargo fmt --all && cargo clippy --all-targets && cargo test
+```
+
+---
+
+## Test Output
+
+### Console Output
+
+```
+============================================================
+  FerroMQ Test Harness - Results
+============================================================
+
+ ✔ connect_v3 [52ms]
+ ✔ pubsub_v3_qos0 [48ms]
+ ✔ connect_v311 [52ms]
+ ...
+------------------------------------------------------------
+  Total: 26 | Passed: 26 | Failed: 0 | Duration: 12.34s
+============================================================
+```
+
+### JSON Report
+
+```json
+{
+  "suite": "ferromq-test",
+  "summary": { "total": 26, "passed": 26, "failed": 0, "duration_ms": 12340 },
+  "cases": [
+    { "name": "connect_v3", "suite": "functional_v3", "status": "passed", "duration_ms": 52 }
+  ]
+}
+```
+
+---
+
+## Related Resources
+
+- [CONTRIBUTING.md](../../CONTRIBUTING.md) — Contribution guidelines
+- [benchmark-testing.md](../benchmark-testing.md) — Performance benchmark details
+- Plugin READMEs — Individual plugin test notes

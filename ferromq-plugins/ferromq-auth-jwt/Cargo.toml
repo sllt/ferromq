@@ -1,0 +1,22 @@
+[package]
+name = "ferromq-auth-jwt"
+version.workspace = true
+description = "JWT is a token-based auth method that removes the need for server-side credential storage. FerroMQ supports JWT-based user authentication."
+repository.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ferromq = { workspace = true, features = ["plugin"] }
+serde = { workspace = true, features = ["derive"] }
+ahash.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+itoa.workspace = true
+log.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+itertools.workspace = true
+jsonwebtoken.workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "ferromq-acl"
+version.workspace = true
+description = "The built-in ACL uses file-based rules, making it simple and lightweight—ideal for projects with stable or few rule changes."
+repository.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ferromq = { workspace = true, features = ["plugin"] }
+serde = { workspace = true, features = ["derive"] }
+tokio.workspace = true
+anyhow.workspace = true
+log.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+ahash.workspace = true
+dashmap.workspace = true
+toml.workspace = true

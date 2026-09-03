@@ -1,0 +1,1 @@
+# Keep this imported component on rustfmt defaults to minimize upstream-sync diffs.

@@ -1,0 +1,15 @@
+# Default ignored files
+Cargo.lock
+/target
+/.git
+/.idea
+/.cargo
+/examples/ferromq-raft-warp-memstore/target
+/examples/ferromq-raft-warp-memstore/Cargo.lock
+/examples/ferromq-raft-warp-memstore/.idea/.gitignore
+/examples/ferromq-raft-warp-memstore/.idea/encodings.xml
+/examples/ferromq-raft-warp-memstore/.idea/modules.xml
+/examples/ferromq-raft-warp-memstore/.idea/ferromq-raft-warp-memstore.iml
+/examples/ferromq-raft-warp-memstore/.idea/vcs.xml
+/CODEBUDDY.md
+/.workbuddy/memory

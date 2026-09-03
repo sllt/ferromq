@@ -1,0 +1,138 @@
+[package]
+name = "ferromq-plugins"
+version.workspace = true
+description = "Plugin collection for FerroMQ, providing authentication, storage, bridges, clustering, and other extensions."
+repository = "https://github.com/rmqtt/rmqtt/tree/master/ferromq-plugins"
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = []
+full = [
+    "retainer-ram",
+    "retainer-sled",
+    "retainer-redis",
+
+    "message-storage-ram",
+    "message-storage-redis",
+    "message-storage-redis-cluster",
+
+    "session-storage-sled",
+    "session-storage-redis",
+    "session-storage-redis-cluster",
+
+    "acl",
+    "http-api",
+    "counter",
+    "auth-http",
+    "auth-jwt",
+    "auto-subscription",
+
+    "bridge-egress-kafka",
+    "bridge-ingress-kafka",
+    "bridge-egress-mqtt",
+    "bridge-ingress-mqtt",
+    "bridge-egress-pulsar",
+    "bridge-ingress-pulsar",
+    "bridge-ingress-nats",
+    "bridge-egress-nats",
+    "bridge-egress-reductstore",
+    "bridge-origin",
+
+    "p2p-messaging",
+
+    "shared-subscription",
+
+    "sys-topic",
+    "topic-rewrite",
+    "web-hook",
+
+    "cluster-raft",
+    "cluster-broadcast",
+]
+
+# ---- storage sub-features ----
+retainer-ram = ["ferromq-retainer/ram"]
+retainer-sled = ["ferromq-retainer/sled"]
+retainer-redis = ["ferromq-retainer/redis"]
+retainer = ["retainer-ram", "retainer-sled", "retainer-redis"]
+
+message-storage-ram = ["ferromq-message-storage/ram"]
+message-storage-redis = ["ferromq-message-storage/redis"]
+message-storage-redis-cluster = ["ferromq-message-storage/redis-cluster"]
+message-storage = ["message-storage-ram", "message-storage-redis", "message-storage-redis-cluster"]
+
+session-storage-sled = ["ferromq-session-storage/sled"]
+session-storage-redis = ["ferromq-session-storage/redis"]
+session-storage-redis-cluster = ["ferromq-session-storage/redis-cluster"]
+session-storage = ["session-storage-sled", "session-storage-redis", "session-storage-redis-cluster"]
+
+# ---- http-api sub-features ----
+http-api-sled = ["ferromq-http-api/sled"]
+http-api-redis = ["ferromq-http-api/redis"]
+http-api-redis-cluster = ["http-api-redis", "ferromq-http-api/redis-cluster"]
+http-api-redb = ["ferromq-http-api/redb"]
+http-api = ["http-api-sled", "http-api-redis", "http-api-redis-cluster", "http-api-redb"]
+
+# ---- core plugins ----
+acl = ["ferromq-acl"]
+counter = ["ferromq-counter"]
+auth-http = ["ferromq-auth-http"]
+auth-jwt = ["ferromq-auth-jwt"]
+auto-subscription = ["ferromq-auto-subscription"]
+
+# ---- bridge plugins ----
+bridge-egress-kafka = ["ferromq-bridge-egress-kafka"]
+bridge-ingress-kafka = ["ferromq-bridge-ingress-kafka"]
+bridge-egress-mqtt = ["ferromq-bridge-egress-mqtt"]
+bridge-ingress-mqtt = ["ferromq-bridge-ingress-mqtt"]
+bridge-egress-pulsar = ["ferromq-bridge-egress-pulsar"]
+bridge-ingress-pulsar = ["ferromq-bridge-ingress-pulsar"]
+bridge-ingress-nats = ["ferromq-bridge-ingress-nats"]
+bridge-egress-nats = ["ferromq-bridge-egress-nats"]
+bridge-egress-reductstore = ["ferromq-bridge-egress-reductstore"]
+bridge-origin = ["ferromq-bridge-origin"]
+
+# ---- other plugins ----
+shared-subscription = ["ferromq-shared-subscription"]
+sys-topic = ["ferromq-sys-topic"]
+topic-rewrite = ["ferromq-topic-rewrite"]
+web-hook = ["ferromq-web-hook"]
+p2p-messaging = ["ferromq-p2p-messaging"]
+
+# ---- cluster plugins ----
+cluster-raft = ["ferromq-cluster-raft"]
+cluster-broadcast = ["ferromq-cluster-broadcast"]
+
+[dependencies]
+ferromq-acl = { workspace = true, optional = true }
+ferromq-retainer = { workspace = true, optional = true }
+ferromq-http-api = { workspace = true, optional = true }
+ferromq-counter = { workspace = true, optional = true }
+ferromq-auth-http = { workspace = true, optional = true }
+ferromq-auth-jwt = { workspace = true, optional = true }
+ferromq-auto-subscription = { workspace = true, optional = true }
+ferromq-bridge-egress-kafka = { workspace = true, optional = true }
+ferromq-bridge-ingress-kafka = { workspace = true, optional = true }
+ferromq-bridge-egress-mqtt = { workspace = true, optional = true }
+ferromq-bridge-ingress-mqtt = { workspace = true, optional = true }
+ferromq-bridge-egress-pulsar = { workspace = true, optional = true }
+ferromq-bridge-ingress-pulsar = { workspace = true, optional = true }
+ferromq-bridge-ingress-nats = { workspace = true, optional = true }
+ferromq-bridge-egress-nats = { workspace = true, optional = true }
+ferromq-bridge-egress-reductstore = { workspace = true, optional = true }
+ferromq-bridge-origin = { workspace = true, optional = true }
+ferromq-message-storage = { workspace = true, optional = true }
+ferromq-session-storage = { workspace = true, optional = true }
+ferromq-sys-topic = { workspace = true, optional = true }
+ferromq-shared-subscription = { workspace = true, optional = true }
+ferromq-topic-rewrite = { workspace = true, optional = true }
+ferromq-web-hook = { workspace = true, optional = true }
+ferromq-cluster-raft = { workspace = true, optional = true }
+ferromq-cluster-broadcast = { workspace = true, optional = true }
+ferromq-p2p-messaging = { workspace = true, optional = true }

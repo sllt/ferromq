@@ -1,0 +1,18 @@
+[package]
+name = "ferromq-auto-subscription"
+version.workspace = true
+description = "Auto Subscription allows FerroMQ to set multiple rules, subscribing the device to specified topics according to the rules once it successfully connects, without the need to initiate subscriptions separately."
+repository.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ferromq = { workspace = true, features = ["plugin", "auto-subscription"] }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["sync" ] }
+serde_json.workspace = true
+log.workspace = true
+async-trait.workspace = true
+anyhow.workspace = true

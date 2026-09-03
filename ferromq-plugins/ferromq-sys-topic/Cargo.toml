@@ -1,0 +1,24 @@
+[package]
+name = "ferromq-sys-topic"
+version.workspace = true
+description = "FerroMQ periodically publishes its own operational status, message statistics, and client online/offline events to system topics starting with $SYS/."
+repository.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ferromq = { workspace = true, features = ["plugin", "msgstore", "stats", "metrics"] }
+tokio = { workspace = true, features = ["sync", "time"] }
+serde = { workspace = true, features = ["derive"] }
+async-trait.workspace = true
+log.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+
+

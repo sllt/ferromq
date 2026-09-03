@@ -1,0 +1,39 @@
+[package]
+name = "ferromq-message-storage"
+version.workspace = true
+description = "Published messages are stored until expiration and forwarded to new matching subscriptions. They’re cleared automatically after expiring."
+repository.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = []
+ram = []
+redis = ["ferromq-storage/redis", "circuit-breaker"]
+redis-cluster = ["redis", "ferromq-storage/redis-cluster"]
+circuit-breaker = ["ferromq-storage/circuit-breaker"]
+
+[dependencies]
+ferromq = { workspace = true, features = ["plugin", "msgstore", "retain"] }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["sync", "time"] }
+ferromq-storage = { workspace = true, default-features = false, features = ["ttl"], optional = true}
+#ferromq-storage = { path = "../../../ferromq-storage", default-features = false, features = ["ttl"], optional = true}
+futures.workspace = true
+futures-time.workspace = true
+async-trait.workspace = true
+log.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+get-size2.workspace = true
+scc.workspace = true
+
+[dev-dependencies]
+bytes.workspace = true
+
+

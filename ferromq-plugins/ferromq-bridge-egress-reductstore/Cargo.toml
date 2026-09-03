@@ -1,0 +1,23 @@
+[package]
+name = "ferromq-bridge-egress-reductstore"
+version.workspace = true
+description = "Bridge remote reductstore in egress mode."
+repository.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ferromq = { workspace = true, features = ["plugin"] }
+tokio = { workspace = true, features = ["sync"] }
+serde = { workspace = true, features = ["derive"] }
+reduct-rs = "=1.18.0"
+reduct-base = "=1.18.3"
+serde_json.workspace = true
+log.workspace = true
+async-trait.workspace = true
+anyhow.workspace = true
+bytestring.workspace = true
+reqwest.workspace = true
+

@@ -1,0 +1,32 @@
+[package]
+name = "ferromq-session-storage"
+version.workspace = true
+description = "Connection information, subscription relationships, offline messages, and inflight messages will be stored."
+repository.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = ["ferromq-storage"]
+sled = ["ferromq-storage/sled", "circuit-breaker"]
+redis = ["ferromq-storage/redis", "circuit-breaker"]
+redis-cluster = ["redis", "ferromq-storage/redis-cluster"]
+circuit-breaker = ["ferromq-storage/circuit-breaker"]
+
+[dependencies]
+ferromq = { workspace = true, features = ["plugin"] }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread"] }
+ferromq-storage = { workspace = true, default-features = false, features = ["ttl"] , optional = true }
+#ferromq-storage = { path = "../../../ferromq-storage", default-features = false, features = ["ttl"], optional = true}
+futures.workspace = true
+async-trait.workspace = true
+log.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+bytes.workspace = true

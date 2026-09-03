@@ -1,0 +1,24 @@
+FROM arm64v8/alpine:3.24.1
+
+RUN mkdir -p /app/ferromq/ferromq-bin
+RUN mkdir -p /app/ferromq/ferromq-plugins
+COPY target/aarch64-unknown-linux-musl/release/ferromqd /app/ferromq/ferromq-bin/
+COPY ferromq.toml /app/ferromq/
+COPY ferromq-plugins/*.toml /app/ferromq/ferromq-plugins/
+COPY ferromq-bin/ferromq.pem  /app/ferromq/ferromq-bin/
+COPY ferromq-bin/ferromq.key  /app/ferromq/ferromq-bin/
+
+WORKDIR /app/ferromq
+
+VOLUME ["/var/log/ferromq"]
+
+# ferromqd will occupy these port:
+# - 1883 port for MQTT
+# - 8883 port for MQTT(TLS)
+# - 11883 port for internal MQTT/TCP
+# - 6060 for APIs
+# - 6003 default raft port
+# - 5363 for rpc
+EXPOSE 1883 8883 11883 6060 6003 5363
+
+ENTRYPOINT ["sh", "-c", "/app/ferromq/ferromq-bin/ferromqd \"$@\"", "--"]

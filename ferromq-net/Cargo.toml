@@ -1,0 +1,56 @@
+[package]
+name = "ferromq-net"
+version = "0.4.0"
+description = "Basic Implementation of MQTT Server"
+repository.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+exclude.workspace = true
+rust-version.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+default = []
+tls = ["rustls", "tokio-rustls", "x509-parser"]
+ws = ["tokio-tungstenite"]
+quic = ["tls"]
+
+[dependencies]
+ferromq-codec.workspace = true
+tokio = { workspace = true,  features = ["net", "time", "io-util"] }
+tokio-util = { workspace = true, features = ["codec"] }
+futures.workspace = true
+log.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+socket2 = { workspace = true, features = ["all"] }
+serde = { workspace = true, features = ["derive"] }
+bytestring = { workspace = true, features = ["serde"] }
+nonzero_ext.workspace = true
+tokio-tungstenite = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+proxy-protocol = { workspace = true }
+quinn = { workspace = true }
+
+[dependencies.x509-parser]
+version = "0.18.0"
+optional = true
+
+[target.'cfg(not(windows))'.dependencies]
+rustls = { workspace = true, features = ["aws-lc-rs", "logging", "std", "tls12"], optional = true }
+[target.'cfg(windows)'.dependencies]
+rustls = { workspace = true, features = ["ring", "logging", "std", "tls12"], optional = true }
+
+[dev-dependencies]
+simple_logger = { workspace = true }
+tokio = { workspace = true,  features = ["full"] }
+once_cell.workspace = true
+
+[[example]]
+name = "server"
+required-features = ["tls", "ws", "quic"]

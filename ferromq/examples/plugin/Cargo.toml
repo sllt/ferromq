@@ -1,0 +1,33 @@
+[package]
+name = "plugin"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+ferromq-acl.workspace = true
+ferromq-auth-http.workspace = true
+ferromq-retainer = { workspace = true, features = ["ram"] }
+ferromq-http-api.workspace = true
+ferromq-web-hook.workspace = true
+ferromq-counter.workspace = true
+ferromq-auth-jwt.workspace = true
+ferromq-auto-subscription.workspace = true
+ferromq-message-storage = { workspace = true, features = ["ram"] }
+ferromq-session-storage = { workspace = true, features = ["sled"] }
+ferromq-sys-topic.workspace = true
+ferromq-topic-rewrite.workspace = true
+ferromq-cluster-raft.workspace = true
+ferromq-cluster-broadcast.workspace = true
+ferromq-bridge-egress-kafka.workspace = true
+ferromq-bridge-ingress-kafka.workspace = true
+ferromq-bridge-egress-mqtt.workspace = true
+ferromq-bridge-ingress-mqtt.workspace = true
+ferromq-bridge-egress-pulsar.workspace = true
+ferromq-bridge-ingress-pulsar.workspace = true
+ferromq-bridge-egress-nats.workspace = true
+ferromq-bridge-egress-reductstore.workspace = true
+
+ferromq = { workspace = true, features = ["plugin"] }
+tokio = { version = "1", features = ["full"] }
+simple_logger = { workspace = true }
+log = "0.4"

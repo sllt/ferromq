@@ -1,0 +1,24 @@
+[package]
+name = "ferromq-auth-http"
+version.workspace = true
+description = "HTTP authentication uses a custom HTTP API as the data source, enabling flexible and complex auth logic based on its responses."
+repository.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ferromq = { workspace = true, features = ["plugin"] }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["sync" ] }
+async-trait.workspace = true
+log.workspace = true
+reqwest = { workspace = true, features = ["rustls-tls", "json"] }
+serde_json.workspace = true
+ahash.workspace = true
+anyhow.workspace = true
+bytestring.workspace = true
+itoa.workspace = true
+
+

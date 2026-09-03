@@ -1,0 +1,164 @@
+//! Logging configuration for the FerroMQ broker.
+//!
+//! Defines log output destination (`To`), severity level (`Level`), and
+//! file path settings.
+
+use serde::de::{self, Deserializer};
+use serde::Deserialize;
+
+/// Log output configuration, including destination, level, and file path.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Log {
+    #[serde(default = "Log::to_default")]
+    pub to: To,
+    #[serde(default = "Log::level_default")]
+    pub level: Level,
+    #[serde(default = "Log::dir_default")]
+    pub dir: String,
+    #[serde(default = "Log::file_default")]
+    pub file: String,
+}
+
+impl Default for Log {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            to: Self::to_default(),
+            level: Self::level_default(),
+            dir: Self::dir_default(),
+            file: Self::file_default(),
+        }
+    }
+}
+
+impl Log {
+    #[inline]
+    fn to_default() -> To {
+        To::Console
+    }
+    #[inline]
+    fn level_default() -> Level {
+        Level::Info
+    }
+    #[inline]
+    fn dir_default() -> String {
+        "/var/log/ferromq".into()
+    }
+    #[inline]
+    fn file_default() -> String {
+        "ferromq.log".into()
+    }
+    /// Returns the resolved log file path by joining directory and file name.
+    ///
+    /// Returns an empty string if the file name is empty.
+    #[inline]
+    pub fn filename(&self) -> String {
+        let file = &self.file;
+        if file.is_empty() {
+            return "".into();
+        }
+        if self.dir.is_empty() {
+            return file.to_owned();
+        }
+        let dir = self.dir.trim_end_matches(['/', '\\']);
+        format!("{dir}/{file}")
+    }
+}
+
+/// Log output destination type.
+///
+/// Controls whether logs are written to the console, a file, both, or disabled.
+#[derive(Debug, Clone, Copy)]
+pub enum To {
+    Off,
+    File,
+    Console,
+    Both,
+}
+
+impl To {
+    /// Returns `true` if the destination includes file output.
+    #[inline]
+    pub fn file(&self) -> bool {
+        matches!(self, To::Both | To::File)
+    }
+    /// Returns `true` if the destination includes console output.
+    #[inline]
+    pub fn console(&self) -> bool {
+        matches!(self, To::Both | To::Console)
+    }
+    /// Returns `true` if logging is disabled.
+    #[inline]
+    pub fn off(&self) -> bool {
+        matches!(self, To::Off)
+    }
+}
+
+impl<'de> Deserialize<'de> for To {
+    #[inline]
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let to = match (String::deserialize(deserializer)?).to_ascii_lowercase().as_str() {
+            "off" => To::Off,
+            "file" => To::File,
+            "console" => To::Console,
+            "both" => To::Both,
+            _ => To::Both,
+        };
+
+        Ok(to)
+    }
+}
+
+/// Log severity level.
+///
+/// Supports standard levels from Trace (most verbose) to Error (least verbose).
+#[derive(Debug, Clone, Copy)]
+pub enum Level {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl Level {
+    /// Returns the string representation of this log level (e.g. "info", "debug").
+    #[inline]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Level::Trace => "trace",
+            Level::Debug => "debug",
+            Level::Info => "info",
+            Level::Warn => "warn",
+            Level::Error => "error",
+        }
+    }
+}
+
+impl std::fmt::Display for Level {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Level {
+    #[inline]
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let level = String::deserialize(deserializer)?;
+        let level = match level.to_ascii_lowercase().as_str() {
+            "trace" => Level::Trace,
+            "debug" => Level::Debug,
+            "info" => Level::Info,
+            "warn" => Level::Warn,
+            "error" => Level::Error,
+            _ => return Err(de::Error::missing_field("level")),
+        };
+        Ok(level)
+    }
+}

@@ -1,0 +1,36 @@
+[package]
+name = "ferromq-retainer"
+version.workspace = true
+description = "When a client publishes with the retain flag, the message is saved and sent to future subscribers matching the topic."
+repository.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = ["rate-counter"]
+ram = []
+sled = ["ferromq-storage/sled", "circuit-breaker"]
+redis = ["ferromq-storage/redis", "circuit-breaker"]
+rate-counter = []
+circuit-breaker = ["ferromq-storage/circuit-breaker"]
+
+[dependencies]
+ferromq = { workspace = true, features = ["plugin", "retain"] }
+ferromq-storage = { workspace = true, default-features = false, features = ["ttl", "len"], optional = true}
+#ferromq-storage = { path = "../../../ferromq-storage", default-features = false, features = ["ttl", "len"], optional = true}
+rust-box = { workspace = true, features = ["task-exec-queue"] }
+futures.workspace = true
+futures-time.workspace = true
+tokio.workspace = true
+serde = { workspace = true, features = ["derive"] }
+anyhow.workspace = true
+async-trait.workspace = true
+log.workspace = true
+serde_json.workspace = true

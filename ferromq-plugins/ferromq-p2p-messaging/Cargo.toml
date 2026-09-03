@@ -1,0 +1,20 @@
+[package]
+name = "ferromq-p2p-messaging"
+version.workspace = true
+description = "A FerroMQ plugin that provides point-to-point (P2P) messaging support, enabling direct message delivery between clients using configurable topic patterns."
+repository.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ferromq = { workspace = true, features = ["plugin"] }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["sync"] }
+async-trait.workspace = true
+log.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+
+

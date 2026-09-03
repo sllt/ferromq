@@ -1,0 +1,96 @@
+[package]
+name = "ferromqd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description.workspace = true
+categories.workspace = true
+keywords.workspace = true
+exclude.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "ferromqd"
+path = "src/server.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator = "0.6"
+
+[dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+#ferromq.workspace = true
+ferromq = { workspace = true, features = ["full"] }
+ferromq-conf.workspace = true
+ferromq-net.workspace = true
+clap.workspace = true
+log.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing-appender.workspace = true
+anyhow.workspace = true
+chrono = { workspace = true, features = ["clock"] }
+time = { workspace = true, features = ["local-offset"] }
+
+##plugins
+ferromq-acl.workspace = true
+ferromq-retainer = { workspace = true, features = ["ram", "sled", "redis"] }
+ferromq-http-api = { workspace = true, features = ["redb", "sled", "redis", "redis-cluster"] }
+ferromq-counter.workspace = true
+ferromq-auth-http.workspace = true
+ferromq-auth-jwt.workspace = true
+ferromq-auto-subscription.workspace = true
+ferromq-shared-subscription.workspace = true
+ferromq-bridge-egress-kafka.workspace = true
+ferromq-bridge-ingress-kafka.workspace = true
+ferromq-bridge-egress-mqtt.workspace = true
+ferromq-bridge-ingress-mqtt.workspace = true
+ferromq-bridge-egress-pulsar.workspace = true
+ferromq-bridge-ingress-pulsar.workspace = true
+ferromq-bridge-ingress-nats.workspace = true
+ferromq-bridge-egress-nats.workspace = true
+ferromq-bridge-egress-reductstore.workspace = true
+ferromq-bridge-origin.workspace = true
+ferromq-message-storage = { workspace = true, features = ["ram", "redis", "redis-cluster"] }
+ferromq-session-storage = { workspace = true, features = ["sled", "redis", "redis-cluster"] }
+ferromq-sys-topic.workspace = true
+ferromq-topic-rewrite.workspace = true
+ferromq-web-hook.workspace = true
+ferromq-cluster-raft.workspace = true
+ferromq-cluster-broadcast.workspace = true
+ferromq-p2p-messaging.workspace = true
+#ferromq-plugin-template = "0.1"
+
+[package.metadata.plugins]
+ferromq-acl = { default_startup = true }
+ferromq-retainer = { }
+ferromq-counter = { default_startup = true }
+ferromq-auth-http = { }
+ferromq-auth-jwt = { }
+ferromq-auto-subscription = { }
+ferromq-shared-subscription = { }
+ferromq-bridge-egress-kafka = { }
+ferromq-bridge-ingress-kafka = { }
+ferromq-bridge-egress-mqtt = { }
+ferromq-bridge-ingress-mqtt = { }
+ferromq-bridge-egress-pulsar = { }
+ferromq-bridge-ingress-pulsar = { }
+ferromq-bridge-ingress-nats = { }
+ferromq-bridge-egress-nats = { }
+ferromq-bridge-egress-reductstore = { }
+ferromq-bridge-origin = { }
+ferromq-message-storage = { immutable = true }
+ferromq-session-storage = { immutable = true }
+ferromq-sys-topic = { }
+ferromq-topic-rewrite = { }
+ferromq-web-hook = { }
+ferromq-cluster-raft = { immutable = true }
+ferromq-cluster-broadcast = { immutable = true }
+ferromq-p2p-messaging = { }
+ferromq-http-api = { default_startup = true }
+#ferromq-plugin-template = { }
+
+[build-dependencies]
+toml.workspace = true

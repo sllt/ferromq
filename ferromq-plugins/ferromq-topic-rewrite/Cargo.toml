@@ -1,0 +1,21 @@
+[package]
+name = "ferromq-topic-rewrite"
+version.workspace = true
+description = "Some legacy IoT devices can't change MQTT topics. FerroMQ's topic rewriting auto-maps topics during subscribe, unsubscribe, or publish."
+repository.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ferromq = { workspace = true, features = ["plugin"] }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["sync"] }
+async-trait.workspace = true
+log.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+regex.workspace = true
+
+

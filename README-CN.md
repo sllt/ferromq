@@ -1,0 +1,271 @@
+# FerroMQ Broker
+
+[![GitHub Release](https://img.shields.io/github/release/rmqtt/rmqtt?color=brightgreen)](https://github.com/rmqtt/rmqtt/releases)
+[![Rust Version](https://img.shields.io/badge/rust-1.94.0%2B-blue)](https://blog.rust-lang.org/2026/03/05/Rust-1.94.0/)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/rmqtt/rmqtt)
+[![crates.io](https://img.shields.io/crates/v/rmqtt.svg)](https://crates.io/crates/rmqtt)
+[![docs.rs](https://docs.rs/rmqtt/badge.svg)](https://docs.rs/rmqtt/latest/rmqtt/)
+
+[English](README.md) | [**简体中文**](README-CN.md)
+
+*FerroMQ* 是一款完全开源，高度可伸缩，高可用的分布式 MQTT 消息服务器，适用于 IoT、M2M 和移动应用程序，可以在单个服务节点上处理百万级别的并发客户端。
+
+FerroMQ 基于 [RMQTT](https://github.com/rmqtt/rmqtt) 二次开发，独立演进。保留原许可证及原作者信息。
+
+## 功能特色
+
+- 100% Rust安全编码;
+- 基于 [tokio](https://crates.io/crates/tokio) 开发;
+- [支持MQTT v3.1,v3.1.1 及 v5.0协议](./docs/zh_CN/mqtt-protocol.md);
+    - [QoS0, QoS1, QoS2 消息支持](./docs/zh_CN/mqtt-protocol.md#41-qos-说明);
+    - [离线消息支持](./docs/zh_CN/offline-message.md);
+    - [Retained 消息支持](./docs/zh_CN/retainer.md);
+    - [Last Will 消息支持](./docs/zh_CN/mqtt-protocol.md#6-保留消息与遗嘱消息);
+- [分布式集群](./docs/zh_CN/cluster-raft.md);
+- [内置 AUTH/ACL](./docs/zh_CN/acl.md);
+- [HTTP AUTH/ACL](./docs/zh_CN/auth-http.md);
+- [JWT AUTH/ACL](./docs/zh_CN/auth-jwt.md);
+- [WebHook](./docs/zh_CN/web-hook.md);
+- [HTTP APIs](./docs/zh_CN/http-api.md);
+- [$SYS 系统主题](./docs/zh_CN/sys-topic.md);
+- [存储会话信息](./docs/zh_CN/store-session.md);
+- [存储未过期消息](./docs/zh_CN/store-message.md);
+- [MQTT桥接-入口模式](./docs/zh_CN/bridge-ingress-mqtt.md);
+- [MQTT桥接-出口模式](./docs/zh_CN/bridge-egress-mqtt.md);
+- [Apache Kafka桥接-入口模式](./docs/zh_CN/bridge-ingress-kafka.md);
+- [Apache kafka桥接-出口模式](./docs/zh_CN/bridge-egress-kafka.md);
+- [Apache Pulsar桥接-入口模式](./docs/zh_CN/bridge-ingress-pulsar.md);
+- [Apache Pulsar桥接-出口模式](./docs/zh_CN/bridge-egress-pulsar.md);
+- [NATS桥接-入口模式](./docs/zh_CN/bridge-ingress-nats.md);
+- [NATS桥接-出口模式](./docs/zh_CN/bridge-egress-nats.md);
+- [Reductstore桥接-出口模式](./docs/zh_CN/bridge-egress-reductstore.md);
+- [主题重写](./docs/zh_CN/topic-rewrite.md);
+- [自动订阅](./docs/zh_CN/auto-subscription.md);
+- [P2P 消息传递](./docs/zh_CN/p2p-messaging.md);
+- [共享订阅($share/{Group}/{TopicFilter})](./docs/zh_CN/shared-subscription.md);
+- 排它订阅($exclusive/{TopicFilter});
+- 限制订阅($limit/{LimitQuantity}/{TopicFilter});
+- 延迟发布($delayed/{DelayInterval}/{TopicName});
+- 钩子(Hooks);
+- TLS支持;
+- WebSocket支持;
+- WebSocket-TLS支持;
+- MQTT over QUIC支持;
+- 内置可扩展功能;
+- 支持扩展插件;
+- 指标监控;
+- 速率限制;
+- 飞行窗口和消息队列;
+- 消息重传;
+
+- 新功能的完整列表，请参阅 [FerroMQ Release Notes](https://github.com/rmqtt/rmqtt/releases) 。
+
+## 安装
+
+*FerroMQ* 是跨平台的，支持 Linux、Unix、macOS 以及 Windows。这意味着 *FerroMQ* 可以部署在 x86_64 架构的服务器上，也可以部署在 Raspberry Pi 这样的 ARM 设备上。
+
+#### 使用 Docker 运行 FerroMQ
+
+* 单节点
+
+```bash
+mkdir -p /app/log/ferromq
+docker run -d --name ferromq -p 1883:1883 -p 8883:8883 -p 11883:11883 -p 6060:6060 -v /app/log/ferromq:/var/log/ferromq  ferromq/ferromq:latest
+```
+
+* 多节点
+
+```bash
+  docker run -d --name ferromq1 -p 1884:1883 -p 8884:8883 -p 11884:11883 -p 6064:6060 -v /app/log/ferromq/1:/var/log/ferromq  ferromq/ferromq:latest --id 1 --plugins-default-startups "ferromq-cluster-raft" --node-grpc-addrs "1@172.17.0.3:5363" "2@172.17.0.4:5363" "3@172.17.0.5:5363" --raft-peer-addrs "1@172.17.0.3:6003" "2@172.17.0.4:6003" "3@172.17.0.5:6003"
+
+  docker run -d --name ferromq2 -p 1885:1883 -p 8885:8883 -p 11885:11883 -p 6065:6060 -v /app/log/ferromq/2:/var/log/ferromq  ferromq/ferromq:latest --id 2 --plugins-default-startups "ferromq-cluster-raft" --node-grpc-addrs "1@172.17.0.3:5363" "2@172.17.0.4:5363" "3@172.17.0.5:5363" --raft-peer-addrs "1@172.17.0.3:6003" "2@172.17.0.4:6003" "3@172.17.0.5:6003"
+
+  docker run -d --name ferromq3 -p 1886:1883 -p 8886:8883 -p 11886:11883 -p 6066:6060 -v /app/log/ferromq/3:/var/log/ferromq  ferromq/ferromq:latest --id 3 --plugins-default-startups "ferromq-cluster-raft" --node-grpc-addrs "1@172.17.0.3:5363" "2@172.17.0.4:5363" "3@172.17.0.5:5363" --raft-peer-addrs "1@172.17.0.3:6003" "2@172.17.0.4:6003" "3@172.17.0.5:6003"
+```
+
+节点IDs: 1, 2, 3; 节点IP Addrs: 172.17.0.3, 172.17.0.4, 172.17.0.5
+
+#### 通过 docker-compose 创建单节点
+
+```yaml
+# docker-compose.yaml
+version: '3'
+
+services:
+  ferromq:
+    container_name: ferromq
+    image: ferromq/ferromq:latest
+    volumes:
+      - /etc/localtime:/etc/localtime
+      - /app/ferromq-single/etc/:/app/ferromq/etc
+      - /app/ferromq-single/log:/var/log/ferromq
+    ports:
+      - "1883:1883"
+      - "8080:8080"
+      - "8883:8883"
+      - "11883:11883"
+      - "6060:6060"
+    restart: always
+    command: -f ./etc/ferromq.toml --id 1
+    privileged: true
+```
+
+#### 通过 docker-compose 创建静态集群
+
+1. [下载配置模板](https://github.com/rmqtt/templates/blob/main/docker-compose-template/docker-compose-template-v0.7.zip)
+
+2. 启动 docker-compose 集群
+
+```bash
+docker-compose up -d
+```
+
+3. 查看集群
+
+```bash
+curl "http://127.0.0.1:6066/api/v1/health/check"
+```
+
+#### ZIP 压缩包安装 (Linux、MacOS、Windows)
+
+需从 [GitHub Release](https://github.com/rmqtt/rmqtt/releases) 页面获取相应操作系统的ZIP压缩包。
+
+- [单节点安装配置文档](./docs/zh_CN/install.md)
+
+- [集群安装配置文档](./docs/zh_CN/install.md)
+
+
+##  通过库方式集成
+
+除了作为独立的 MQTT Broker/Server 使用外，FerroMQ 还提供 **库模式（Library Mode）**，可以作为 Rust 依赖直接嵌入到应用或服务中。只需在 `Cargo.toml` 中添加：
+
+```toml
+[dependencies]
+ferromq = "0.24"
+```
+
+更多关于库模式的使用说明，请参考 [FerroMQ 库使用文档](./ferromq/README-CN.md) 。
+
+## 插件系统
+
+FerroMQ 内置 26 个插件，分为 6 大类：
+
+| 分类 | 插件 |
+|------|------|
+| **认证** | ACL、HTTP 认证、JWT 认证 |
+| **存储** | Retainer、消息存储、会话存储 |
+| **集群** | Raft、广播 |
+| **桥接** | MQTT（入/出）、Kafka（入/出）、Pulsar（入/出）、NATS（入/出）、ReductStore（出）、桥接来源 |
+| **API** | HTTP API、WebHook、系统主题 |
+| **功能** | Counter、自动订阅、主题重写、P2P 消息、共享订阅 |
+
+[插件开发指南 →](docs/zh_CN/development/plugin-development.md)
+
+## 文档资源
+
+| 资源 | 说明 |
+|------|------|
+| [架构概览](docs/zh_CN/architecture/overview.md) | 系统架构、模块设计、数据流 |
+| [配置指南](./ferromq-conf/README-CN.md) | 所有配置项及默认值 |
+| [HTTP API 参考](docs/zh_CN/reference/http-api.md) | 36 个 REST API 端点 |
+| [贡献指南](CONTRIBUTING-CN.md) | 如何贡献代码 |
+| [更新日志](CHANGELOG.md) | 版本历史 |
+| [开发入门](docs/zh_CN/development/getting-started.md) | 构建、测试、开发工作流 |
+| [测试指南](docs/zh_CN/development/testing.md) | 单元测试、集成测试、互操作性 |
+| 子项目文档 | [ferromq](./ferromq/README-CN.md)、[ferromq-bin](./ferromq-bin/README-CN.md)、[ferromq-codec](./ferromq-codec/README-CN.md)、[ferromq-net](./ferromq-net/README-CN.md)、[ferromq-conf](./ferromq-conf/README-CN.md)、[ferromq-utils](./ferromq-utils/README-CN.md)、[ferromq-macros](./ferromq-macros/README-CN.md)、[ferromq-storage](./ferromq-storage/README.md)、[ferromq-raft](./ferromq-raft/README.md)、[ferromq-test](./ferromq-test/README-CN.md) |
+
+## 测试
+
+### 互操作性测试
+
+#### paho.mqtt.testing(MQTT V3.1.1) [client_test.py](https://github.com/eclipse/paho.mqtt.testing/blob/master/interoperability/client_test.py)
+
+* client_test.py Test.test_retained_messages          [OK]
+* client_test.py Test.test_zero_length_clientid       [OK]
+* client_test.py Test.will_message_test               [OK]
+* client_test.py Test.test_offline_message_queueing   [OK]
+* client_test.py Test.test_overlapping_subscriptions  [OK]
+* client_test.py Test.test_keepalive                  [OK]
+* client_test.py Test.test_redelivery_on_reconnect    [OK]
+* client_test.py Test.test_dollar_topics              [OK]
+* client_test.py Test.test_unsubscribe                [OK]
+* client_test.py Test.test_subscribe_failure          [OK]
+  * 需要修改ferromq-acl.toml配置，在第一行添加：["deny", "all", "subscribe", ["test/nosubscribe"]]
+
+#### paho.mqtt.testing(MQTT V5.0) [client_test5.py](https://github.com/eclipse/paho.mqtt.testing/blob/master/interoperability/client_test5.py)
+
+* client_test5.py Test.test_retained_message            [OK]
+* client_test5.py Test.test_will_message                [OK]
+* client_test5.py Test.test_offline_message_queueing    [OK]
+* client_test5.py Test.test_dollar_topics               [OK]
+* client_test5.py Test.test_unsubscribe                 [OK]
+* client_test5.py Test.test_session_expiry              [OK]
+* client_test5.py Test.test_shared_subscriptions        [OK]
+* client_test5.py Test.test_basic                       [OK]
+* client_test5.py Test.test_overlapping_subscriptions   [OK]
+* client_test5.py Test.test_redelivery_on_reconnect     [OK]
+* client_test5.py Test.test_payload_format              [OK]
+* client_test5.py Test.test_publication_expiry          [OK]
+* client_test5.py Test.test_subscribe_options           [OK]
+* client_test5.py Test.test_assigned_clientid           [OK]
+* client_test5.py Test.test_subscribe_identifiers       [OK]
+* client_test5.py Test.test_request_response            [OK]
+* client_test5.py Test.test_server_topic_alias          [OK]
+* client_test5.py Test.test_client_topic_alias          [OK]
+* client_test5.py Test.test_maximum_packet_size         [OK]
+* client_test5.py Test.test_keepalive                   [OK]
+* client_test5.py Test.test_zero_length_clientid        [OK]
+* client_test5.py Test.test_user_properties             [OK]
+* client_test5.py Test.test_flow_control2               [OK]
+* client_test5.py Test.test_flow_control1               [OK]
+* client_test5.py Test.test_will_delay                  [OK]
+* client_test5.py Test.test_server_keep_alive           [OK]
+  * 需要修改ferromq.toml配置，将max_keepalive改为60
+* client_test5.py Test.test_subscribe_failure           [OK]
+  * 需要修改ferromq-acl.toml配置，在第一行添加：["deny", "all", "subscribe", ["test/nosubscribe"]]
+
+
+### 集成测试框架
+
+`ferromq-test` crate 提供了自定义测试框架，包含功能测试、压力测试和混沌测试套件。详见[测试报告](docs/zh_CN/testing-report.md)。
+
+### 基准测试
+
+#### 环境
+| 项目          | 内容                                        |                                                                 |
+|-------------|-------------------------------------------|-----------------------------------------------------------------|
+| 操作系统        | x86_64 GNU/Linux                          | Rocky Linux 9.2 (Blue Onyx)                                     |
+| CPU         | Intel(R) Xeon(R) CPU E5-2696 v3 @ 2.30GHz | 72(CPU(s)) = 18(Core(s)) * 2(Thread(s) per core) * 2(Socket(s)) |
+| 内存          | DDR3/2333                                 | 128G                                                            |
+| 磁盘          |                                           | 2T                                                              |
+| 容器          | podman                                    | v4.4.1                                                          |
+| 测试客户端       | docker.io/rmqtt/rmqtt-bench:latest        | v0.1.3                                                          |
+| MQTT Broker | docker.io/rmqtt/rmqtt:latest              | v0.3.0                                                          |
+| 其它          | 测试客户端和MQTT Broker同服         |                                                                 |
+
+#### 连接并发性能
+| 项目                | 单机              | Raft集群模式       |
+|-------------------|-----------------|----------------|
+| 并发客户端总数       | 100万            | 100万           |
+| 连接握手速率        | (5500-7000)/秒   | (5000-7000)/秒  |
+
+#### 消息吞吐性能
+| 项目               | 单机                | Raft集群模式             |
+|---------------------|------------------|----------------|
+| 订阅客户端数量             | 100万             |   100万       |
+| 发布客户端数量             | 40               |    40       |
+| 消息吞吐速率              | 15万/秒            |   15.6万/秒   |
+
+[基准测试详细内容，请参阅](./docs/zh_CN/benchmark-testing.md)
+
+---
+
+## Credits
+
+- 从 0.15 版本开始，本项目的 MQTT 编解码实现部分参考并借鉴了 ntex-mqtt 的实现。
+
+- 在 0.13 及之前的版本，本项目依赖了维护的 ntex 和 ntex-mqtt fork 版本作为依赖库。
+
+## 许可证
+
+基于 [MIT](LICENSE-MIT) 或 [Apache 2.0](LICENSE-APACHE) 许可证。
