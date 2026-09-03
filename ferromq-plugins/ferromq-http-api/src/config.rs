@@ -120,7 +120,9 @@ pub struct PluginConfig {
     pub prometheus_metrics_cache_interval: Duration,
 
     /// Optional static directory for the Dashboard SPA.
-    /// If set, http-api serves the contents at `/dashboard/`.
+    /// If set and the path exists, http-api serves that directory at
+    /// `/dashboard/` (and `/`) instead of the rust-embed `dashboard-dist/`
+    /// assets. Missing path falls back to the embed.
     #[serde(default)]
     pub dashboard_static_dir: Option<String>,
 
