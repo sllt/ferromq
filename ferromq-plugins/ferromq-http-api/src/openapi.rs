@@ -66,6 +66,11 @@ mod tests {
         let paths = spec["paths"].as_object().expect("paths");
         for p in [
             "/api/v1",
+            "/api/v1/auth/login",
+            "/api/v1/auth/logout",
+            "/api/v1/auth/me",
+            "/api/v1/auth/change-password",
+            "/api/v1/auth/init",
             "/api/v1/openapi.json",
             "/api/v1/docs",
             "/api/v1/brokers",
@@ -89,7 +94,17 @@ mod tests {
             assert!(paths.contains_key(p), "missing path {p}");
         }
         let schemas = spec["components"]["schemas"].as_object().expect("schemas");
-        for s in ["Error", "Page", "Features", "FeaturesSummary", "FeaturesNodeResult", "ClusterNodeError"] {
+        for s in [
+            "Error",
+            "Page",
+            "Features",
+            "FeaturesSummary",
+            "FeaturesNodeResult",
+            "ClusterNodeError",
+            "SessionUser",
+            "LoginRequest",
+            "ChangePasswordRequest",
+        ] {
             assert!(schemas.contains_key(s), "missing schema {s}");
         }
         let err = &schemas["Error"]["properties"];

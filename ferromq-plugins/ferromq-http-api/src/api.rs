@@ -1,12 +1,13 @@
 //! HTTP API route handlers for the FerroMQ management API.
 //!
-//! Defines the HTTP server, route tree, Bearer token authentication, and
+//! Defines the HTTP server, route tree, session + Bearer authentication, and
 //! handler functions for brokers, nodes, clients, subscriptions, routes,
 //! MQTT actions, plugins, stats, metrics, and history.
 
 use std::convert::From as _;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use salvo::conn::tcp::TcpAcceptor;
@@ -42,6 +43,10 @@ use ferromq::{
 
 use salvo::serve_static::{static_embed, StaticDir};
 
+use super::auth::{
+    auth_change_password, auth_init, auth_login, auth_logout, auth_me, require_write, AuthGuard, AuthState,
+    AUTH_STATE,
+};
 use super::embed::DashboardAssets;
 use super::flusher::{HistoryCache, HistoryCaches};
 use super::openapi::{get_docs, get_openapi};
@@ -61,27 +66,6 @@ use super::{clients, plugin, prome, subs, PluginConfigType};
 /// Depot key for the history caches + storage handle.
 const HISTORY_CACHES: &str = "HISTORY_CACHES";
 
-struct BearerValidator {
-    token: String,
-}
-impl BearerValidator {
-    pub fn new(token: &str) -> Self {
-        Self { token: format!("Bearer {token}") }
-    }
-}
-
-#[async_trait]
-impl Handler for BearerValidator {
-    async fn handle(&self, req: &mut Request, depot: &mut Depot, res: &mut Response, ctrl: &mut FlowCtrl) {
-        if req.headers().get("authorization").is_some_and(|token| token == &self.token) {
-            ctrl.call_next(req, depot, res).await;
-        } else {
-            render_api_error(res, StatusCode::UNAUTHORIZED, "unauthorized");
-            ctrl.skip_rest()
-        }
-    }
-}
-
 pub(crate) fn route(
     scx: ServerContext,
     cfg: PluginConfigType,
@@ -89,40 +73,63 @@ pub(crate) fn route(
     monitor: prome::Monitor,
     history_caches: Option<HistoryCaches>,
 ) -> Router {
+    route_with_auth(scx, cfg, Arc::new(AuthState::new(token)), monitor, history_caches)
+}
+
+fn route_with_auth(
+    scx: ServerContext,
+    cfg: PluginConfigType,
+    auth_state: Arc<AuthState>,
+    monitor: prome::Monitor,
+    history_caches: Option<HistoryCaches>,
+) -> Router {
     let mut router = Router::with_path("api/v1")
         .hoop(affix_state::inject((scx, cfg)))
         .hoop(affix_state::insert(PROME_MONITOR, monitor))
+        .hoop(affix_state::insert(AUTH_STATE, auth_state.clone()))
         .hoop(request_id_hoop)
         .hoop(api_logger);
-    if let Some(token) = token {
-        router = router.hoop(BearerValidator::new(&token));
-    }
     // Inject history caches so query handlers can access LRU + storage.
     if let Some(hc) = history_caches {
         router = router.hoop(affix_state::insert(HISTORY_CACHES, hc));
     }
-    router
-        .get(list_apis)
+
+    // Public: login/init/logout, health probes, and the OpenAPI contract.
+    let public = Router::new()
+        .push(Router::with_path("auth/login").post(auth_login))
+        .push(Router::with_path("auth/logout").post(auth_logout))
+        .push(Router::with_path("auth/init").post(auth_init))
         .push(Router::with_path("openapi.json").get(get_openapi))
         .push(Router::with_path("docs").get(get_docs))
+        .push(
+            Router::with_path("health/check")
+                .get(check_health)
+                .push(Router::with_path("{id}").get(check_health)),
+        );
+
+    // Session cookie or Bearer token (or anonymous admin when auth is unset).
+    let protected = Router::new()
+        .hoop(AuthGuard::new(auth_state))
+        .get(list_apis)
+        .push(Router::with_path("auth/me").get(auth_me))
+        .push(Router::with_path("auth/change-password").post(auth_change_password))
         .push(Router::with_path("brokers").get(get_brokers).push(Router::with_path("{id}").get(get_brokers)))
         .push(Router::with_path("nodes").get(get_nodes).push(Router::with_path("{id}").get(get_nodes)))
         .push(
             Router::with_path("features").get(get_features).push(Router::with_path("{id}").get(get_features)),
         )
         .push(
-            Router::with_path("health/check")
-                .get(check_health)
-                .push(Router::with_path("{id}").get(check_health)),
-        )
-        .push(
             Router::with_path("clients")
-                .push(Router::with_path("offlines").get(search_offlines).delete(kick_offlines))
+                .push(
+                    Router::with_path("offlines")
+                        .get(search_offlines)
+                        .push(Router::new().hoop(require_write).delete(kick_offlines)),
+                )
                 .get(search_clients)
                 .push(
                     Router::with_path("{clientid}")
                         .get(get_client)
-                        .delete(kick_client)
+                        .push(Router::new().hoop(require_write).delete(kick_client))
                         .push(Router::with_path("online").get(check_online)),
                 ),
         )
@@ -132,9 +139,14 @@ pub(crate) fn route(
                 .push(Router::with_path("{clientid}").get(get_client_subscriptions)),
         )
         .push(Router::with_path("routes").get(get_routes).push(Router::with_path("{topic}").get(get_route)))
-        .push(Router::with_path("retains").get(get_retains).delete(delete_retain))
+        .push(
+            Router::with_path("retains")
+                .get(get_retains)
+                .push(Router::new().hoop(require_write).delete(delete_retain)),
+        )
         .push(
             Router::with_path("mqtt")
+                .hoop(require_write)
                 .push(Router::with_path("publish").post(publish))
                 .push(Router::with_path("subscribe").post(subscribe))
                 .push(Router::with_path("unsubscribe").post(unsubscribe)),
@@ -145,9 +157,15 @@ pub(crate) fn route(
                 .push(Router::with_path("{node}").get(node_plugins))
                 .push(Router::with_path("{node}/{plugin}").get(node_plugin_info))
                 .push(Router::with_path("{node}/{plugin}/config").get(node_plugin_config))
-                .push(Router::with_path("{node}/{plugin}/config/reload").put(node_plugin_config_reload))
-                .push(Router::with_path("{node}/{plugin}/load").put(node_plugin_load))
-                .push(Router::with_path("{node}/{plugin}/unload").put(node_plugin_unload)),
+                .push(
+                    Router::with_path("{node}/{plugin}/config/reload")
+                        .hoop(require_write)
+                        .put(node_plugin_config_reload),
+                )
+                .push(Router::with_path("{node}/{plugin}/load").hoop(require_write).put(node_plugin_load))
+                .push(
+                    Router::with_path("{node}/{plugin}/unload").hoop(require_write).put(node_plugin_unload),
+                ),
         )
         .push(
             Router::with_path("stats")
@@ -184,7 +202,9 @@ pub(crate) fn route(
                         .push(Router::with_path("{id}").get(get_metrics_history)),
                 )
                 .push(Router::with_path("{id}").get(get_metrics)),
-        )
+        );
+
+    router.push(public).push(protected)
 }
 
 pub(crate) async fn listen_and_serve(
@@ -291,6 +311,36 @@ async fn request_id_hoop(req: &mut Request, depot: &mut Depot, res: &mut Respons
 #[handler]
 async fn list_apis(res: &mut Response) {
     let data = serde_json::json!([
+        {
+            "name": "auth_login",
+            "method": "POST",
+            "path": "/api/v1/auth/login",
+            "descr": "Dashboard login; sets an HttpOnly session cookie"
+        },
+        {
+            "name": "auth_logout",
+            "method": "POST",
+            "path": "/api/v1/auth/logout",
+            "descr": "Clear the dashboard session cookie"
+        },
+        {
+            "name": "auth_me",
+            "method": "GET",
+            "path": "/api/v1/auth/me",
+            "descr": "Current dashboard user (session, bearer, or anonymous)"
+        },
+        {
+            "name": "auth_change_password",
+            "method": "POST",
+            "path": "/api/v1/auth/change-password",
+            "descr": "Change the current dashboard user's password"
+        },
+        {
+            "name": "auth_init",
+            "method": "POST",
+            "path": "/api/v1/auth/init",
+            "descr": "One-time bootstrap of the configured dashboard admin"
+        },
         {
             "name": "get_openapi",
             "method": "GET",
@@ -3700,5 +3750,228 @@ mod tests {
         assert!(body[0]["node"]["id"].is_number());
         assert!(body[0]["stats"].is_object());
         assert!(!body[0].is_string(), "partial failure must not be a bare string");
+    }
+
+    fn session_cookie(resp: &Response) -> String {
+        resp.headers()
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find_map(|v| {
+                v.split(';').next().filter(|p| p.starts_with("ferromq_session=")).map(|s| s.to_string())
+            })
+            .expect("ferromq_session cookie")
+    }
+
+    fn dashboard_cfg() -> PluginConfig {
+        let mut cfg = test_cfg();
+        cfg.dashboard_admin_username = "admin".into();
+        cfg.dashboard_admin_password = Some("admin-secret".into());
+        cfg.dashboard_viewer_username = Some("viewer".into());
+        cfg.dashboard_viewer_password = Some("viewer-secret".into());
+        cfg
+    }
+
+    async fn dashboard_service(
+        cfg: PluginConfig,
+        token: Option<String>,
+    ) -> (Service, Arc<crate::auth::AuthState>) {
+        let scx = ServerContext::new().node_id(1).busy_check_enable(false).build().await;
+        let state = Arc::new(crate::auth::AuthState::new(token.clone()));
+        let cfg = Arc::new(RwLock::new(cfg));
+        let router = route_with_auth(scx, cfg, state.clone(), prome::Monitor::new(), None);
+        (Service::new(router), state)
+    }
+
+    async fn login(svc: &Service, username: &str, password: &str) -> (Response, serde_json::Value) {
+        let mut resp = TestClient::post("http://127.0.0.1:0/api/v1/auth/login")
+            .json(&json!({"username": username, "password": password}))
+            .send(svc)
+            .await;
+        let body: serde_json::Value = resp.take_json().await.unwrap_or(json!({}));
+        (resp, body)
+    }
+
+    #[tokio::test]
+    async fn login_logout_me_and_change_password() {
+        let (svc, _) = dashboard_service(dashboard_cfg(), None).await;
+
+        let (resp, body) = login(&svc, "admin", "admin-secret").await;
+        assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
+        assert_eq!(body["username"], "admin");
+        assert_eq!(body["role"], "admin");
+        assert_eq!(body["auth"], "session");
+        assert!(body["expires_in"].as_u64().unwrap_or(0) > 0);
+        let cookie = session_cookie(&resp);
+
+        let mut me = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
+            .add_header("cookie", &cookie, true)
+            .send(&svc)
+            .await;
+        assert_eq!(me.status_code, Some(StatusCode::OK));
+        let me_body: serde_json::Value = me.take_json().await.unwrap();
+        assert_eq!(me_body["username"], "admin");
+        assert_eq!(me_body["role"], "admin");
+        assert_eq!(me_body["auth"], "session");
+
+        let mut changed = TestClient::post("http://127.0.0.1:0/api/v1/auth/change-password")
+            .add_header("cookie", &cookie, true)
+            .json(&json!({"old_password": "admin-secret", "new_password": "admin-secret-2"}))
+            .send(&svc)
+            .await;
+        assert_eq!(changed.status_code, Some(StatusCode::OK));
+        let changed_body: serde_json::Value = changed.take_json().await.unwrap();
+        assert_eq!(changed_body["ok"], true);
+
+        let (bad, bad_body) = login(&svc, "admin", "admin-secret").await;
+        assert_eq!(bad.status_code, Some(StatusCode::UNAUTHORIZED), "{bad_body}");
+
+        let (ok2, ok2_body) = login(&svc, "admin", "admin-secret-2").await;
+        assert_eq!(ok2.status_code, Some(StatusCode::OK), "{ok2_body}");
+
+        let mut logout = TestClient::post("http://127.0.0.1:0/api/v1/auth/logout")
+            .add_header("cookie", &cookie, true)
+            .send(&svc)
+            .await;
+        assert_eq!(logout.status_code, Some(StatusCode::OK));
+        let logout_body: serde_json::Value = logout.take_json().await.unwrap();
+        assert_eq!(logout_body["ok"], true);
+
+        let me_after = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
+            .add_header("cookie", &cookie, true)
+            .send(&svc)
+            .await;
+        assert_eq!(me_after.status_code, Some(StatusCode::UNAUTHORIZED));
+    }
+
+    #[tokio::test]
+    async fn login_rejects_bad_password_and_init_is_one_time() {
+        let (svc, _) = dashboard_service(dashboard_cfg(), None).await;
+        let (resp, body) = login(&svc, "admin", "wrong-password").await;
+        assert_eq!(resp.status_code, Some(StatusCode::UNAUTHORIZED), "{body}");
+        assert_eq!(body["code"], 401);
+
+        let mut init = TestClient::post("http://127.0.0.1:0/api/v1/auth/init").send(&svc).await;
+        assert_eq!(init.status_code, Some(StatusCode::OK));
+        let init_body: serde_json::Value = init.take_json().await.unwrap();
+        assert_eq!(init_body["username"], "admin");
+        assert_eq!(init_body["created"], true);
+
+        let again = TestClient::post("http://127.0.0.1:0/api/v1/auth/init").send(&svc).await;
+        assert_eq!(again.status_code, Some(StatusCode::CONFLICT));
+    }
+
+    #[tokio::test]
+    async fn me_anonymous_when_auth_disabled() {
+        let svc = test_service().await;
+        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/auth/me").send(&svc).await;
+        assert_eq!(resp.status_code, Some(StatusCode::OK));
+        let body: serde_json::Value = resp.take_json().await.unwrap();
+        assert_eq!(body["username"], "anonymous");
+        assert_eq!(body["role"], "admin");
+        assert_eq!(body["auth"], "anonymous");
+    }
+
+    #[tokio::test]
+    async fn bearer_still_works_as_operator() {
+        let (svc, _) = dashboard_service(dashboard_cfg(), Some("secret".into())).await;
+        let denied = TestClient::get("http://127.0.0.1:0/api/v1/plugins").send(&svc).await;
+        assert_eq!(denied.status_code, Some(StatusCode::UNAUTHORIZED));
+
+        let mut ok = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
+            .add_header("authorization", "Bearer secret", true)
+            .send(&svc)
+            .await;
+        assert_eq!(ok.status_code, Some(StatusCode::OK));
+        let body: serde_json::Value = ok.take_json().await.unwrap();
+        assert_eq!(body["username"], "operator");
+        assert_eq!(body["role"], "admin");
+        assert_eq!(body["auth"], "bearer");
+    }
+
+    #[tokio::test]
+    async fn viewer_is_denied_kick_publish_and_plugin_load() {
+        let (svc, state) = dashboard_service(dashboard_cfg(), None).await;
+        state.insert_user("viewer", "viewer-secret", crate::auth::Role::Viewer).await.expect("viewer");
+        let (resp, body) = login(&svc, "viewer", "viewer-secret").await;
+        assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
+        assert_eq!(body["role"], "viewer");
+        let cookie = session_cookie(&resp);
+
+        let mut kick = TestClient::delete("http://127.0.0.1:0/api/v1/clients/no-such-client")
+            .add_header("cookie", &cookie, true)
+            .send(&svc)
+            .await;
+        assert_eq!(kick.status_code, Some(StatusCode::FORBIDDEN));
+        let kick_body: serde_json::Value = kick.take_json().await.unwrap();
+        assert_eq!(kick_body["code"], 403);
+        assert_eq!(kick_body["message"], "forbidden");
+        assert_eq!(kick_body["details"]["required_role"], "admin");
+
+        let pub_resp = TestClient::post("http://127.0.0.1:0/api/v1/mqtt/publish")
+            .add_header("cookie", &cookie, true)
+            .json(&json!({"topic": "t", "payload": "x"}))
+            .send(&svc)
+            .await;
+        assert_eq!(pub_resp.status_code, Some(StatusCode::FORBIDDEN));
+
+        let load = TestClient::put("http://127.0.0.1:0/api/v1/plugins/1/ferromq-http-api/load")
+            .add_header("cookie", &cookie, true)
+            .send(&svc)
+            .await;
+        assert_eq!(load.status_code, Some(StatusCode::FORBIDDEN));
+
+        let plugins = TestClient::get("http://127.0.0.1:0/api/v1/plugins")
+            .add_header("cookie", &cookie, true)
+            .send(&svc)
+            .await;
+        assert_eq!(plugins.status_code, Some(StatusCode::OK));
+    }
+
+    #[tokio::test]
+    async fn admin_and_bearer_pass_write_rbac() {
+        let (svc, _) = dashboard_service(dashboard_cfg(), Some("secret".into())).await;
+        let (resp, body) = login(&svc, "admin", "admin-secret").await;
+        assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
+        let cookie = session_cookie(&resp);
+
+        let kick = TestClient::delete("http://127.0.0.1:0/api/v1/clients/no-such-client")
+            .add_header("cookie", &cookie, true)
+            .send(&svc)
+            .await;
+        assert_ne!(kick.status_code, Some(StatusCode::FORBIDDEN));
+        assert_eq!(kick.status_code, Some(StatusCode::NOT_FOUND));
+
+        let kick_bearer = TestClient::delete("http://127.0.0.1:0/api/v1/clients/no-such-client")
+            .add_header("authorization", "Bearer secret", true)
+            .send(&svc)
+            .await;
+        assert_ne!(kick_bearer.status_code, Some(StatusCode::FORBIDDEN));
+        assert_eq!(kick_bearer.status_code, Some(StatusCode::NOT_FOUND));
+    }
+
+    #[tokio::test]
+    async fn login_rate_limit_returns_429() {
+        let mut cfg = dashboard_cfg();
+        cfg.dashboard_login_rate_limit = 3;
+        let (svc, _) = dashboard_service(cfg, None).await;
+        for _ in 0..3 {
+            let (resp, _) = login(&svc, "admin", "wrong").await;
+            assert_eq!(resp.status_code, Some(StatusCode::UNAUTHORIZED));
+        }
+        let (resp, body) = login(&svc, "admin", "wrong").await;
+        assert_eq!(resp.status_code, Some(StatusCode::TOO_MANY_REQUESTS), "{body}");
+        assert_eq!(body["code"], 429);
+    }
+
+    #[tokio::test]
+    async fn health_and_login_remain_public_when_bearer_required() {
+        let (svc, _) = dashboard_service(dashboard_cfg(), Some("secret".into())).await;
+        let health = TestClient::get("http://127.0.0.1:0/api/v1/health/check").send(&svc).await;
+        assert_eq!(health.status_code, Some(StatusCode::OK));
+        let openapi = TestClient::get("http://127.0.0.1:0/api/v1/openapi.json").send(&svc).await;
+        assert_eq!(openapi.status_code, Some(StatusCode::OK));
+        let (resp, body) = login(&svc, "admin", "admin-secret").await;
+        assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
     }
 }

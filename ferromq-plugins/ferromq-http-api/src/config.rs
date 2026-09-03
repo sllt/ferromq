@@ -36,6 +36,56 @@ pub struct PluginConfig {
     #[serde(default)]
     pub http_bearer_token: Option<String>,
 
+    /// Bootstrap admin username used when no dashboard users exist yet.
+    #[serde(default = "PluginConfig::dashboard_admin_username_default")]
+    pub dashboard_admin_username: String,
+
+    /// Bootstrap admin password (plaintext in config only). Hashed on first
+    /// login / `POST /api/v1/auth/init`. Never written back to disk.
+    #[serde(default)]
+    pub dashboard_admin_password: Option<String>,
+
+    /// Optional bootstrap viewer username (created together with admin on init).
+    #[serde(default)]
+    pub dashboard_viewer_username: Option<String>,
+
+    /// Optional bootstrap viewer password (plaintext in config only).
+    #[serde(default)]
+    pub dashboard_viewer_password: Option<String>,
+
+    /// Session cookie name. Default: `ferromq_session`.
+    #[serde(default = "PluginConfig::dashboard_cookie_name_default")]
+    pub dashboard_cookie_name: String,
+
+    /// Set the `Secure` flag on the session cookie (enable when serving HTTPS).
+    #[serde(default)]
+    pub dashboard_cookie_secure: bool,
+
+    /// Idle session timeout. Default: 30 minutes.
+    #[serde(
+        default = "PluginConfig::dashboard_session_idle_timeout_default",
+        deserialize_with = "deserialize_duration"
+    )]
+    pub dashboard_session_idle_timeout: Duration,
+
+    /// Absolute session lifetime from login. Default: 12 hours.
+    #[serde(
+        default = "PluginConfig::dashboard_session_max_age_default",
+        deserialize_with = "deserialize_duration"
+    )]
+    pub dashboard_session_max_age: Duration,
+
+    /// Max login attempts per client IP per window. Default: 10.
+    #[serde(default = "PluginConfig::dashboard_login_rate_limit_default")]
+    pub dashboard_login_rate_limit: u32,
+
+    /// Login rate-limit window. Default: 1 minute.
+    #[serde(
+        default = "PluginConfig::dashboard_login_rate_window_default",
+        deserialize_with = "deserialize_duration"
+    )]
+    pub dashboard_login_rate_window: Duration,
+
     #[serde(default = "PluginConfig::message_type_default")]
     pub message_type: MessageType,
 
@@ -139,10 +189,48 @@ impl PluginConfig {
         Duration::from_secs(7 * 24 * 60 * 60)
     }
 
-    /// Serializes the configuration to a JSON value.
+    #[inline]
+    fn dashboard_admin_username_default() -> String {
+        "admin".into()
+    }
+
+    #[inline]
+    fn dashboard_cookie_name_default() -> String {
+        "ferromq_session".into()
+    }
+
+    #[inline]
+    fn dashboard_session_idle_timeout_default() -> Duration {
+        Duration::from_secs(30 * 60)
+    }
+
+    #[inline]
+    fn dashboard_session_max_age_default() -> Duration {
+        Duration::from_secs(12 * 60 * 60)
+    }
+
+    #[inline]
+    fn dashboard_login_rate_limit_default() -> u32 {
+        10
+    }
+
+    #[inline]
+    fn dashboard_login_rate_window_default() -> Duration {
+        Duration::from_secs(60)
+    }
+
+    /// Serializes the configuration to a JSON value, redacting secrets.
     #[inline]
     pub fn to_json(&self) -> Result<serde_json::Value> {
-        Ok(serde_json::to_value(self)?)
+        let mut v = serde_json::to_value(self)?;
+        if let Some(obj) = v.as_object_mut() {
+            for key in ["http_bearer_token", "dashboard_admin_password", "dashboard_viewer_password"] {
+                if obj.get(key).and_then(|x| x.as_str()).is_some_and(|s| !s.is_empty()) {
+                    obj.insert(key.to_string(), serde_json::Value::String("***".into()));
+                }
+            }
+        }
+        Ok(v)
     }
 
     /// Returns `true` if any config values that require a hot-reload

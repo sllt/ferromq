@@ -20,7 +20,7 @@ circuit-breaker = ["ferromq-storage/circuit-breaker"]
 ferromq = { workspace = true, features = ["plugin", "metrics", "stats", "grpc", "shared-subscription", "retain", "msgstore", "delayed", "auto-subscription"] }
 tokio = { workspace = true, features = ["sync", "time" ] }
 serde = { workspace = true, features = ["derive"] }
-salvo = { version = "0.90", features = ["affix-state", "serve-static"] }
+salvo = { version = "0.90", features = ["affix-state", "serve-static", "cookie"] }
 ferromq-storage = { workspace = true, default-features = false, features = ["ttl"], optional = true}
 async-trait.workspace = true
 log.workspace = true
@@ -34,7 +34,10 @@ prometheus.workspace = true
 postcard.workspace = true
 rust-embed = "8"
 lru = "0.18"
+bcrypt = "0.15"
+rand = { workspace = true }
+time = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
-salvo = { version = "0.90", features = ["affix-state", "serve-static", "test"] }
+salvo = { version = "0.90", features = ["affix-state", "serve-static", "test", "cookie"] }
