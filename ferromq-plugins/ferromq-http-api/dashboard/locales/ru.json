@@ -56,7 +56,13 @@
     "error_empty": "Token не может быть пустым",
     "error_invalid": "Неверный токен или сервис недоступен",
     "hide_token": "Скрыть Token",
-    "show_token": "Показать Token"
+    "show_token": "Показать Token",
+    "username": "Username",
+    "password": "Password",
+    "username_placeholder": "admin",
+    "password_placeholder": "Password",
+    "token_optional": "Operator Bearer token",
+    "use_token": "Use Bearer token instead"
   },
   "overview": {
     "title": "Обзор кластера",

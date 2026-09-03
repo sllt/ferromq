@@ -6,6 +6,10 @@ FerroMQ is based on [RMQTT](https://github.com/rmqtt/rmqtt) at upstream commit `
 
 ## [0.24.0] - unreleased
 
+### New Features
+
+- **Dashboard session login (P3a)**: `ferromq-http-api` adds `POST /api/v1/auth/login|logout|init`, `GET /auth/me`, and `POST /auth/change-password`. Passwords are bcrypt-hashed in memory; the session cookie is HttpOnly / SameSite=Lax (optional Secure). `Authorization: Bearer <http_bearer_token>` remains an operator/admin credential. Minimal roles: `admin` vs `viewer` (viewer cannot kick / publish / plugin load). MQTT client auth plugins are unchanged.
+
 ### Changed
 
 - Renamed the product, crates, plugins, binary, default config, metrics, and runtime paths from RMQTT to FerroMQ.

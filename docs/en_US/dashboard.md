@@ -12,6 +12,8 @@ The Dashboard assets are embedded into the binary at compile time via `rust-embe
 
 ```
 http://<host>:6060/dashboard/
+
+Sign in with a dashboard username/password (`POST /api/v1/auth/login`) when `dashboard_admin_password` is set in `ferromq-http-api.toml`. An operator Bearer token is still accepted as a fallback. See [HTTP API — Authentication](http-api.md#authentication-p3a-session--bearer).
 ```
 
 Frontend changes require recompiling (`cargo build`) to take effect.

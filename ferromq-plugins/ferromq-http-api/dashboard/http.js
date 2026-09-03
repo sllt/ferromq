@@ -1,6 +1,7 @@
 /* ============================================================
    FerroMQ Dashboard — HTTP API 层
    所有请求直接调用 http-api 的 /api/v1/*
+   P3a: credentials: 'include' 发送会话 Cookie；可选 Bearer 仍兼容自动化。
    ============================================================ */
 window.http = {
   async request(method, path, body, params) {
@@ -21,9 +22,11 @@ window.http = {
       const res = await fetch(url, {
         method,
         headers,
+        credentials: 'include',
         body: body ? JSON.stringify(body) : undefined,
       });
       if (res.status === 401) {
+        store.clearSession();
         store.clearToken();
         location.hash = '#/login';
         return null;

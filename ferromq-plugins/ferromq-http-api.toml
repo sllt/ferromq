@@ -13,6 +13,20 @@ http_laddr = "0.0.0.0:6060"
 ## When not set (default), no authentication is required.
 #http_bearer_token = "public"
 
+## Dashboard session login (P3a). First login or POST /api/v1/auth/init
+## creates the admin (bcrypt hash in memory). Bearer token remains an
+## operator/admin credential for automation. In-memory users/sessions
+## are per-node (sticky sessions in a cluster). P3b: API keys + audit.
+# dashboard_admin_username = "admin"
+# dashboard_admin_password = "change-me"
+# dashboard_viewer_username = "viewer"
+# dashboard_viewer_password = "change-me-too"
+# dashboard_cookie_secure = false
+# dashboard_session_idle_timeout = "30m"
+# dashboard_session_max_age = "12h"
+# dashboard_login_rate_limit = 10
+# dashboard_login_rate_window = "1m"
+
 ## Enable TCP SO_REUSEADDR on the HTTP listener.
 ## Default: true
 # http_reuseaddr = true

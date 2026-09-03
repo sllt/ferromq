@@ -25,17 +25,22 @@ message_expiry_interval = "5m"
 # Prometheus metrics cache interval
 prometheus_metrics_cache_interval = "5s"
 
-# Optional Bearer token authentication
+# Optional Bearer token authentication (operator / automation)
 # http_bearer_token = "your-secret-token"
+
+# Dashboard session login (P3a). First login or POST /api/v1/auth/init
+# bootstraps the admin (bcrypt, in-memory). Viewer is read-only.
+# dashboard_admin_username = "admin"
+# dashboard_admin_password = "change-me"
 ```
 
-### Authentication (Optional)
+### Authentication
 
-If `http_bearer_token` is set, all requests must include:
-
-```
-Authorization: Bearer <your-secret-token>
-```
+- **Session:** `POST /api/v1/auth/login` `{ username, password }` → `ferromq_session` cookie (`HttpOnly`, `SameSite=Lax`). Also `POST /logout`, `GET /me`, `POST /change-password`, `POST /init`.
+- **Bearer:** `Authorization: Bearer <http_bearer_token>` is still a superuser/operator credential.
+- **Open access:** if neither token nor `dashboard_admin_password` is set, the API stays open.
+- **Roles:** `admin` can kick / publish / plugin load; `viewer` cannot (`403`).
+- **Scope:** http-api only. MQTT client auth plugins are unchanged. Users/sessions are in-memory (sticky sessions in a cluster).
 
 ## Base URL
 

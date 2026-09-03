@@ -43,7 +43,16 @@ ferromq_http_api::register_named(&scx, "ferromq-http-api", true, false).await?;
 | `http_request_log` | `bool` | `false` | 是否打印 HTTP 请求日志 |
 | `http_reuseaddr` | `bool` | `true` | 启用 `SO_REUSEADDR` socket 选项（仅 Unix） |
 | `http_reuseport` | `bool` | `false` | 启用 `SO_REUSEPORT` socket 选项（仅 Unix） |
-| `http_bearer_token` | `string` | — | HTTP API Bearer 令牌认证（可选） |
+| `http_bearer_token` | `string` | — | HTTP API Bearer 令牌认证（可选；视为 admin/operator） |
+| `dashboard_admin_username` | `string` | `"admin"` | 尚无 Dashboard 用户时的引导管理员用户名 |
+| `dashboard_admin_password` | `string` | — | 引导管理员密码（首次登录 / `/auth/init` 时 bcrypt 哈希，从不存明文） |
+| `dashboard_viewer_username` | `string` | — | 可选引导只读用户名 |
+| `dashboard_viewer_password` | `string` | — | 可选引导只读密码 |
+| `dashboard_cookie_secure` | `bool` | `false` | 会话 Cookie 是否设置 `Secure`（HTTPS 时启用） |
+| `dashboard_session_idle_timeout` | `string` | `"30m"` | 会话空闲过期 |
+| `dashboard_session_max_age` | `string` | `"12h"` | 会话绝对寿命 |
+| `dashboard_login_rate_limit` | `u32` | `10` | 每个 IP 在窗口内的最大登录次数 |
+| `dashboard_login_rate_window` | `string` | `"1m"` | 登录限流窗口 |
 | `message_type` | `u8` | `99` | 插件间 gRPC 通信的消息类型标识符 |
 | `message_expiry_interval` | `string` | `"5m"` | 发布操作消息的默认过期时间 |
 | `metrics_sample_interval` | `string` | `"5s"` | 指标采样间隔 |
@@ -78,6 +87,11 @@ prometheus_metrics_cache_interval = "5s"
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/` | 列出所有可用 API 端点 |
+| POST | `/auth/login` | Dashboard 登录，设置 `ferromq_session` Cookie |
+| POST | `/auth/logout` | 清除会话 Cookie |
+| GET | `/auth/me` | 当前用户（`session` / `bearer` / `anonymous`） |
+| POST | `/auth/change-password` | 修改当前会话用户密码 |
+| POST | `/auth/init` | 按配置一次性引导管理员 |
 | GET | `/openapi.json` | `/api/v1` 的 OpenAPI 3 文档 |
 | GET | `/docs` | OpenAPI 的 Swagger UI |
 | **Broker** | | |
@@ -217,7 +231,15 @@ OpenAPI 3：`GET /api/v1/openapi.json`。可选列表信封：`?format=page` →
 
 ### 认证
 
-如果配置了 `http_bearer_token`，所有 API 请求（健康检查除外）需要携带 `Authorization: Bearer <token>` 请求头。
+HTTP API 接受两种凭证（**不影响 MQTT 客户端认证插件**）：
+
+- **会话 Cookie** — `POST /api/v1/auth/login` 提交 `{ username, password }`。Cookie `ferromq_session` 为 `HttpOnly`、`SameSite=Lax`，`dashboard_cookie_secure` 为 true 时带 `Secure`。角色：`admin`（可写）与 `viewer`（只读，不能踢人 / 发布 / 加载插件）。
+- **Bearer 令牌** — `Authorization: Bearer <http_bearer_token>` 仍是自动化用的超级用户/operator 凭证。
+- **开放访问** — 未配置 bearer 与 `dashboard_admin_password`（且尚无用户）时保持开放（匿名 admin）。
+
+引导：尚无用户时，首次匹配的登录或 `POST /api/v1/auth/init` 会创建配置中的 admin（及可选 viewer）。密码以 bcrypt 哈希保存在**进程内存**（重启丢失；集群节点不共享会话，需粘性会话）。健康检查、OpenAPI、login/logout/init 保持公开。
+
+P3b 将增加 API Key 与审计日志。
 
 ## 依赖
 

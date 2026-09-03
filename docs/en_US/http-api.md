@@ -36,6 +36,22 @@ http_laddr = "0.0.0.0:6060"
 ## When not set (default), no authentication is required.
 #http_bearer_token = "public"
 
+## Dashboard session login (P3a). When `dashboard_admin_password` is set,
+## the first `POST /api/v1/auth/login` (or `POST /api/v1/auth/init`) creates
+## an admin user and stores a bcrypt hash in memory. The raw `http_bearer_token`
+## remains a superuser/operator credential for automation.
+# dashboard_admin_username = "admin"
+# dashboard_admin_password = "change-me"
+# dashboard_viewer_username = "viewer"
+# dashboard_viewer_password = "change-me-too"
+# dashboard_cookie_secure = false          ## set true when serving HTTPS
+# dashboard_session_idle_timeout = "30m"
+# dashboard_session_max_age = "12h"
+# dashboard_login_rate_limit = 10
+# dashboard_login_rate_window = "1m"
+## Users/sessions are in-memory (single node). Restart re-bootstraps from config.
+## Cluster: use sticky sessions; P3b will add API keys + audit log.
+
 ## Enable TCP SO_REUSEADDR on the HTTP listener.
 ## Default: true
 # http_reuseaddr = true
@@ -119,7 +135,10 @@ The possible status codes are as follows:
 | 200  | Succeed, and the returned JSON data will provide more information |
 | 400  | Invalid client request, such as wrong request body or parameters |
 | 401  | Client authentication failed, maybe because of invalid authentication credentials |
+| 403  | Authenticated but the role cannot perform this write action (`viewer` vs `admin`) |
 | 404  | The requested path cannot be found or the requested object does not exist |
+| 409  | Dashboard users already initialized (`POST /auth/init`) |
+| 429  | Login rate limit exceeded |
 | 500  | An internal error occurred while the server was processing the request |
 
 Failed API calls return **JSON** (not plain text / HTML):
@@ -138,6 +157,65 @@ Failed API calls return **JSON** (not plain text / HTML):
 Send `X-Request-Id` on the request to have it echoed; otherwise the server generates one. Successful `2xx` bodies are unchanged (including existing plain-text successes such as `ok`).
 
 Machine-readable contract: `GET /api/v1/openapi.json` (Swagger UI at `GET /api/v1/docs`).
+
+## Authentication (P3a session + Bearer)
+
+Two credentials are accepted on the HTTP API. **MQTT client auth plugins are unchanged.**
+
+| Mechanism | How | Role |
+|-----------|-----|------|
+| Session cookie | `POST /api/v1/auth/login` with `{ "username", "password" }` sets `ferromq_session` (`HttpOnly`, `SameSite=Lax`, `Secure` when `dashboard_cookie_secure`) | `admin` or `viewer` from the user record |
+| Bearer token | `Authorization: Bearer <http_bearer_token>` | Always `admin` (username `operator`) for automation |
+| Open access | Neither `http_bearer_token` nor `dashboard_admin_password` is set, and no users exist yet | Anonymous `admin` (backward compatible) |
+
+Public without a session/bearer: `POST /auth/login`, `POST /auth/logout`, `POST /auth/init`, `GET /health/check`, `GET /openapi.json`, `GET /docs`.
+
+`viewer` may read. `viewer` **cannot** kick clients, publish/subscribe via HTTP, delete retains, or load/unload/reload plugins (`403` + `{ "details": { "required_role": "admin" } }`).
+
+Passwords are stored as **bcrypt** hashes in process memory (never plaintext). Restart drops users/sessions; the next login/init re-creates the configured admin. In a cluster, each node has its own store — use sticky sessions.
+
+### How to test
+
+```bash
+# One-time bootstrap from ferromq-http-api.toml (optional; first login also bootstraps)
+curl -sS -X POST http://127.0.0.1:6060/api/v1/auth/init
+
+# Login — save the session cookie
+curl -sS -c cookie.txt -X POST http://127.0.0.1:6060/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"change-me"}'
+
+# Current user
+curl -sS -b cookie.txt http://127.0.0.1:6060/api/v1/auth/me
+
+# Change password
+curl -sS -b cookie.txt -X POST http://127.0.0.1:6060/api/v1/auth/change-password \
+  -H 'Content-Type: application/json' \
+  -d '{"old_password":"change-me","new_password":"change-me-2"}'
+
+# Viewer is denied kick/publish/plugin load
+curl -sS -b cookie.txt -X DELETE http://127.0.0.1:6060/api/v1/clients/demo
+# 403 if the session user is role=viewer
+
+# Bearer token still works as operator (no cookie)
+curl -sS -H 'Authorization: Bearer public' http://127.0.0.1:6060/api/v1/brokers
+
+# Logout
+curl -sS -b cookie.txt -c cookie.txt -X POST http://127.0.0.1:6060/api/v1/auth/logout
+```
+
+### Dashboard frontend migration
+
+The embedded SPA no longer requires pasting a Bearer token as the primary login.
+
+1. Prefer `POST /api/v1/auth/login` and send `credentials: 'include'` on every `/api/v1` `fetch` so the HttpOnly cookie is used.
+2. On boot, call `GET /api/v1/auth/me`. `200` means the user is in (session, leftover Bearer, or anonymous when auth is off). `401` → show the login page.
+3. Keep `Authorization: Bearer <token>` as an **optional** operator fallback (localStorage) for automation / existing bookmarks.
+4. `POST /api/v1/auth/logout` then clear any local token flag.
+5. Gate kick / publish / plugin-load UI on `role !== 'viewer'` (`GET /me`).
+6. Do not store the password. The session id lives only in the HttpOnly cookie.
+
+P3b will add API keys and an audit log; identity is already available on the depot as `username` / `role` / `auth`.
 
 ## List pagination metadata
 

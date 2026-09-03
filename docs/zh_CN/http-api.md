@@ -36,6 +36,22 @@ http_laddr = "0.0.0.0:6060"
 ## When not set (default), no authentication is required.
 #http_bearer_token = "public"
 
+## Dashboard 会话登录（P3a）。配置 `dashboard_admin_password` 后，首次
+## `POST /api/v1/auth/login`（或 `POST /api/v1/auth/init`）会创建 admin，
+## 并以 bcrypt 哈希保存在内存中。原始 `http_bearer_token` 仍可作为自动化
+## 超级用户/operator 凭证。
+# dashboard_admin_username = "admin"
+# dashboard_admin_password = "change-me"
+# dashboard_viewer_username = "viewer"
+# dashboard_viewer_password = "change-me-too"
+# dashboard_cookie_secure = false          ## 仅 HTTPS 时设为 true
+# dashboard_session_idle_timeout = "30m"
+# dashboard_session_max_age = "12h"
+# dashboard_login_rate_limit = 10
+# dashboard_login_rate_window = "1m"
+## 用户与会话仅存于本节点内存。重启后按配置重新引导。
+## 集群需粘性会话；API Key 与审计日志留给 P3b。
+
 ## Enable TCP SO_REUSEADDR on the HTTP listener.
 ## Default: true
 # http_reuseaddr = true
@@ -119,7 +135,10 @@ FerroMQ 接口在调用成功时总是返回 200 OK，响应内容主要以 JSON
 | 200  | 成功，如果需要返回更多数据，将以 JSON 数据格式返回              |
 | 400  | 客户端请求无效，例如请求体或参数错误                        |
 | 401  | 客户端未通过服务端认证，使用无效的身份验证凭据可能会发生              |
+| 403  | 已认证但角色无权执行写操作（`viewer` 不能踢人 / 发布 / 加载插件） |
 | 404  | 找不到请求的路径或者请求的对象不存在                        |
+| 409  | Dashboard 用户已初始化（`POST /auth/init`） |
+| 429  | 登录尝试过于频繁 |
 | 500  | 服务端处理请求时发生内部错误                            |
 
 API 失败时返回 **JSON**（不再使用纯文本 / HTML）：
@@ -138,6 +157,55 @@ API 失败时返回 **JSON**（不再使用纯文本 / HTML）：
 请求可携带 `X-Request-Id`，服务端会原样回写；未提供时由服务端生成。成功的 `2xx` 响应体保持不变（包括已有的纯文本成功响应，如 `ok`）。
 
 机器可读契约：`GET /api/v1/openapi.json`（Swagger UI：`GET /api/v1/docs`）。
+
+## 认证（P3a 会话 + Bearer）
+
+HTTP API 接受两种凭证。**MQTT 客户端认证插件不受影响。**
+
+| 机制 | 用法 | 角色 |
+|------|------|------|
+| 会话 Cookie | `POST /api/v1/auth/login` 提交 `{ "username", "password" }`，设置 `ferromq_session`（`HttpOnly`、`SameSite=Lax`，`dashboard_cookie_secure` 时带 `Secure`） | 用户记录上的 `admin` 或 `viewer` |
+| Bearer 令牌 | `Authorization: Bearer <http_bearer_token>` | 始终为 `admin`（用户名 `operator`），供自动化使用 |
+| 开放访问 | 未配置 `http_bearer_token` 与 `dashboard_admin_password`，且尚无用户 | 匿名 `admin`（向后兼容） |
+
+无需会话/Bearer 即可访问：`POST /auth/login`、`POST /auth/logout`、`POST /auth/init`、`GET /health/check`、`GET /openapi.json`、`GET /docs`。
+
+`viewer` 只读。`viewer` **不能**踢客户端、经 HTTP 发布/订阅、删除保留消息、加载/卸载/重载插件（`403`，`details.required_role = admin`）。
+
+密码以 **bcrypt** 哈希保存在进程内存中（从不存明文）。重启会清空用户与会话，下次 login/init 按配置重新创建 admin。集群中每个节点各自一份存储——需要粘性会话。
+
+### 如何测试
+
+```bash
+curl -sS -X POST http://127.0.0.1:6060/api/v1/auth/init
+
+curl -sS -c cookie.txt -X POST http://127.0.0.1:6060/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"change-me"}'
+
+curl -sS -b cookie.txt http://127.0.0.1:6060/api/v1/auth/me
+
+curl -sS -b cookie.txt -X POST http://127.0.0.1:6060/api/v1/auth/change-password \
+  -H 'Content-Type: application/json' \
+  -d '{"old_password":"change-me","new_password":"change-me-2"}'
+
+curl -sS -H 'Authorization: Bearer public' http://127.0.0.1:6060/api/v1/brokers
+
+curl -sS -b cookie.txt -c cookie.txt -X POST http://127.0.0.1:6060/api/v1/auth/logout
+```
+
+### Dashboard 前端迁移
+
+内嵌 SPA 不再以粘贴 Bearer Token 为主要登录方式。
+
+1. 优先 `POST /api/v1/auth/login`，所有 `/api/v1` 的 `fetch` 带 `credentials: 'include'`，以便携带 HttpOnly Cookie。
+2. 启动时调用 `GET /api/v1/auth/me`。`200` 表示已进入（会话、残留 Bearer，或未开启认证时的匿名）。`401` 则显示登录页。
+3. 保留 `Authorization: Bearer <token>` 作为可选的 operator 回退（localStorage）。
+4. `POST /api/v1/auth/logout` 后清除本地 token 标记。
+5. 踢人 / 发布 / 加载插件的 UI 按 `role !== 'viewer'` 门控。
+6. 不要存储密码。会话 ID 只存在于 HttpOnly Cookie。
+
+P3b 将增加 API Key 与审计日志；请求身份已在 depot 中提供 `username` / `role` / `auth`。
 
 ## 列表分页元数据
 

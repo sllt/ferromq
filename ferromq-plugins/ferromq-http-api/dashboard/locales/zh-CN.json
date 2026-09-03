@@ -49,14 +49,20 @@
   },
   "login": {
     "title": "登录",
-    "token_placeholder": "请输入 Token",
-    "subtitle": "输入 Bearer Token 登录 Dashboard",
+    "username": "用户名",
+    "password": "密码",
+    "username_placeholder": "admin",
+    "password_placeholder": "密码",
+    "token_placeholder": "可选 Bearer Token",
+    "token_optional": "Operator Bearer Token",
+    "use_token": "改用 Bearer Token",
+    "subtitle": "使用 Dashboard 账号登录（或使用 operator Bearer Token）",
     "submit": "登录",
     "verifying": "验证中...",
-    "error_empty": "Token 不能为空",
-    "error_invalid": "Token 无效或服务不可用",
-    "hide_token": "隐藏 Token",
-    "show_token": "显示 Token"
+    "error_empty": "用户名和密码不能为空",
+    "error_invalid": "凭据无效或服务不可用",
+    "hide_token": "隐藏",
+    "show_token": "显示"
   },
   "overview": {
     "title": "集群概览",

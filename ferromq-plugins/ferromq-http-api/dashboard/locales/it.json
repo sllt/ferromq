@@ -56,7 +56,13 @@
     "error_empty": "Il Token non può essere vuoto",
     "error_invalid": "Token non valido o servizio non disponibile",
     "hide_token": "Nascondi Token",
-    "show_token": "Mostra Token"
+    "show_token": "Mostra Token",
+    "username": "Username",
+    "password": "Password",
+    "username_placeholder": "admin",
+    "password_placeholder": "Password",
+    "token_optional": "Operator Bearer token",
+    "use_token": "Use Bearer token instead"
   },
   "overview": {
     "title": "Panoramica cluster",

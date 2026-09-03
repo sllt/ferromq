@@ -15,7 +15,7 @@ window.ClientDetailPage = Vue.defineComponent({
           {{ info.connected ? $t('clients.connected') : $t('clients.disconnected') }}
         </span>
         <span style="flex:1;"></span>
-        <button v-if="info" class="btn btn-sm btn-primary" style="background:var(--red);"
+        <button v-if="info && canWrite" class="btn btn-sm btn-primary" style="background:var(--red);"
                 @click="kick" :title="$t('clients.disconnect')">{{ $t('clients.disconnect') }}</button>
         <button class="btn btn-sm" style="border:1px solid var(--border);background:transparent;color:var(--text-muted);"
                 @click="refresh">&#x27F3; {{ $t('common.refresh') }}</button>
@@ -138,7 +138,7 @@ window.ClientDetailPage = Vue.defineComponent({
                 <td style="font-size:12px;">{{ s.opts?.group || '-' }}</td>
                 <td style="font-size:12px;text-align:center;">{{ s.node_id ?? '-' }}</td>
                 <td>
-                  <button class="btn-icon" style="width:auto;padding:3px 10px;font-size:11px;color:var(--red);"
+                  <button v-if="canWrite" class="btn-icon" style="width:auto;padding:3px 10px;font-size:11px;color:var(--red);"
                           @click="unsub(s)" :title="$t('subscriptions.unsubscribe')">
                     {{ $t('subscriptions.unsub_btn') }}
                   </button>
@@ -264,7 +264,9 @@ window.ClientDetailPage = Vue.defineComponent({
 
     Vue.onMounted(load);
 
+    const canWrite = store.canWrite();
+
     return { clientid, info, subs, loading, notFound, hasWill,
-             fmtExpiry, fmtWill, load, refresh, kick, unsub, back, $t };
+             fmtExpiry, fmtWill, load, refresh, kick, unsub, back, canWrite, $t };
   },
 });

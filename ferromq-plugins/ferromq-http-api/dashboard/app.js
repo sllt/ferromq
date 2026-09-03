@@ -208,8 +208,10 @@ const App = Vue.defineComponent({
     refresh() {
       location.reload();
     },
-    logout() {
+    async logout() {
+      try { await http.post('/auth/logout'); } catch (_) {}
       store.clearToken();
+      store.clearSession();
       location.hash = '#/login';
     },
   },
@@ -217,13 +219,17 @@ const App = Vue.defineComponent({
     this.onHashChange();
     window.addEventListener('hashchange', () => this.onHashChange());
 
-    // 启动时自动验证已有 Token 是否仍有效
-    if (store.isLoggedIn()) {
-      http.get('/brokers').catch(function() {
-        store.clearToken();
-        location.hash = '#/login';
-      });
-    }
+    // 启动时用 /auth/me 恢复会话（cookie / bearer / 匿名开放访问）
+    http.get('/auth/me').then(function(me) {
+      if (me) {
+        store.setSession(me);
+        if (location.hash === '#/login' || !location.hash) location.hash = '#/';
+      }
+    }).catch(function() {
+      store.clearSession();
+      store.clearToken();
+      if (location.hash !== '#/login') location.hash = '#/login';
+    });
 
     window.addEventListener('locale-changed', () => {
       this.localeVersion++;

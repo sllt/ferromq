@@ -49,14 +49,20 @@
   },
   "login": {
     "title": "Login",
-    "token_placeholder": "Enter Token",
-    "subtitle": "Enter Bearer Token to Login Dashboard",
+    "username": "Username",
+    "password": "Password",
+    "username_placeholder": "admin",
+    "password_placeholder": "Password",
+    "token_placeholder": "Optional Bearer token",
+    "token_optional": "Operator Bearer token",
+    "use_token": "Use Bearer token instead",
+    "subtitle": "Sign in with a dashboard account (or an operator Bearer token)",
     "submit": "Login",
     "verifying": "Verifying...",
-    "error_empty": "Token cannot be empty",
-    "error_invalid": "Invalid token or service unavailable",
-    "hide_token": "Hide Token",
-    "show_token": "Show Token"
+    "error_empty": "Username and password cannot be empty",
+    "error_invalid": "Invalid credentials or service unavailable",
+    "hide_token": "Hide",
+    "show_token": "Show"
   },
   "overview": {
     "title": "Cluster Overview",

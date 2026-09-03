@@ -56,7 +56,13 @@
     "error_empty": "O Token não pode ficar vazio",
     "error_invalid": "Token inválido ou serviço indisponível",
     "hide_token": "Ocultar Token",
-    "show_token": "Mostrar Token"
+    "show_token": "Mostrar Token",
+    "username": "Username",
+    "password": "Password",
+    "username_placeholder": "admin",
+    "password_placeholder": "Password",
+    "token_optional": "Operator Bearer token",
+    "use_token": "Use Bearer token instead"
   },
   "overview": {
     "title": "Visão geral do cluster",

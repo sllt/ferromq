@@ -43,7 +43,16 @@ File: `ferromq-http-api.toml` (in the plugin config directory). Loaded via `scx.
 | `http_request_log` | `bool` | `false` | Whether to print HTTP request logs |
 | `http_reuseaddr` | `bool` | `true` | Enable `SO_REUSEADDR` socket option (Unix only) |
 | `http_reuseport` | `bool` | `false` | Enable `SO_REUSEPORT` socket option (Unix only) |
-| `http_bearer_token` | `string` | — | Bearer token for HTTP API authentication (optional) |
+| `http_bearer_token` | `string` | — | Bearer token for HTTP API authentication (optional; treated as admin/operator) |
+| `dashboard_admin_username` | `string` | `"admin"` | Bootstrap admin username when no dashboard users exist |
+| `dashboard_admin_password` | `string` | — | Bootstrap admin password (hashed with bcrypt on first login / `/auth/init`; never stored as plaintext) |
+| `dashboard_viewer_username` | `string` | — | Optional bootstrap viewer username |
+| `dashboard_viewer_password` | `string` | — | Optional bootstrap viewer password |
+| `dashboard_cookie_secure` | `bool` | `false` | Set `Secure` on the session cookie (enable behind HTTPS) |
+| `dashboard_session_idle_timeout` | `string` | `"30m"` | Idle session expiry |
+| `dashboard_session_max_age` | `string` | `"12h"` | Absolute session lifetime |
+| `dashboard_login_rate_limit` | `u32` | `10` | Max login attempts per IP per window |
+| `dashboard_login_rate_window` | `string` | `"1m"` | Login rate-limit window |
 | `message_type` | `u8` | `99` | gRPC message type identifier for plugin communication |
 | `message_expiry_interval` | `string` | `"5m"` | Default message expiration interval for publish operations |
 | `metrics_sample_interval` | `string` | `"5s"` | Metrics sampling interval |
@@ -78,6 +87,11 @@ All endpoints are prefixed with `/api/v1`.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | List all available API endpoints |
+| POST | `/auth/login` | Dashboard login; sets `ferromq_session` cookie |
+| POST | `/auth/logout` | Clear the session cookie |
+| GET | `/auth/me` | Current user (`session` / `bearer` / `anonymous`) |
+| POST | `/auth/change-password` | Change the current session user's password |
+| POST | `/auth/init` | One-time bootstrap of the configured admin |
 | GET | `/openapi.json` | OpenAPI 3 document for `/api/v1` |
 | GET | `/docs` | Swagger UI for the OpenAPI document |
 | **Brokers** | | |
@@ -217,7 +231,15 @@ OpenAPI 3: `GET /api/v1/openapi.json`. Optional list envelope: `?format=page` �
 
 ### Authentication
 
-If `http_bearer_token` is configured, all API requests (except health check) require an `Authorization: Bearer <token>` header.
+Two credentials are accepted (MQTT client auth plugins are not involved):
+
+- **Session cookie** — `POST /api/v1/auth/login` with `{ username, password }`. Cookie `ferromq_session` is `HttpOnly`, `SameSite=Lax`, and `Secure` when `dashboard_cookie_secure` is true. Roles: `admin` (write) and `viewer` (read-only; cannot kick / publish / plugin load).
+- **Bearer token** — `Authorization: Bearer <http_bearer_token>` remains a superuser/operator credential for automation.
+- **Open access** — if neither a bearer token nor `dashboard_admin_password` is set (and no users exist yet), the API stays open (anonymous admin).
+
+Bootstrap: when no dashboard users exist, the first matching login or `POST /api/v1/auth/init` creates the configured admin (and optional viewer). Passwords are stored as bcrypt hashes in **process memory** (lost on restart; cluster nodes do not share sessions — use sticky sessions). Health, OpenAPI, login, logout, and init stay public.
+
+P3b will add API keys and an audit log.
 
 ## Dependencies
 

@@ -12,6 +12,8 @@ Dashboard 静态资源通过 `rust-embed` 在编译时嵌入二进制，无需�
 
 ```
 http://<host>:6060/dashboard/
+
+在 `ferromq-http-api.toml` 中配置了 `dashboard_admin_password` 时，使用用户名/密码登录（`POST /api/v1/auth/login`）。仍可用 operator Bearer Token 作为回退。详见 [HTTP API — 认证](http-api.md#认证p3a-会话--bearer)。
 ```
 
 修改前端代码需要重新编译（`cargo build`）才能生效。

@@ -133,7 +133,7 @@ window.ClientsPage = Vue.defineComponent({
               </span></td>
               <td style="font-size:12px;white-space:nowrap;">{{ c.connected_at || c.created_at || '-' }}</td>
               <td>
-                <button class="btn-icon" style="width:auto;padding:3px 10px;font-size:11px;"
+                <button v-if="canWrite" class="btn-icon" style="width:auto;padding:3px 10px;font-size:11px;"
                         @click.stop="kick(c.clientid)"
                         :title="$t('clients.disconnect')">
                   {{ $t('clients.disconnect') }}
@@ -278,10 +278,12 @@ window.ClientsPage = Vue.defineComponent({
       loadClients();
     });
 
+    const canWrite = store.canWrite();
+
     return { clientid, username, ipAddress, filterOnline, protoVer, pageSize,
              showAdvanced, useFuzzyClientid, fuzzyClientid,
              useFuzzyUsername, fuzzyUsername, cleanStart, sessionPresent,
              createdGte, createdLte, connectedGte, connectedLte, clients, advancedActiveCount,
-             loadClients, reset, kick, goDetail, fmtExpiry, $t };
+             loadClients, reset, kick, goDetail, fmtExpiry, canWrite, $t };
   },
 });

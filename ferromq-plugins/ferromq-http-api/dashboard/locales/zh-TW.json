@@ -56,7 +56,13 @@
     "error_empty": "Token 不能為空",
     "error_invalid": "Token 無效或服務不可用",
     "hide_token": "隱藏 Token",
-    "show_token": "顯示 Token"
+    "show_token": "顯示 Token",
+    "username": "Username",
+    "password": "Password",
+    "username_placeholder": "admin",
+    "password_placeholder": "Password",
+    "token_optional": "Operator Bearer token",
+    "use_token": "Use Bearer token instead"
   },
   "overview": {
     "title": "叢集概覽",

@@ -16,6 +16,8 @@ http_request_log = false
 message_expiry_interval = "5m"
 prometheus_metrics_cache_interval = "5s"
 # http_bearer_token = "your-secret-token"
+# dashboard_admin_username = "admin"
+# dashboard_admin_password = "change-me"
 ```
 
 ## 端点速查
@@ -23,6 +25,11 @@ prometheus_metrics_cache_interval = "5s"
 | 方法 | 路径 | 说明 |
 |--------|------|------|
 | `GET` | `/api/v1` | API 列表 |
+| `POST` | `/api/v1/auth/login` | Dashboard 登录（会话 Cookie） |
+| `POST` | `/api/v1/auth/logout` | 退出登录 |
+| `GET` | `/api/v1/auth/me` | 当前用户 |
+| `POST` | `/api/v1/auth/change-password` | 修改密码 |
+| `POST` | `/api/v1/auth/init` | 按配置一次性引导管理员 |
 | `GET` | `/api/v1/openapi.json` | OpenAPI 3 契约 |
 | `GET` | `/api/v1/docs` | Swagger UI |
 | `GET` | `/api/v1/brokers` | 集群节点信息 |
@@ -44,7 +51,7 @@ prometheus_metrics_cache_interval = "5s"
 | `GET` | `/api/v1/metrics` | 指标（JSON） |
 | `GET` | `/api/v1/metrics/prometheus` | 指标（Prometheus 格式） |
 
-完整端点列表共 36 个（含 `stats/history`、`metrics/history` 等）。详情见英文版文档。
+完整端点列表含 `stats/history`、`metrics/history` 与 P3a 会话认证等。`viewer` 不能踢人 / 发布 / 加载插件。详情见英文版文档。
 
 ## 许可证
 

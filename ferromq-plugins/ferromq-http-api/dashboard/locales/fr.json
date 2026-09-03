@@ -56,7 +56,13 @@
     "error_empty": "Le Token ne peut pas être vide",
     "error_invalid": "Token invalide ou service indisponible",
     "hide_token": "Masquer le Token",
-    "show_token": "Afficher le Token"
+    "show_token": "Afficher le Token",
+    "username": "Username",
+    "password": "Password",
+    "username_placeholder": "admin",
+    "password_placeholder": "Password",
+    "token_optional": "Operator Bearer token",
+    "use_token": "Use Bearer token instead"
   },
   "overview": {
     "title": "Aperçu du cluster",

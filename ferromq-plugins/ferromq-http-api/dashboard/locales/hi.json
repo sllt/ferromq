@@ -56,7 +56,13 @@
     "error_empty": "Token खाली नहीं हो सकता",
     "error_invalid": "अमान्य Token या सेवा अनुपलब्ध",
     "hide_token": "Token छिपाएँ",
-    "show_token": "Token दिखाएँ"
+    "show_token": "Token दिखाएँ",
+    "username": "Username",
+    "password": "Password",
+    "username_placeholder": "admin",
+    "password_placeholder": "Password",
+    "token_optional": "Operator Bearer token",
+    "use_token": "Use Bearer token instead"
   },
   "overview": {
     "title": "क्लस्टर अवलोकन",

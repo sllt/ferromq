@@ -56,7 +56,13 @@
     "error_empty": "Token darf nicht leer sein",
     "error_invalid": "Ungültiges Token oder Dienst nicht verfügbar",
     "hide_token": "Token ausblenden",
-    "show_token": "Token anzeigen"
+    "show_token": "Token anzeigen",
+    "username": "Username",
+    "password": "Password",
+    "username_placeholder": "admin",
+    "password_placeholder": "Password",
+    "token_optional": "Operator Bearer token",
+    "use_token": "Use Bearer token instead"
   },
   "overview": {
     "title": "Cluster-Übersicht",

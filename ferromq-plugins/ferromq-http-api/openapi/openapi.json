@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "FerroMQ HTTP API",
-    "description": "Management API for FerroMQ (`/api/v1`). Default list responses remain bare JSON arrays; pass `?format=page` for `{ items, offset, limit, truncated, total? }`. 4xx/5xx bodies are `{ code, message, details?, request_id }`. Cluster-aggregating endpoints return HTTP 200 with per-node `{ ok, error? }` instead of a single boolean when some nodes fail.",
+    "description": "Management API for FerroMQ (`/api/v1`). Default list responses remain bare JSON arrays; pass `?format=page` for `{ items, offset, limit, truncated, total? }`. 4xx/5xx bodies are `{ code, message, details?, request_id }`. Cluster-aggregating endpoints return HTTP 200 with per-node `{ ok, error? }` instead of a single boolean when some nodes fail. Authentication: `Authorization: Bearer <http_bearer_token>` is an operator/admin credential. Dashboard login is `POST /api/v1/auth/login` (HttpOnly cookie `ferromq_session`, SameSite=Lax, optional Secure). When neither a bearer token nor `dashboard_admin_password` is configured, the API stays open (anonymous admin). Roles: `admin` (write) and `viewer` (cannot kick / publish / plugin load).",
     "version": "0.24.0",
     "license": { "name": "MIT OR Apache-2.0" }
   },
@@ -10,6 +10,7 @@
     { "url": "http://localhost:6060", "description": "Default plugin listener" }
   ],
   "tags": [
+    { "name": "Auth", "description": "Dashboard session login (P3a). API keys / audit log are P3b." },
     { "name": "Discovery" },
     { "name": "Brokers" },
     { "name": "Nodes" },
@@ -24,7 +25,10 @@
     { "name": "Stats" },
     { "name": "Metrics" }
   ],
-  "security": [],
+  "security": [
+    { "bearerAuth": [] },
+    { "sessionCookie": [] }
+  ],
   "paths": {
     "/api/v1": {
       "get": {
@@ -48,6 +52,7 @@
         "operationId": "getOpenApi",
         "tags": ["Discovery"],
         "summary": "OpenAPI 3 document for /api/v1",
+        "security": [],
         "responses": {
           "200": {
             "description": "OpenAPI 3.0.3 JSON",
@@ -61,11 +66,100 @@
         "operationId": "getDocs",
         "tags": ["Discovery"],
         "summary": "Swagger UI for the OpenAPI document",
+        "security": [],
         "responses": {
           "200": {
             "description": "HTML docs page",
             "content": { "text/html": { "schema": { "type": "string" } } }
           }
+        }
+      }
+    },
+    "/api/v1/auth/login": {
+      "post": {
+        "operationId": "authLogin",
+        "tags": ["Auth"],
+        "summary": "Dashboard login",
+        "description": "Verifies username/password (bcrypt). If no users exist yet and the credentials match `dashboard_admin_*` (or viewer) config, the first login bootstraps that user. Sets `ferromq_session` (HttpOnly, SameSite=Lax, Secure when `dashboard_cookie_secure`). In-memory sessions are not shared across cluster nodes.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Session established",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionUser" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" }
+        }
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "operationId": "authLogout",
+        "tags": ["Auth"],
+        "summary": "Clear the dashboard session cookie",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Cookie cleared",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionUser" } } }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/me": {
+      "get": {
+        "operationId": "authMe",
+        "tags": ["Auth"],
+        "summary": "Current user",
+        "description": "Session cookie, bearer operator, or anonymous admin when auth is not configured.",
+        "responses": {
+          "200": {
+            "description": "Identity",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionUser" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/auth/change-password": {
+      "post": {
+        "operationId": "authChangePassword",
+        "tags": ["Auth"],
+        "summary": "Change the current session user's password",
+        "description": "Requires a dashboard session (not bearer/anonymous). New password is stored as a bcrypt hash.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChangePasswordRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionUser" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/auth/init": {
+      "post": {
+        "operationId": "authInit",
+        "tags": ["Auth"],
+        "summary": "One-time bootstrap from config",
+        "description": "Creates the configured `dashboard_admin_username` (and optional viewer) when no users exist. Does not accept a caller-chosen password.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Created",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionUser" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "409": { "$ref": "#/components/responses/Conflict" }
         }
       }
     },
@@ -195,6 +289,7 @@
         "operationId": "checkHealth",
         "tags": ["Health"],
         "summary": "Cluster health check",
+        "security": [],
         "responses": {
           "200": {
             "description": "Health status",
@@ -210,6 +305,7 @@
         "operationId": "checkHealthNode",
         "tags": ["Health"],
         "summary": "Health check for one node",
+        "security": [],
         "parameters": [{ "$ref": "#/components/parameters/NodeId" }],
         "responses": {
           "200": {
@@ -247,6 +343,7 @@
           "200": { "$ref": "#/components/responses/ClientList" },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
           "503": { "$ref": "#/components/responses/Unavailable" }
         }
       }
@@ -267,6 +364,7 @@
           "200": { "$ref": "#/components/responses/ClientList" },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
           "503": { "$ref": "#/components/responses/Unavailable" }
         }
       },
@@ -287,7 +385,8 @@
               }
             }
           },
-          "401": { "$ref": "#/components/responses/Unauthorized" }
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
         }
       }
     },
@@ -319,6 +418,7 @@
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
           "404": { "$ref": "#/components/responses/NotFound" },
           "503": { "$ref": "#/components/responses/Unavailable" }
         }
@@ -408,6 +508,7 @@
           "200": { "$ref": "#/components/responses/RouteList" },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
           "503": { "$ref": "#/components/responses/Unavailable" }
         }
       }
@@ -432,6 +533,7 @@
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
           "503": { "$ref": "#/components/responses/Unavailable" }
         }
       },
@@ -449,6 +551,7 @@
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
           "404": { "$ref": "#/components/responses/NotFound" },
           "503": { "$ref": "#/components/responses/Unavailable" }
         }
@@ -470,6 +573,7 @@
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
           "503": { "$ref": "#/components/responses/Unavailable" }
         }
       }
@@ -490,6 +594,7 @@
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
           "503": { "$ref": "#/components/responses/Unavailable" }
         }
       }
@@ -510,6 +615,7 @@
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
           "503": { "$ref": "#/components/responses/Unavailable" }
         }
       }
@@ -624,6 +730,7 @@
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
           "404": { "$ref": "#/components/responses/NotFound" },
           "503": { "$ref": "#/components/responses/Unavailable" }
         }
@@ -645,6 +752,7 @@
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
           "404": { "$ref": "#/components/responses/NotFound" },
           "503": { "$ref": "#/components/responses/Unavailable" }
         }
@@ -666,6 +774,7 @@
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
           "404": { "$ref": "#/components/responses/NotFound" },
           "503": { "$ref": "#/components/responses/Unavailable" }
         }
@@ -1080,7 +1189,22 @@
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
       },
       "Unauthorized": {
-        "description": "Missing or invalid bearer token",
+        "description": "Missing or invalid bearer token / session cookie",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/XRequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "Forbidden": {
+        "description": "Authenticated but role cannot perform this write action (viewer vs admin)",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/XRequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "TooManyRequests": {
+        "description": "Login rate limit exceeded",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/XRequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "Conflict": {
+        "description": "Dashboard users already initialized",
         "headers": { "X-Request-Id": { "$ref": "#/components/headers/XRequestId" } },
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
       },
@@ -1465,6 +1589,47 @@
           "count": { "type": "integer" },
           "data": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
         }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "required": ["username", "password"],
+        "properties": {
+          "username": { "type": "string" },
+          "password": { "type": "string", "format": "password" }
+        }
+      },
+      "ChangePasswordRequest": {
+        "type": "object",
+        "required": ["old_password", "new_password"],
+        "properties": {
+          "old_password": { "type": "string", "format": "password" },
+          "new_password": { "type": "string", "format": "password", "minLength": 8 }
+        }
+      },
+      "SessionUser": {
+        "type": "object",
+        "required": ["username", "role", "auth"],
+        "properties": {
+          "username": { "type": "string" },
+          "role": { "type": "string", "enum": ["admin", "viewer"] },
+          "auth": { "type": "string", "enum": ["session", "bearer", "anonymous"] },
+          "expires_in": { "type": "integer", "description": "Remaining idle seconds (session only)" },
+          "created": { "type": "boolean", "description": "Present on POST /auth/init" },
+          "ok": { "type": "boolean" }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Raw `http_bearer_token`. Treated as role=admin username=operator."
+      },
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "ferromq_session",
+        "description": "HttpOnly session cookie issued by POST /api/v1/auth/login."
       }
     }
   }

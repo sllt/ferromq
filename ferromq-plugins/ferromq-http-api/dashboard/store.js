@@ -1,5 +1,6 @@
 /* ============================================================
    FerroMQ Dashboard — 全局状态管理
+   P3a: session 登录（HttpOnly cookie）+ 可选 Bearer token 回退
    ============================================================ */
 window.store = {
   getToken() {
@@ -12,8 +13,30 @@ window.store = {
     localStorage.removeItem('dashboard_token');
   },
 
+  getSession() {
+    try {
+      return JSON.parse(sessionStorage.getItem('dashboard_session') || 'null');
+    } catch (_) {
+      return null;
+    }
+  },
+  setSession(info) {
+    sessionStorage.setItem('dashboard_session', JSON.stringify(info || {}));
+  },
+  clearSession() {
+    sessionStorage.removeItem('dashboard_session');
+  },
+
   isLoggedIn() {
-    return !!this.getToken();
+    return !!this.getSession() || !!this.getToken();
+  },
+
+  getRole() {
+    var s = this.getSession();
+    return (s && s.role) || (this.getToken() ? 'admin' : '');
+  },
+  canWrite() {
+    return this.getRole() !== 'viewer';
   },
 
   /** 语言偏好 */
