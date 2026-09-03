@@ -86,6 +86,15 @@ pub struct PluginConfig {
     )]
     pub dashboard_login_rate_window: Duration,
 
+    /// In-memory audit ring-buffer size. Default: 10000.
+    #[serde(default = "PluginConfig::audit_max_events_default")]
+    pub audit_max_events: usize,
+
+    /// Optional JSON Lines file for durable audit events (append-only).
+    /// When unset, the audit log lives only in process memory.
+    #[serde(default)]
+    pub audit_file: Option<String>,
+
     #[serde(default = "PluginConfig::message_type_default")]
     pub message_type: MessageType,
 
@@ -217,6 +226,11 @@ impl PluginConfig {
     #[inline]
     fn dashboard_login_rate_window_default() -> Duration {
         Duration::from_secs(60)
+    }
+
+    #[inline]
+    fn audit_max_events_default() -> usize {
+        10_000
     }
 
     /// Serializes the configuration to a JSON value, redacting secrets.

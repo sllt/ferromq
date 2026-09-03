@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "FerroMQ HTTP API",
-    "description": "Management API for FerroMQ (`/api/v1`). Default list responses remain bare JSON arrays; pass `?format=page` for `{ items, offset, limit, truncated, total? }`. 4xx/5xx bodies are `{ code, message, details?, request_id }`. Cluster-aggregating endpoints return HTTP 200 with per-node `{ ok, error? }` instead of a single boolean when some nodes fail. Authentication: `Authorization: Bearer <http_bearer_token>` is an operator/admin credential. Dashboard login is `POST /api/v1/auth/login` (HttpOnly cookie `ferromq_session`, SameSite=Lax, optional Secure). When neither a bearer token nor `dashboard_admin_password` is configured, the API stays open (anonymous admin). Roles: `admin` (write) and `viewer` (cannot kick / publish / plugin load).",
+    "description": "Management API for FerroMQ (`/api/v1`). Default list responses remain bare JSON arrays; pass `?format=page` for `{ items, offset, limit, truncated, total? }`. 4xx/5xx bodies are `{ code, message, details?, request_id }`. Cluster-aggregating endpoints return HTTP 200 with per-node `{ ok, error? }` instead of a single boolean when some nodes fail. Authentication: `Authorization: Bearer <http_bearer_token>` remains a static superuser (username `operator`, role `admin`). Dashboard login is `POST /api/v1/auth/login` (HttpOnly cookie `ferromq_session`). Created API keys also authenticate as `Authorization: Bearer <secret>` with a bound role. Roles: `admin` (users / keys / audit + writes), `operator` (kick / publish / plugins), `viewer` (read-only). When neither a bearer token, API key, nor dashboard password is configured, the API stays open (anonymous admin).",
     "version": "0.24.0",
     "license": { "name": "MIT OR Apache-2.0" }
   },
@@ -10,7 +10,10 @@
     { "url": "http://localhost:6060", "description": "Default plugin listener" }
   ],
   "tags": [
-    { "name": "Auth", "description": "Dashboard session login (P3a). API keys / audit log are P3b." },
+    { "name": "Auth", "description": "Dashboard session login, users, API keys (P3a/P3b)." },
+    { "name": "Users", "description": "Dashboard user list/create/disable (admin)." },
+    { "name": "API Keys", "description": "Hashed API keys; secret shown once on create (admin)." },
+    { "name": "Audit", "description": "Write-operation audit log (admin)." },
     { "name": "Discovery" },
     { "name": "Brokers" },
     { "name": "Nodes" },
@@ -160,6 +163,210 @@
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/v1/users": {
+      "get": {
+        "operationId": "listUsers",
+        "tags": ["Users"],
+        "summary": "List dashboard users",
+        "description": "Admin only. Passwords are never returned.",
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/FormatPage" }
+        ],
+        "responses": {
+          "200": {
+            "description": "User list",
+            "headers": { "X-Row-Count": { "$ref": "#/components/headers/XRowCount" }, "X-Truncated": { "$ref": "#/components/headers/XTruncated" } },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    { "type": "array", "items": { "$ref": "#/components/schemas/DashboardUser" } },
+                    { "$ref": "#/components/schemas/Page" }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      },
+      "post": {
+        "operationId": "createUser",
+        "tags": ["Users"],
+        "summary": "Create a dashboard user",
+        "description": "Admin only. Password is stored as a bcrypt hash.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateUserRequest" } } }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DashboardUser" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/v1/users/{username}/disable": {
+      "post": {
+        "operationId": "disableUser",
+        "tags": ["Users"],
+        "summary": "Disable a dashboard user",
+        "description": "Admin only. Sessions for the user are revoked. Cannot disable the last enabled admin or the current user.",
+        "parameters": [{ "name": "username", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DashboardUser" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/v1/users/{username}/enable": {
+      "post": {
+        "operationId": "enableUser",
+        "tags": ["Users"],
+        "summary": "Re-enable a dashboard user",
+        "parameters": [{ "name": "username", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DashboardUser" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/api-keys": {
+      "get": {
+        "operationId": "listApiKeys",
+        "tags": ["API Keys"],
+        "summary": "List API keys",
+        "description": "Admin only. Secrets are never listed.",
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/FormatPage" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key metadata",
+            "headers": { "X-Row-Count": { "$ref": "#/components/headers/XRowCount" }, "X-Truncated": { "$ref": "#/components/headers/XTruncated" } },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    { "type": "array", "items": { "$ref": "#/components/schemas/ApiKey" } },
+                    { "$ref": "#/components/schemas/Page" }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      },
+      "post": {
+        "operationId": "createApiKey",
+        "tags": ["API Keys"],
+        "summary": "Create an API key",
+        "description": "Admin only. The plaintext secret (`fmqk_<id>_<random>`) is returned **once**. It is stored as SHA-256. Use `Authorization: Bearer <secret>` on `/api/v1`. Role defaults to `operator`.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateApiKeyRequest" } } }
+        },
+        "responses": {
+          "201": {
+            "description": "Created; includes `secret` once",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiKeyCreated" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/v1/api-keys/{id}": {
+      "get": {
+        "operationId": "getApiKey",
+        "tags": ["API Keys"],
+        "summary": "Get one API key (no secret)",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": {
+            "description": "Key metadata",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiKey" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "delete": {
+        "operationId": "deleteApiKey",
+        "tags": ["API Keys"],
+        "summary": "Revoke an API key",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "ok": { "type": "boolean" } } } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/audit": {
+      "get": {
+        "operationId": "listAudit",
+        "tags": ["Audit"],
+        "summary": "List audit events",
+        "description": "Admin only. Newest first. In-memory ring buffer; optional JSONL file via `audit_file`. Filters: `action`, `username`, `success`.",
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/FormatPage" },
+          { "name": "action", "in": "query", "schema": { "type": "string" }, "description": "Exact action filter (login, login_failed, kick_client, publish, plugin_load, api_key_create, ...)" },
+          { "name": "username", "in": "query", "schema": { "type": "string" } },
+          { "name": "success", "in": "query", "schema": { "type": "string", "enum": ["true", "false", "1", "0"] } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Audit events",
+            "headers": { "X-Row-Count": { "$ref": "#/components/headers/XRowCount" }, "X-Truncated": { "$ref": "#/components/headers/XTruncated" } },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    { "type": "array", "items": { "$ref": "#/components/schemas/AuditEvent" } },
+                    { "$ref": "#/components/schemas/Page" }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
         }
       }
     },
@@ -1194,7 +1401,7 @@
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
       },
       "Forbidden": {
-        "description": "Authenticated but role cannot perform this write action (viewer vs admin)",
+        "description": "Authenticated but role cannot perform this action (viewer vs operator vs admin)",
         "headers": { "X-Request-Id": { "$ref": "#/components/headers/XRequestId" } },
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
       },
@@ -1611,11 +1818,79 @@
         "required": ["username", "role", "auth"],
         "properties": {
           "username": { "type": "string" },
-          "role": { "type": "string", "enum": ["admin", "viewer"] },
-          "auth": { "type": "string", "enum": ["session", "bearer", "anonymous"] },
+          "role": { "type": "string", "enum": ["admin", "operator", "viewer"] },
+          "auth": { "type": "string", "enum": ["session", "bearer", "api_key", "anonymous"] },
           "expires_in": { "type": "integer", "description": "Remaining idle seconds (session only)" },
+          "key_id": { "type": "string", "description": "Present when auth=api_key" },
           "created": { "type": "boolean", "description": "Present on POST /auth/init" },
           "ok": { "type": "boolean" }
+        }
+      },
+      "DashboardUser": {
+        "type": "object",
+        "required": ["username", "role", "enabled"],
+        "properties": {
+          "username": { "type": "string" },
+          "role": { "type": "string", "enum": ["admin", "operator", "viewer"] },
+          "enabled": { "type": "boolean" }
+        }
+      },
+      "CreateUserRequest": {
+        "type": "object",
+        "required": ["username", "password", "role"],
+        "properties": {
+          "username": { "type": "string" },
+          "password": { "type": "string", "format": "password", "minLength": 8 },
+          "role": { "type": "string", "enum": ["admin", "operator", "viewer"] }
+        }
+      },
+      "ApiKey": {
+        "type": "object",
+        "required": ["id", "name", "role", "created_at", "created_by"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "role": { "type": "string", "enum": ["admin", "operator", "viewer"] },
+          "created_at": { "type": "integer", "format": "int64" },
+          "created_by": { "type": "string" },
+          "last_used_at": { "type": "integer", "format": "int64", "nullable": true }
+        }
+      },
+      "ApiKeyCreated": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ApiKey" },
+          {
+            "type": "object",
+            "required": ["secret"],
+            "properties": {
+              "secret": { "type": "string", "description": "Plaintext secret, shown only on create. Use as Bearer token." }
+            }
+          }
+        ]
+      },
+      "CreateApiKeyRequest": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string" },
+          "role": { "type": "string", "enum": ["admin", "operator", "viewer"], "default": "operator" }
+        }
+      },
+      "AuditEvent": {
+        "type": "object",
+        "required": ["id", "ts", "request_id", "username", "role", "auth", "action", "ip", "success"],
+        "properties": {
+          "id": { "type": "integer", "format": "int64" },
+          "ts": { "type": "integer", "format": "int64", "description": "Unix milliseconds" },
+          "request_id": { "type": "string" },
+          "username": { "type": "string" },
+          "role": { "type": "string" },
+          "auth": { "type": "string", "enum": ["session", "bearer", "api_key", "anonymous"] },
+          "action": { "type": "string" },
+          "resource": { "type": "string" },
+          "ip": { "type": "string" },
+          "success": { "type": "boolean" },
+          "details": { "type": "object", "additionalProperties": true }
         }
       }
     },
@@ -1623,7 +1898,7 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Raw `http_bearer_token`. Treated as role=admin username=operator."
+        "description": "Static `http_bearer_token` (role=admin, username=operator) or a created API key secret (bound role)."
       },
       "sessionCookie": {
         "type": "apiKey",

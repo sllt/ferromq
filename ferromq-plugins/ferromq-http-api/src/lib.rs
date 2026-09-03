@@ -22,6 +22,7 @@ use config::PluginConfig;
 use flusher::{new_cache, start_flusher, start_recovery_loop, start_warmup, HistoryCaches};
 
 mod api;
+mod audit;
 mod auth;
 mod clients;
 mod config;

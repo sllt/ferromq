@@ -143,6 +143,12 @@ pub struct Config {
     pub redb: RedbConfig,
 }
 
+#[cfg(any(
+    feature = "redis",
+    feature = "redis-cluster",
+    feature = "sled",
+    feature = "redb"
+))]
 impl Default for Config {
     fn default() -> Self {
         Self {

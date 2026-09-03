@@ -9,7 +9,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-default = ["ferromq-storage"]
+default = ["ferromq-storage", "redb"]
 redb = ["ferromq-storage/redb", "circuit-breaker"]
 sled = ["ferromq-storage/sled", "circuit-breaker"]
 redis = ["ferromq-storage/redis", "circuit-breaker"]
@@ -35,6 +35,7 @@ postcard.workspace = true
 rust-embed = "8"
 lru = "0.18"
 bcrypt = "0.15"
+sha2 = "0.10"
 rand = { workspace = true }
 time = { workspace = true }
 
