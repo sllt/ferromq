@@ -1,17 +1,14 @@
 [**English**](README.md) | [简体中文](README-CN.md)
 
-# RMQTT-Server
-
-[![crates.io page](https://img.shields.io/crates/v/rmqtt.svg)](https://crates.io/crates/rmqtt)
-[![docs.rs page](https://docs.rs/rmqtt/badge.svg)](https://docs.rs/rmqtt/latest/rmqtt/)
+# FerroMQ Server
 
 Core MQTT broker library — session management, routing, hooks, plugins, and cluster coordination.
 
 ## Module structure
 
 ```
-rmqtt/src/
-├── lib.rs          — re-exports: rmqtt_codec as codec, rmqtt_net as net, rmqtt_utils as utils
+ferromq/src/
+├── lib.rs          — re-exports: ferromq_codec as codec, ferromq_net as net, ferromq_utils as utils
 │
 ├── acl.rs          — Access Control List types (ACLConfig, AclCheckFn, AuthInfo)
 ├── args.rs         — CommandArgs struct (node_id, plugins_default_startups, node_grpc_addrs, raft_peer_addrs, raft_leader_id)
@@ -47,20 +44,20 @@ rmqtt/src/
 
 | Feature | Deps enabled | What it enables |
 |---------|-------------|-----------------|
-| `metrics` | rmqtt-macros/metrics | Metrics collection |
+| `metrics` | ferromq-macros/metrics | Metrics collection |
 | `stats` | — | Runtime statistics tracking |
-| `plugin` | rmqtt-macros/plugin | Plugin system |
+| `plugin` | ferromq-macros/plugin | Plugin system |
 | `grpc` | rust-box/handy-grpc, rust-box/mpsc | gRPC inter-node communication |
-| `tls` | rmqtt-net/tls | TLS transport |
-| `ws` | rmqtt-net/ws | WebSocket transport |
-| `quic` | rmqtt-net/quic | QUIC transport |
+| `tls` | ferromq-net/tls | TLS transport |
+| `ws` | ferromq-net/ws | WebSocket transport |
+| `quic` | ferromq-net/quic | QUIC transport |
 | `delayed` | — | Delayed message publishing |
 | `retain` | — | Retained message storage |
 | `msgstore` | — | Message persistence |
 | `shared-subscription` | — | Shared subscriptions ($share/) |
 | `auto-subscription` | — | Auto-subscribe on connect |
 | `limit-subscription` | — | Subscription limiting |
-| `macros` | dep:rmqtt-macros | Enables both metrics + plugin |
+| `macros` | dep:ferromq-macros | Enables both metrics + plugin |
 | `full` | All of the above | All features |
 | `debug` | — | Debug mode |
 | `default` | (none) | Minimal build |
@@ -68,20 +65,20 @@ rmqtt/src/
 ## Re-exports
 
 ```rust
-pub use rmqtt_codec as codec;   // MQTT protocol codec
-pub use rmqtt_net as net;       // Network layer (Builder, MqttStream, etc.)
-pub use rmqtt_utils as utils;   // Utilities (Bytesize, NodeAddr, etc.)
-pub use rmqtt_macros as macros; // [features: metrics|plugin] Derive macros
+pub use ferromq_codec as codec;   // MQTT protocol codec
+pub use ferromq_net as net;       // Network layer (Builder, MqttStream, etc.)
+pub use ferromq_utils as utils;   // Utilities (Bytesize, NodeAddr, etc.)
+pub use ferromq_macros as macros; // [features: metrics|plugin] Derive macros
 pub use net::{Error, Result};   // Re-exported error types
 ```
 
 ## Usage
 
 ```rust,no_run
-use rmqtt::context::ServerContext;
-use rmqtt::net::Builder;
-use rmqtt::server::MqttServer;
-use rmqtt::Result;
+use ferromq::context::ServerContext;
+use ferromq::net::Builder;
+use ferromq::server::MqttServer;
+use ferromq::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -99,7 +96,7 @@ async fn main() -> Result<()> {
 
 ## Examples
 
-See `rmqtt/examples/` for: `simple`, `simple_tls`, `simple_ws`, `simple_wss`, `simple_quic`, `multi`, `plugin`, `plugins`, `simple_quic_client`.
+See `ferromq/examples/` for: `simple`, `simple_tls`, `simple_ws`, `simple_wss`, `simple_quic`, `multi`, `plugin`, `plugins`, `simple_quic_client`.
 
 ## License
 

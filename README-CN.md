@@ -1,10 +1,7 @@
 # FerroMQ Broker
 
-[![GitHub Release](https://img.shields.io/github/release/rmqtt/rmqtt?color=brightgreen)](https://github.com/rmqtt/rmqtt/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/sllt/ferromq?color=brightgreen)](https://github.com/sllt/ferromq/releases)
 [![Rust Version](https://img.shields.io/badge/rust-1.94.0%2B-blue)](https://blog.rust-lang.org/2026/03/05/Rust-1.94.0/)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/rmqtt/rmqtt)
-[![crates.io](https://img.shields.io/crates/v/rmqtt.svg)](https://crates.io/crates/rmqtt)
-[![docs.rs](https://docs.rs/rmqtt/badge.svg)](https://docs.rs/rmqtt/latest/rmqtt/)
 
 [English](README.md) | [**简体中文**](README-CN.md)
 
@@ -58,7 +55,7 @@ FerroMQ 基于 [RMQTT](https://github.com/rmqtt/rmqtt) 二次开发，独立演�
 - 飞行窗口和消息队列;
 - 消息重传;
 
-- 新功能的完整列表，请参阅 [FerroMQ Release Notes](https://github.com/rmqtt/rmqtt/releases) 。
+- 新功能的完整列表，请参阅 [FerroMQ Release Notes](https://github.com/sllt/ferromq/releases) 。
 
 ## 安装
 
@@ -128,7 +125,7 @@ curl "http://127.0.0.1:6066/api/v1/health/check"
 
 #### ZIP 压缩包安装 (Linux、MacOS、Windows)
 
-需从 [GitHub Release](https://github.com/rmqtt/rmqtt/releases) 页面获取相应操作系统的ZIP压缩包。
+需从 [GitHub Release](https://github.com/sllt/ferromq/releases) 页面获取相应操作系统的ZIP压缩包。
 
 - [单节点安装配置文档](./docs/zh_CN/install.md)
 

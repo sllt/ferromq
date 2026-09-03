@@ -2,7 +2,6 @@
 
 # ferromqd
 
-[![crates.io page](https://img.shields.io/crates/v/rmqtt.svg)](https://crates.io/crates/rmqtt)
 ![Rust](https://img.shields.io/badge/rust-1.94%2B-blue)
 
 Official binary entry point for the FerroMQ MQTT broker.
@@ -75,9 +74,9 @@ docker build -t ferromqd .
 - [ferromq-conf] — Configuration management
 - [ferromq-plugins] — Plugin collection
 
-[ferromq]: https://crates.io/crates/rmqtt
-[ferromq-conf]: https://crates.io/crates/ferromq-conf
-[ferromq-plugins]: https://crates.io/crates/ferromq-plugins
+[ferromq]: https://github.com/sllt/ferromq/tree/main/ferromq
+[ferromq-conf]: https://github.com/sllt/ferromq/tree/main/ferromq-conf
+[ferromq-plugins]: https://github.com/sllt/ferromq/tree/main/ferromq-plugins
 
 ## License
 

@@ -1,17 +1,14 @@
 [English](README.md) | [**简体中文**](README-CN.md)
 
-# RMQTT-Server
-
-[![crates.io page](https://img.shields.io/crates/v/rmqtt.svg)](https://crates.io/crates/rmqtt)
-[![docs.rs page](https://docs.rs/rmqtt/badge.svg)](https://docs.rs/rmqtt/latest/rmqtt/)
+# FerroMQ Server
 
 核心 MQTT Broker 库 — 会话管理、路由、Hook、插件和集群协调。
 
 ## 模块结构
 
 ```
-rmqtt/src/
-├── lib.rs          — 重新导出：rmqtt_codec as codec、rmqtt_net as net、rmqtt_utils as utils
+ferromq/src/
+├── lib.rs          — 重新导出：ferromq_codec as codec、ferromq_net as net、ferromq_utils as utils
 │
 ├── acl.rs          — ACL 类型（ACLConfig、AclCheckFn、AuthInfo）
 ├── args.rs         — CommandArgs 结构体（node_id、plugins_default_startups 等）
@@ -47,20 +44,20 @@ rmqtt/src/
 
 | Feature | 启用的依赖 | 说明 |
 |---------|-------------|------|
-| `metrics` | rmqtt-macros/metrics | 指标收集 |
+| `metrics` | ferromq-macros/metrics | 指标收集 |
 | `stats` | — | 运行时统计追踪 |
-| `plugin` | rmqtt-macros/plugin | 插件系统 |
+| `plugin` | ferromq-macros/plugin | 插件系统 |
 | `grpc` | rust-box/handy-grpc | gRPC 节点间通信 |
-| `tls` | rmqtt-net/tls | TLS 传输 |
-| `ws` | rmqtt-net/ws | WebSocket 传输 |
-| `quic` | rmqtt-net/quic | QUIC 传输 |
+| `tls` | ferromq-net/tls | TLS 传输 |
+| `ws` | ferromq-net/ws | WebSocket 传输 |
+| `quic` | ferromq-net/quic | QUIC 传输 |
 | `delayed` | — | 延迟消息发布 |
 | `retain` | — | 保留消息存储 |
 | `msgstore` | — | 消息持久化 |
 | `shared-subscription` | — | 共享订阅（$share/） |
 | `auto-subscription` | — | 连接时自动订阅 |
 | `limit-subscription` | — | 订阅限制 |
-| `macros` | dep:rmqtt-macros | 同时启用 metrics + plugin |
+| `macros` | dep:ferromq-macros | 同时启用 metrics + plugin |
 | `full` | 以上全部 | 所有功能 |
 | `debug` | — | 调试模式 |
 | `default` | （无） | 最小构建 |
@@ -68,20 +65,20 @@ rmqtt/src/
 ## 重新导出
 
 ```rust
-pub use rmqtt_codec as codec;   // MQTT 协议编解码
-pub use rmqtt_net as net;       // 网络层（Builder、MqttStream 等）
-pub use rmqtt_utils as utils;   // 工具（Bytesize、NodeAddr 等）
-pub use rmqtt_macros as macros; // [features: metrics|plugin] 派生宏
+pub use ferromq_codec as codec;   // MQTT 协议编解码
+pub use ferromq_net as net;       // 网络层（Builder、MqttStream 等）
+pub use ferromq_utils as utils;   // 工具（Bytesize、NodeAddr 等）
+pub use ferromq_macros as macros; // [features: metrics|plugin] 派生宏
 pub use net::{Error, Result};   // 重新导出的错误类型
 ```
 
 ## 使用方式
 
 ```rust,no_run
-use rmqtt::context::ServerContext;
-use rmqtt::net::Builder;
-use rmqtt::server::MqttServer;
-use rmqtt::Result;
+use ferromq::context::ServerContext;
+use ferromq::net::Builder;
+use ferromq::server::MqttServer;
+use ferromq::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -99,7 +96,7 @@ async fn main() -> Result<()> {
 
 ## 示例
 
-参见 `rmqtt/examples/`：`simple`、`simple_tls`、`simple_ws`、`simple_wss`、`simple_quic`、`multi`、`plugin`、`plugins`、`simple_quic_client`。
+参见 `ferromq/examples/`：`simple`、`simple_tls`、`simple_ws`、`simple_wss`、`simple_quic`、`multi`、`plugin`、`plugins`、`simple_quic_client`。
 
 ## 许可证
 

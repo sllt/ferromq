@@ -1,10 +1,7 @@
 # FerroMQ Broker
 
-[![GitHub Release](https://img.shields.io/github/release/rmqtt/rmqtt?color=brightgreen)](https://github.com/rmqtt/rmqtt/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/sllt/ferromq?color=brightgreen)](https://github.com/sllt/ferromq/releases)
 [![Rust Version](https://img.shields.io/badge/rust-1.94.0%2B-blue)](https://blog.rust-lang.org/2026/03/05/Rust-1.94.0/)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/rmqtt/rmqtt)
-[![crates.io](https://img.shields.io/crates/v/rmqtt.svg)](https://crates.io/crates/rmqtt)
-[![docs.rs](https://docs.rs/rmqtt/badge.svg)](https://docs.rs/rmqtt/latest/rmqtt/)
 
 [**English**](README.md) | [简体中文](README-CN.md)
 
@@ -59,7 +56,7 @@ FerroMQ is based on [RMQTT](https://github.com/rmqtt/rmqtt) and continues as an 
 - Inflight and Queue;
 - Message resending;
 
-- For full list of new features, please read [FerroMQ Release Notes](https://github.com/rmqtt/rmqtt/releases).
+- For full list of new features, please read [FerroMQ Release Notes](https://github.com/sllt/ferromq/releases).
 
 ## Installation
 
@@ -130,7 +127,7 @@ curl "http://127.0.0.1:6066/api/v1/health/check"
 
 #### Installing via ZIP Binary Package (Linux、MacOS、Windows)
 
-Get the binary package of the corresponding OS from [FerroMQ Download](https://github.com/rmqtt/rmqtt/releases) page.
+Get the binary package of the corresponding OS from [FerroMQ Download](https://github.com/sllt/ferromq/releases) page.
 
 - [Single Node Install](./docs/en_US/install.md)
 
