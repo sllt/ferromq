@@ -46,17 +46,18 @@ use salvo::serve_static::{static_embed, StaticDir};
 use super::audit::{list_audit, AuditLog, AUDIT_LOG};
 use super::auth::{
     auth_change_password, auth_init, auth_login, auth_logout, auth_me, create_api_key, create_user,
-    delete_api_key, disable_user, enable_user, get_api_key, list_api_keys, list_users, require_admin,
-    require_write, AuthGuard, AuthState, AUTH_STATE,
+    delete_api_key, disable_user, enable_user, get_api_key, identity_from_depot, list_api_keys, list_users,
+    require_admin, require_write, AuthGuard, AuthState, AUTH_STATE,
 };
+use super::config_mgmt;
 use super::embed::DashboardAssets;
 use super::flusher::{HistoryCache, HistoryCaches};
 use super::openapi::{get_docs, get_openapi};
 use super::prome::{Monitor, PROME_MONITOR};
 use super::response::{
     apply_list_headers, cluster_node_failure, cluster_node_success, new_request_id, render_api_error,
-    render_list, render_not_found, status_for_plugin_error, subscription_to_json, wants_page_format,
-    ListPaging, DEPOT_REQUEST_ID, HEADER_REQUEST_ID,
+    render_api_error_with, render_list, render_not_found, status_for_plugin_error, subscription_to_json,
+    wants_page_format, ListPaging, DEPOT_REQUEST_ID, HEADER_REQUEST_ID,
 };
 use super::types::{
     ClientSearchParams, ClientSearchResult, FeatureConflict, FeatureValueGroup, Features, FeaturesInfo,
@@ -140,6 +141,26 @@ fn route_with_auth(
         )
         .push(Router::with_path("audit").hoop(require_admin).get(list_audit))
         .push(Router::with_path("brokers").get(get_brokers).push(Router::with_path("{id}").get(get_brokers)))
+        .push(
+            Router::with_path("broker/config")
+                .get(config_mgmt::broker_config_get)
+                .push(Router::with_path("versions").get(config_mgmt::broker_config_versions))
+                .push(
+                    Router::with_path("rollback/{version}")
+                        .hoop(require_admin)
+                        .post(config_mgmt::broker_config_rollback),
+                )
+                .push(
+                    Router::with_path("{section}")
+                        .get(config_mgmt::broker_config_section_get)
+                        .push(Router::new().hoop(require_admin).put(config_mgmt::broker_config_section_put))
+                        .push(
+                            Router::with_path("validate")
+                                .hoop(require_admin)
+                                .post(config_mgmt::broker_config_section_validate),
+                        ),
+                ),
+        )
         .push(Router::with_path("nodes").get(get_nodes).push(Router::with_path("{id}").get(get_nodes)))
         .push(
             Router::with_path("features").get(get_features).push(Router::with_path("{id}").get(get_features)),
@@ -182,11 +203,29 @@ fn route_with_auth(
                 .get(all_plugins)
                 .push(Router::with_path("{node}").get(node_plugins))
                 .push(Router::with_path("{node}/{plugin}").get(node_plugin_info))
-                .push(Router::with_path("{node}/{plugin}/config").get(node_plugin_config))
+                .push(
+                    Router::with_path("{node}/{plugin}/config")
+                        .get(node_plugin_config)
+                        .push(Router::new().hoop(require_write).put(config_mgmt::node_plugin_config_update)),
+                )
                 .push(
                     Router::with_path("{node}/{plugin}/config/reload")
                         .hoop(require_write)
                         .put(node_plugin_config_reload),
+                )
+                .push(
+                    Router::with_path("{node}/{plugin}/config/validate")
+                        .hoop(require_write)
+                        .post(config_mgmt::node_plugin_config_validate),
+                )
+                .push(
+                    Router::with_path("{node}/{plugin}/config/versions")
+                        .get(config_mgmt::node_plugin_config_versions),
+                )
+                .push(
+                    Router::with_path("{node}/{plugin}/config/rollback/{version}")
+                        .hoop(require_write)
+                        .post(config_mgmt::node_plugin_config_rollback),
                 )
                 .push(Router::with_path("{node}/{plugin}/load").hoop(require_write).put(node_plugin_load))
                 .push(
@@ -569,10 +608,46 @@ async fn list_apis(res: &mut Response) {
             "descr": "Get a plugin info"
         },
         {
+            "name": "get_broker_config",
+            "method": "GET",
+            "path": "/api/v1/broker/config",
+            "descr": "Read-only ferromq.toml overview (mqtt/listener/log); secrets redacted unless reveal=1 and admin"
+        },
+        {
+            "name": "put_broker_config_section",
+            "method": "PUT",
+            "path": "/api/v1/broker/config/{section}",
+            "descr": "Write mqtt/listener/log to ferromq.toml (admin). Always effective=restart_required; ferromqd is not hot-restarted"
+        },
+        {
             "name": "node_plugin_config",
             "method": "GET",
             "path": "/api/v1/plugins/{node}/{plugin}/config",
-            "descr": "Get a plugin config"
+            "descr": "Get a plugin config (secrets redacted unless ?reveal=1 and admin)"
+        },
+        {
+            "name": "node_plugin_config_update",
+            "method": "PUT",
+            "path": "/api/v1/plugins/{node}/{plugin}/config",
+            "descr": "Write a plugin config (JSON or TOML); optional apply=reload; returns diff + effective mode"
+        },
+        {
+            "name": "node_plugin_config_validate",
+            "method": "POST",
+            "path": "/api/v1/plugins/{node}/{plugin}/config/validate",
+            "descr": "Dry-run validate a plugin config without writing"
+        },
+        {
+            "name": "node_plugin_config_versions",
+            "method": "GET",
+            "path": "/api/v1/plugins/{node}/{plugin}/config/versions",
+            "descr": "List last-N plugin config backups"
+        },
+        {
+            "name": "node_plugin_config_rollback",
+            "method": "POST",
+            "path": "/api/v1/plugins/{node}/{plugin}/config/rollback/{version}",
+            "descr": "Restore a plugin config backup"
         },
         {
             "name": "node_plugin_config_reload",
@@ -1501,8 +1576,15 @@ async fn kick_client(
                 }
             }
         } else {
-            crate::audit::record(req, depot, "kick_client", Some(clientid), false, Some(json!({"error": "not found"})))
-                .await;
+            crate::audit::record(
+                req,
+                depot,
+                "kick_client",
+                Some(clientid),
+                false,
+                Some(json!({"error": "not found"})),
+            )
+            .await;
             render_not_found(res, "not found");
         }
     } else {
@@ -1889,26 +1971,15 @@ async fn publish(
             return Ok(());
         }
     };
-    let topic = params
-        .topic
-        .as_ref()
-        .or(params.topics.as_ref())
-        .map(|t| t.to_string());
+    let topic = params.topic.as_ref().or(params.topics.as_ref()).map(|t| t.to_string());
     match _publish(scx, params, remote_addr, http_laddr, expiry_interval).await {
         Ok(()) => {
             crate::audit::record(req, depot, "publish", topic, true, None).await;
             res.render(Text::Plain("ok"));
         }
         Err(e) => {
-            crate::audit::record(
-                req,
-                depot,
-                "publish",
-                topic,
-                false,
-                Some(json!({"error": e.to_string()})),
-            )
-            .await;
+            crate::audit::record(req, depot, "publish", topic, false, Some(json!({"error": e.to_string()})))
+                .await;
             render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string());
         }
     }
@@ -2396,6 +2467,7 @@ async fn node_plugin_config(
     res: &mut Response,
 ) -> std::result::Result<(), salvo::Error> {
     let (scx, cfg) = get_scx_cfg(depot)?;
+    let scx = scx.clone();
     let message_type = cfg.read().await.message_type;
     let node_id = if let Some(node_id) = req.param::<NodeId>("node") {
         node_id
@@ -2410,11 +2482,53 @@ async fn node_plugin_config(
         return Ok(());
     };
 
-    match _node_plugin_config(scx, node_id, &name, message_type).await {
+    if config_mgmt::wants_reveal(req) {
+        match identity_from_depot(depot) {
+            Some(id) if id.can_admin() => {}
+            Some(id) => {
+                render_api_error_with(
+                    res,
+                    StatusCode::FORBIDDEN,
+                    "forbidden",
+                    Some(json!({
+                        "required_role": "admin",
+                        "role": id.role.as_str(),
+                        "reason": "reveal=1 requires admin",
+                    })),
+                );
+                return Ok(());
+            }
+            None => {
+                render_api_error(res, StatusCode::UNAUTHORIZED, "unauthorized");
+                return Ok(());
+            }
+        }
+    }
+    let reveal = config_mgmt::wants_reveal(req);
+
+    match _node_plugin_config(&scx, node_id, &name, message_type).await {
         Ok(cfg) => {
+            let body = if node_id == scx.node.id() {
+                match config_mgmt::redact_get_config(&scx, &name, cfg.clone(), reveal).await {
+                    Ok(b) => b,
+                    Err(_) => match serde_json::from_slice::<serde_json::Value>(&cfg) {
+                        Ok(v) if !reveal => {
+                            serde_json::to_vec(&config_mgmt::redact_secrets(v)).unwrap_or(cfg)
+                        }
+                        _ => cfg,
+                    },
+                }
+            } else if reveal {
+                cfg
+            } else {
+                match serde_json::from_slice::<serde_json::Value>(&cfg) {
+                    Ok(v) => serde_json::to_vec(&config_mgmt::redact_secrets(v)).unwrap_or(cfg),
+                    Err(_) => cfg,
+                }
+            };
             res.headers_mut()
                 .insert(CONTENT_TYPE, HeaderValue::from_static("application/json; charset=utf-8"));
-            res.write_body(cfg).ok();
+            res.write_body(body).ok();
         }
         Err(e) => render_api_error(res, status_for_plugin_error(&e), e.to_string()),
     }
@@ -2476,15 +2590,8 @@ async fn node_plugin_config_reload(
 
     match _node_plugin_config_reload(scx, node_id, &name, message_type).await {
         Ok(r) => {
-            crate::audit::record(
-                req,
-                depot,
-                "plugin_reload",
-                Some(format!("{node_id}/{name}")),
-                r,
-                None,
-            )
-            .await;
+            crate::audit::record(req, depot, "plugin_reload", Some(format!("{node_id}/{name}")), r, None)
+                .await;
             res.render(Json(r));
         }
         Err(e) => {
@@ -2560,15 +2667,7 @@ async fn node_plugin_load(
 
     match _node_plugin_load(scx, node_id, &name, message_type).await {
         Ok(r) => {
-            crate::audit::record(
-                req,
-                depot,
-                "plugin_load",
-                Some(format!("{node_id}/{name}")),
-                r,
-                None,
-            )
-            .await;
+            crate::audit::record(req, depot, "plugin_load", Some(format!("{node_id}/{name}")), r, None).await;
             res.render(Json(r));
         }
         Err(e) => {
@@ -2643,15 +2742,8 @@ async fn node_plugin_unload(
 
     match _node_plugin_unload(scx, node_id, &name, message_type).await {
         Ok(r) => {
-            crate::audit::record(
-                req,
-                depot,
-                "plugin_unload",
-                Some(format!("{node_id}/{name}")),
-                r,
-                None,
-            )
-            .await;
+            crate::audit::record(req, depot, "plugin_unload", Some(format!("{node_id}/{name}")), r, None)
+                .await;
             res.render(Json(r));
         }
         Err(e) => {
@@ -3255,7 +3347,7 @@ async fn get_prometheus_metrics_sum(
 }
 
 #[inline]
-async fn get_grpc_client(scx: &ServerContext, node_id: NodeId) -> Result<GrpcClient> {
+pub(crate) async fn get_grpc_client(scx: &ServerContext, node_id: NodeId) -> Result<GrpcClient> {
     scx.extends
         .shared()
         .await
@@ -4375,5 +4467,296 @@ mod tests {
         assert!(roles.as_array().unwrap().iter().any(|v| v == "operator"));
         assert!(roles.as_array().unwrap().iter().any(|v| v == "admin"));
         assert!(roles.as_array().unwrap().iter().any(|v| v == "viewer"));
+    }
+
+    struct P4DemoPlugin {
+        name: String,
+        cfg: serde_json::Value,
+    }
+
+    impl ferromq::plugin::PackageInfo for P4DemoPlugin {
+        fn name(&self) -> &str {
+            &self.name
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ferromq::plugin::Plugin for P4DemoPlugin {
+        async fn get_config(&self) -> Result<serde_json::Value> {
+            Ok(self.cfg.clone())
+        }
+        async fn load_config(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct P4Env {
+        svc: Service,
+        dir: std::path::PathBuf,
+        state: Arc<crate::auth::AuthState>,
+    }
+
+    impl Drop for P4Env {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    async fn p4_env(cfg: PluginConfig) -> P4Env {
+        let dir = std::env::temp_dir().join(format!(
+            "ferromq-p4-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("ferromq.toml"),
+            r#"
+mqtt.max_sessions = 10
+mqtt.delayed_publish_max = 100
+mqtt.delayed_publish_immediate = true
+log.to = "console"
+log.level = "info"
+log.dir = "/tmp"
+log.file = "ferromq.log"
+listener.tcp.external.addr = "0.0.0.0:1883"
+"#,
+        )
+        .expect("broker toml");
+        std::fs::write(
+            dir.join("p4-demo.toml"),
+            "http_laddr = \"0.0.0.0:6060\"\nhttp_bearer_token = \"file-secret\"\nmax_row_limit = 1000\n",
+        )
+        .expect("plugin toml");
+
+        let scx = ServerContext::new()
+            .node_id(1)
+            .plugins_config_dir(dir.to_string_lossy().into_owned())
+            .busy_check_enable(false)
+            .build()
+            .await;
+        scx.plugins
+            .register("p4-demo", true, false, || {
+                Box::pin(async {
+                    Ok(Box::new(P4DemoPlugin {
+                        name: "p4-demo".into(),
+                        cfg: json!({
+                            "http_laddr": "0.0.0.0:6060",
+                            "http_bearer_token": "super-secret",
+                            "max_row_limit": 1000
+                        }),
+                    }) as ferromq::plugin::DynPlugin)
+                })
+            })
+            .await
+            .expect("register p4-demo");
+
+        let mut cfg = cfg;
+        cfg.broker_config_file = Some(dir.join("ferromq.toml").display().to_string());
+        cfg.config_history_keep = 5;
+        let state = Arc::new(crate::auth::AuthState::new(None));
+        let cfg = Arc::new(RwLock::new(cfg));
+        let router = route_with_auth(scx, cfg, state.clone(), prome::Monitor::new(), None);
+        P4Env { svc: Service::new(router), dir, state }
+    }
+
+    #[tokio::test]
+    async fn plugin_config_get_redacts_secrets_and_reveal_is_admin_only() {
+        let env = p4_env(dashboard_cfg()).await;
+        let (resp, body) = login(&env.svc, "admin", "admin-secret").await;
+        assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
+        let admin = session_cookie(&resp);
+
+        env.state.insert_user("ops", "ops-secret-1", crate::auth::Role::Operator).await.unwrap();
+        env.state.insert_user("viewer", "viewer-secret", crate::auth::Role::Viewer).await.unwrap();
+        let (ops_resp, _) = login(&env.svc, "ops", "ops-secret-1").await;
+        let ops = session_cookie(&ops_resp);
+        let (viewer_resp, _) = login(&env.svc, "viewer", "viewer-secret").await;
+        let viewer = session_cookie(&viewer_resp);
+
+        let mut redacted = TestClient::get("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config")
+            .add_header("cookie", &viewer, true)
+            .send(&env.svc)
+            .await;
+        assert_eq!(redacted.status_code, Some(StatusCode::OK));
+        let redacted_body: serde_json::Value = redacted.take_json().await.unwrap();
+        assert_eq!(redacted_body["http_laddr"], "0.0.0.0:6060");
+        assert_eq!(redacted_body["http_bearer_token"], "***");
+        assert_ne!(redacted_body["http_bearer_token"], "super-secret");
+
+        let reveal_ops = TestClient::get("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config?reveal=1")
+            .add_header("cookie", &ops, true)
+            .send(&env.svc)
+            .await;
+        assert_eq!(reveal_ops.status_code, Some(StatusCode::FORBIDDEN));
+
+        let mut reveal_admin = TestClient::get("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config?reveal=1")
+            .add_header("cookie", &admin, true)
+            .send(&env.svc)
+            .await;
+        assert_eq!(reveal_admin.status_code, Some(StatusCode::OK));
+        let revealed: serde_json::Value = reveal_admin.take_json().await.unwrap();
+        assert_eq!(revealed["http_bearer_token"], "file-secret");
+    }
+
+    #[tokio::test]
+    async fn plugin_config_validate_put_versions_rollback_and_reload_stay_compatible() {
+        let env = p4_env(test_cfg()).await;
+
+        let mut bad = TestClient::post("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config/validate")
+            .json(&json!([1, 2, 3]))
+            .send(&env.svc)
+            .await;
+        assert_eq!(bad.status_code, Some(StatusCode::BAD_REQUEST));
+        let bad_body: serde_json::Value = bad.take_json().await.unwrap();
+        assert_eq!(bad_body["code"], 400);
+
+        let mut validated = TestClient::post("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config/validate")
+            .json(&json!({"max_row_limit": 42, "http_laddr": "127.0.0.1:6061"}))
+            .send(&env.svc)
+            .await;
+        assert_eq!(validated.status_code, Some(StatusCode::OK));
+        let vbody: serde_json::Value = validated.take_json().await.unwrap();
+        assert_eq!(vbody["valid"], true);
+        assert_eq!(vbody["effective"], "hot");
+
+        let mut written = TestClient::put("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config?apply=none")
+            .json(&json!({"max_row_limit": 42, "http_laddr": "127.0.0.1:6061"}))
+            .send(&env.svc)
+            .await;
+        assert_eq!(written.status_code, Some(StatusCode::OK));
+        let wbody: serde_json::Value = written.take_json().await.unwrap();
+        assert_eq!(wbody["ok"], true);
+        assert_eq!(wbody["written"], true);
+        assert_eq!(wbody["applied"], false);
+        assert_eq!(wbody["effective"], "reload");
+        assert!(wbody["diff"]["changed"].as_array().unwrap().iter().any(|k| k == "max_row_limit"));
+
+        let disk = std::fs::read_to_string(env.dir.join("p4-demo.toml")).unwrap();
+        assert!(disk.contains("max_row_limit"));
+
+        let mut applied = TestClient::put("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config?apply=reload")
+            .json(&json!({"max_row_limit": 43, "http_laddr": "127.0.0.1:6061"}))
+            .send(&env.svc)
+            .await;
+        let abody: serde_json::Value = applied.take_json().await.unwrap();
+        assert_eq!(abody["effective"], "hot");
+        assert_eq!(abody["applied"], true);
+
+        let mut versions = TestClient::get("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config/versions")
+            .send(&env.svc)
+            .await;
+        assert_eq!(versions.status_code, Some(StatusCode::OK));
+        let vers: serde_json::Value = versions.take_json().await.unwrap();
+        assert!(vers.as_array().unwrap().len() >= 1);
+        let ver = vers[0]["version"].as_str().unwrap().to_string();
+
+        let mut rb = TestClient::post(format!(
+            "http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config/rollback/{ver}?apply=none"
+        ))
+        .send(&env.svc)
+        .await;
+        assert_eq!(rb.status_code, Some(StatusCode::OK));
+        let rb_body: serde_json::Value = rb.take_json().await.unwrap();
+        assert_eq!(rb_body["written"], true);
+        assert_eq!(rb_body["effective"], "reload");
+
+        let reload =
+            TestClient::put("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config/reload").send(&env.svc).await;
+        assert_eq!(reload.status_code, Some(StatusCode::OK));
+
+        let missing = TestClient::put("http://127.0.0.1:0/api/v1/plugins/1/no-such-plugin/config")
+            .json(&json!({"a": 1}))
+            .send(&env.svc)
+            .await;
+        assert_eq!(missing.status_code, Some(StatusCode::NOT_FOUND));
+    }
+
+    #[tokio::test]
+    async fn plugin_config_write_rbac_operator_ok_viewer_denied() {
+        let env = p4_env(dashboard_cfg()).await;
+        env.state.insert_user("ops", "ops-secret-1", crate::auth::Role::Operator).await.unwrap();
+        env.state.insert_user("viewer", "viewer-secret", crate::auth::Role::Viewer).await.unwrap();
+        let (ops_resp, _) = login(&env.svc, "ops", "ops-secret-1").await;
+        let ops = session_cookie(&ops_resp);
+        let (viewer_resp, _) = login(&env.svc, "viewer", "viewer-secret").await;
+        let viewer = session_cookie(&viewer_resp);
+
+        let denied = TestClient::put("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config")
+            .add_header("cookie", &viewer, true)
+            .json(&json!({"max_row_limit": 1}))
+            .send(&env.svc)
+            .await;
+        assert_eq!(denied.status_code, Some(StatusCode::FORBIDDEN));
+
+        let mut ok = TestClient::put("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config?apply=none")
+            .add_header("cookie", &ops, true)
+            .json(&json!({"max_row_limit": 7}))
+            .send(&env.svc)
+            .await;
+        assert_eq!(ok.status_code, Some(StatusCode::OK));
+        let body: serde_json::Value = ok.take_json().await.unwrap();
+        assert_eq!(body["written"], true);
+    }
+
+    #[tokio::test]
+    async fn broker_config_read_and_write_is_restart_required() {
+        let env = p4_env(dashboard_cfg()).await;
+        let (resp, body) = login(&env.svc, "admin", "admin-secret").await;
+        assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
+        let admin = session_cookie(&resp);
+        env.state.insert_user("ops", "ops-secret-1", crate::auth::Role::Operator).await.unwrap();
+        let (ops_resp, _) = login(&env.svc, "ops", "ops-secret-1").await;
+        let ops = session_cookie(&ops_resp);
+
+        let mut overview = TestClient::get("http://127.0.0.1:0/api/v1/broker/config")
+            .add_header("cookie", &ops, true)
+            .send(&env.svc)
+            .await;
+        assert_eq!(overview.status_code, Some(StatusCode::OK));
+        let ov: serde_json::Value = overview.take_json().await.unwrap();
+        assert_eq!(ov["effective"], "restart_required");
+        assert_eq!(ov["mqtt"]["max_sessions"], 10);
+        assert!(ov["note"].as_str().unwrap().contains("hot"));
+
+        let denied = TestClient::put("http://127.0.0.1:0/api/v1/broker/config/mqtt")
+            .add_header("cookie", &ops, true)
+            .json(&json!({"max_sessions": 20}))
+            .send(&env.svc)
+            .await;
+        assert_eq!(denied.status_code, Some(StatusCode::FORBIDDEN));
+
+        let mut put = TestClient::put("http://127.0.0.1:0/api/v1/broker/config/mqtt")
+            .add_header("cookie", &admin, true)
+            .json(&json!({"max_sessions": 20}))
+            .send(&env.svc)
+            .await;
+        assert_eq!(put.status_code, Some(StatusCode::OK));
+        let put_body: serde_json::Value = put.take_json().await.unwrap();
+        assert_eq!(put_body["effective"], "restart_required");
+        assert_eq!(put_body["applied"], false);
+        assert_eq!(put_body["written"], true);
+
+        let disk = std::fs::read_to_string(env.dir.join("ferromq.toml")).unwrap();
+        assert!(disk.contains("max_sessions"));
+
+        let mut audit = TestClient::get("http://127.0.0.1:0/api/v1/audit?action=broker_config_update")
+            .add_header("cookie", &admin, true)
+            .send(&env.svc)
+            .await;
+        let events: serde_json::Value = audit.take_json().await.unwrap();
+        assert!(events.as_array().unwrap().iter().any(|e| e["action"] == "broker_config_update"));
+
+        let mut openapi = TestClient::get("http://127.0.0.1:0/api/v1/openapi.json").send(&env.svc).await;
+        let spec: serde_json::Value = openapi.take_json().await.unwrap();
+        assert!(spec["paths"]["/api/v1/plugins/{node}/{plugin}/config"]["put"].is_object());
+        assert!(spec["paths"]["/api/v1/broker/config"].is_object());
+        let modes = spec["components"]["schemas"]["EffectiveMode"]["enum"].as_array().unwrap();
+        assert!(modes.iter().any(|v| v == "hot"));
+        assert!(modes.iter().any(|v| v == "reload"));
+        assert!(modes.iter().any(|v| v == "restart_required"));
     }
 }

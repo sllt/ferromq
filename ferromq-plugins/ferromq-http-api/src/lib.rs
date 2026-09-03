@@ -3,6 +3,7 @@
 //! Provides a RESTful HTTP API for broker management and monitoring.
 //! ...
 #![deny(unsafe_code)]
+#![recursion_limit = "256"]
 
 use std::sync::Arc;
 
@@ -26,6 +27,7 @@ mod audit;
 mod auth;
 mod clients;
 mod config;
+mod config_mgmt;
 mod embed;
 mod flusher;
 mod handler;

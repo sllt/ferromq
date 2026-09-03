@@ -67,6 +67,27 @@ pub enum Message<'a> {
     // ── Feature support query ──────────────────────────────────────────
     /// Query another node's supported features
     Features,
+    /// Write a plugin TOML file on a remote node (P4).
+    WritePluginConfig {
+        name: &'a str,
+        toml: &'a str,
+        apply: bool,
+    },
+    /// Dry-run validate a plugin config on a remote node (P4).
+    ValidatePluginConfig {
+        name: &'a str,
+        toml: &'a str,
+    },
+    /// List plugin config backups on a remote node (P4).
+    ListPluginConfigVersions {
+        name: &'a str,
+    },
+    /// Restore a plugin config backup on a remote node (P4).
+    RollbackPluginConfig {
+        name: &'a str,
+        version: &'a str,
+        apply: bool,
+    },
 }
 
 impl Message<'_> {
@@ -113,6 +134,14 @@ pub enum MessageReply {
     // ── Feature support reply ──────────────────────────────────────────
     /// Feature support state of a node.
     Features(FeaturesInfo),
+    /// JSON-encoded plugin config write result (postcard cannot carry `Value`).
+    WritePluginConfig(String),
+    /// JSON-encoded plugin config validate result.
+    ValidatePluginConfig(String),
+    /// JSON-encoded plugin config version list.
+    ListPluginConfigVersions(String),
+    /// JSON-encoded plugin config rollback result.
+    RollbackPluginConfig(String),
 }
 
 impl MessageReply {

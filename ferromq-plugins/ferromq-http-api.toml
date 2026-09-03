@@ -29,6 +29,10 @@ http_laddr = "0.0.0.0:6060"
 # dashboard_login_rate_window = "1m"
 # audit_max_events = 10000
 # audit_file = "/var/log/ferromq/http-api-audit.jsonl"
+# Last-N backups of plugin / ferromq.toml writes (P4). Default: 10
+# config_history_keep = 10
+# Path to this node's ferromq.toml for GET/PUT /api/v1/broker/config
+# broker_config_file = "ferromq.toml"
 
 ## Enable TCP SO_REUSEADDR on the HTTP listener.
 ## Default: true

@@ -85,6 +85,12 @@ mod tests {
             "/api/v1/mqtt/subscribe",
             "/api/v1/mqtt/unsubscribe",
             "/api/v1/plugins",
+            "/api/v1/plugins/{node}/{plugin}/config",
+            "/api/v1/plugins/{node}/{plugin}/config/validate",
+            "/api/v1/plugins/{node}/{plugin}/config/versions",
+            "/api/v1/plugins/{node}/{plugin}/config/rollback/{version}",
+            "/api/v1/broker/config",
+            "/api/v1/broker/config/{section}",
             "/api/v1/stats",
             "/api/v1/metrics",
             "/api/v1/metrics/prometheus",
@@ -104,6 +110,10 @@ mod tests {
             "SessionUser",
             "LoginRequest",
             "ChangePasswordRequest",
+            "ConfigWriteResult",
+            "ConfigValidateResult",
+            "EffectiveMode",
+            "BrokerConfigOverview",
         ] {
             assert!(schemas.contains_key(s), "missing schema {s}");
         }

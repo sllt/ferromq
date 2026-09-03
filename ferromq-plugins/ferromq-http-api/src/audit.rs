@@ -22,9 +22,7 @@ use tokio::sync::RwLock;
 
 use super::auth::{identity_from_depot, AuthIdentity, Role, AUTH_IDENTITY};
 use super::config::PluginConfig;
-use super::response::{
-    render_api_error, render_list, ListPaging, DEPOT_REQUEST_ID,
-};
+use super::response::{render_api_error, render_list, ListPaging, DEPOT_REQUEST_ID};
 use super::PluginConfigType;
 
 /// Depot key for [`AuditLog`].
@@ -161,9 +159,7 @@ pub(crate) async fn record(
     success: bool,
     details: Option<Value>,
 ) {
-    let id = identity_from_depot(depot).or_else(|| {
-        depot.get::<AuthIdentity>(AUTH_IDENTITY).ok().cloned()
-    });
+    let id = identity_from_depot(depot).or_else(|| depot.get::<AuthIdentity>(AUTH_IDENTITY).ok().cloned());
     let (username, role, auth) = match &id {
         Some(id) => (id.username.clone(), id.role.as_str().to_string(), id.source.as_str().to_string()),
         None => ("anonymous".into(), Role::Admin.as_str().to_string(), "anonymous".into()),

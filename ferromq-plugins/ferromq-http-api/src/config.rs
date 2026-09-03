@@ -140,6 +140,17 @@ pub struct PluginConfig {
     /// Default: 7 days.
     #[serde(default = "PluginConfig::history_retention_default", deserialize_with = "deserialize_duration")]
     pub history_retention: Duration,
+
+    /// How many previous plugin / broker config files to keep on overwrite.
+    /// Default: 10.
+    #[serde(default = "PluginConfig::config_history_keep_default")]
+    pub config_history_keep: usize,
+
+    /// Optional path to this node's `ferromq.toml`. Used by the read-only
+    /// broker/listener/log overview and the honest write path (file only;
+    /// `ferromqd` is never claimed to hot-restart).
+    #[serde(default)]
+    pub broker_config_file: Option<String>,
 }
 
 impl PluginConfig {
@@ -233,6 +244,11 @@ impl PluginConfig {
         10_000
     }
 
+    #[inline]
+    fn config_history_keep_default() -> usize {
+        10
+    }
+
     /// Serializes the configuration to a JSON value, redacting secrets.
     #[inline]
     pub fn to_json(&self) -> Result<serde_json::Value> {
@@ -257,6 +273,8 @@ impl PluginConfig {
             || self.http_request_log != other.http_request_log
             || self.prometheus_metrics_cache_interval != other.prometheus_metrics_cache_interval
             || self.dashboard_static_dir != other.dashboard_static_dir
+            || self.config_history_keep != other.config_history_keep
+            || self.broker_config_file != other.broker_config_file
     }
 
     /// Returns `true` if a full server restart is required (listen address

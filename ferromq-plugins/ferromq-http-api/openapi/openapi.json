@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "FerroMQ HTTP API",
-    "description": "Management API for FerroMQ (`/api/v1`). Default list responses remain bare JSON arrays; pass `?format=page` for `{ items, offset, limit, truncated, total? }`. 4xx/5xx bodies are `{ code, message, details?, request_id }`. Cluster-aggregating endpoints return HTTP 200 with per-node `{ ok, error? }` instead of a single boolean when some nodes fail. Authentication: `Authorization: Bearer <http_bearer_token>` remains a static superuser (username `operator`, role `admin`). Dashboard login is `POST /api/v1/auth/login` (HttpOnly cookie `ferromq_session`). Created API keys also authenticate as `Authorization: Bearer <secret>` with a bound role. Roles: `admin` (users / keys / audit + writes), `operator` (kick / publish / plugins), `viewer` (read-only). When neither a bearer token, API key, nor dashboard password is configured, the API stays open (anonymous admin).",
+    "description": "Management API for FerroMQ (`/api/v1`). Default list responses remain bare JSON arrays; pass `?format=page` for `{ items, offset, limit, truncated, total? }`. 4xx/5xx bodies are `{ code, message, details?, request_id }`. Cluster-aggregating endpoints return HTTP 200 with per-node `{ ok, error? }` instead of a single boolean when some nodes fail. Authentication: `Authorization: Bearer <http_bearer_token>` remains a static superuser (username `operator`, role `admin`). Dashboard login is `POST /api/v1/auth/login` (HttpOnly cookie `ferromq_session`). Created API keys also authenticate as `Authorization: Bearer <secret>` with a bound role. Roles: `admin` (users / keys / audit / broker config write / `?reveal=1` + writes), `operator` (kick / publish / plugin config write+reload), `viewer` (read-only, secrets redacted). When neither a bearer token, API key, nor dashboard password is configured, the API stays open (anonymous admin). P4 config `effective` is `hot` (already applied via plugin load_config; not a ferromqd restart), `reload` (file written; call PUT .../config/reload), or `restart_required` (file written; process restart needed). ferromqd is never claimed to hot-restart.",
     "version": "0.24.0",
     "license": { "name": "MIT OR Apache-2.0" }
   },
@@ -25,6 +25,7 @@
     { "name": "Retains" },
     { "name": "MQTT" },
     { "name": "Plugins" },
+    { "name": "Config", "description": "P4 online configuration: plugin config write/validate/versions and read-first broker mqtt/listener/log." },
     { "name": "Stats" },
     { "name": "Metrics" }
   ],
@@ -904,20 +905,247 @@
     "/api/v1/plugins/{node}/{plugin}/config": {
       "get": {
         "operationId": "nodePluginConfig",
-        "tags": ["Plugins"],
-        "summary": "Read a plugin config (GET only in this milestone)",
+        "tags": ["Plugins", "Config"],
+        "summary": "Read a plugin config (secrets redacted unless reveal=1 and admin)",
+        "parameters": [
+          { "$ref": "#/components/parameters/PluginNode" },
+          { "$ref": "#/components/parameters/PluginName" },
+          { "$ref": "#/components/parameters/RevealSecrets" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Plugin config JSON (password/token/private_key/secret/jwt keys redacted by default)",
+            "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "put": {
+        "operationId": "nodePluginConfigUpdate",
+        "tags": ["Plugins", "Config"],
+        "summary": "Write a plugin config file (operator+)",
+        "description": "Accepts a JSON object, `{ \"toml\": \"...\" }`, or raw TOML. Atomically writes `{plugins.dir}/{plugin}.toml`, keeps last N backups, optionally applies via plugin `load_config` (`?apply=reload`, default). Returns a diff and `effective`: `hot` (already applied in-process via load_config — not a ferromqd restart), `reload` (call PUT .../config/reload), or `restart_required` (immutable / load_config failed / not initialized).",
+        "parameters": [
+          { "$ref": "#/components/parameters/PluginNode" },
+          { "$ref": "#/components/parameters/PluginName" },
+          { "$ref": "#/components/parameters/ApplyMode" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteBody" } },
+            "application/toml": { "schema": { "type": "string" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Written",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/plugins/{node}/{plugin}/config/validate": {
+      "post": {
+        "operationId": "nodePluginConfigValidate",
+        "tags": ["Plugins", "Config"],
+        "summary": "Dry-run validate a plugin config without writing",
+        "parameters": [
+          { "$ref": "#/components/parameters/PluginNode" },
+          { "$ref": "#/components/parameters/PluginName" },
+          { "$ref": "#/components/parameters/ApplyMode" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteBody" } },
+            "application/toml": { "schema": { "type": "string" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Valid",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigValidateResult" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/plugins/{node}/{plugin}/config/versions": {
+      "get": {
+        "operationId": "nodePluginConfigVersions",
+        "tags": ["Plugins", "Config"],
+        "summary": "List last-N plugin config backups",
         "parameters": [
           { "$ref": "#/components/parameters/PluginNode" },
           { "$ref": "#/components/parameters/PluginName" }
         ],
         "responses": {
           "200": {
-            "description": "Plugin config JSON or text",
-            "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+            "description": "Newest first",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/ConfigVersion" } } } }
           },
           "401": { "$ref": "#/components/responses/Unauthorized" },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "503": { "$ref": "#/components/responses/Unavailable" }
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/plugins/{node}/{plugin}/config/rollback/{version}": {
+      "post": {
+        "operationId": "nodePluginConfigRollback",
+        "tags": ["Plugins", "Config"],
+        "summary": "Restore a plugin config backup (operator+)",
+        "parameters": [
+          { "$ref": "#/components/parameters/PluginNode" },
+          { "$ref": "#/components/parameters/PluginName" },
+          { "$ref": "#/components/parameters/ConfigVersionId" },
+          { "$ref": "#/components/parameters/ApplyMode" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rolled back",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/broker/config": {
+      "get": {
+        "operationId": "getBrokerConfig",
+        "tags": ["Config"],
+        "summary": "Read-only ferromq.toml overview (mqtt/listener/log)",
+        "description": "Reads this node's ferromq.toml. Secrets are redacted unless `?reveal=1` and admin. Writing mqtt/listener/log never hot-restarts ferromqd (`effective` is always `restart_required`).",
+        "parameters": [
+          { "$ref": "#/components/parameters/RevealSecrets" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Overview",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BrokerConfigOverview" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/broker/config/{section}": {
+      "get": {
+        "operationId": "getBrokerConfigSection",
+        "tags": ["Config"],
+        "summary": "Read one ferromq.toml section (mqtt / listener / log)",
+        "parameters": [
+          { "$ref": "#/components/parameters/BrokerSection" },
+          { "$ref": "#/components/parameters/RevealSecrets" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Section",
+            "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "put": {
+        "operationId": "putBrokerConfigSection",
+        "tags": ["Config"],
+        "summary": "Write mqtt/listener/log to ferromq.toml (admin)",
+        "description": "Merges the JSON/TOML body into that section of ferromq.toml. Always returns `effective=restart_required`. Does not claim a hot restart of ferromqd.",
+        "parameters": [
+          { "$ref": "#/components/parameters/BrokerSection" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteBody" } },
+            "application/toml": { "schema": { "type": "string" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Written to disk only",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/broker/config/{section}/validate": {
+      "post": {
+        "operationId": "validateBrokerConfigSection",
+        "tags": ["Config"],
+        "summary": "Dry-run validate a mqtt/listener/log patch (admin)",
+        "parameters": [
+          { "$ref": "#/components/parameters/BrokerSection" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteBody" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Valid",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigValidateResult" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/v1/broker/config/versions": {
+      "get": {
+        "operationId": "listBrokerConfigVersions",
+        "tags": ["Config"],
+        "summary": "List ferromq.toml backups",
+        "responses": {
+          "200": {
+            "description": "Newest first",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/ConfigVersion" } } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/broker/config/rollback/{version}": {
+      "post": {
+        "operationId": "rollbackBrokerConfig",
+        "tags": ["Config"],
+        "summary": "Restore a ferromq.toml backup (admin). Still restart_required.",
+        "parameters": [
+          { "$ref": "#/components/parameters/ConfigVersionId" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rolled back on disk",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
         }
       }
     },
@@ -1326,6 +1554,32 @@
         "in": "path",
         "required": true,
         "schema": { "type": "string" }
+      },
+      "RevealSecrets": {
+        "name": "reveal",
+        "in": "query",
+        "required": false,
+        "description": "If `1`/`true`, return unredacted secrets. Admin only; others get 403.",
+        "schema": { "type": "string", "enum": ["1", "true", "yes", "on"] }
+      },
+      "ApplyMode": {
+        "name": "apply",
+        "in": "query",
+        "required": false,
+        "description": "`reload` (default) calls plugin `load_config` after write. `none` writes the file only.",
+        "schema": { "type": "string", "enum": ["reload", "none"], "default": "reload" }
+      },
+      "ConfigVersionId": {
+        "name": "version",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      },
+      "BrokerSection": {
+        "name": "section",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "enum": ["mqtt", "listener", "listeners", "log"] }
       },
       "Limit": {
         "name": "_limit",
@@ -1754,6 +2008,77 @@
           "node": { "type": "integer", "format": "int64" },
           "plugins": { "type": "array", "items": { "$ref": "#/components/schemas/PluginInfo" } },
           "error": { "type": "string" }
+        }
+      },
+      "EffectiveMode": {
+        "type": "string",
+        "enum": ["hot", "reload", "restart_required"],
+        "description": "hot = already applied via plugin load_config (not a ferromqd restart). reload = file written, call PUT .../config/reload. restart_required = process restart needed; ferromqd is never hot-restarted."
+      },
+      "ConfigDiff": {
+        "type": "object",
+        "properties": {
+          "added": { "type": "array", "items": { "type": "string" } },
+          "removed": { "type": "array", "items": { "type": "string" } },
+          "changed": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "ConfigWriteBody": {
+        "type": "object",
+        "description": "Either the config object itself, or `{ \"toml\": \"...\" }`.",
+        "additionalProperties": true
+      },
+      "ConfigWriteResult": {
+        "type": "object",
+        "required": ["ok", "written", "applied", "effective", "diff"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "written": { "type": "boolean" },
+          "applied": { "type": "boolean" },
+          "effective": { "$ref": "#/components/schemas/EffectiveMode" },
+          "diff": { "$ref": "#/components/schemas/ConfigDiff" },
+          "backup": { "type": "string", "nullable": true },
+          "apply_error": { "type": "string", "nullable": true },
+          "plugin": { "type": "string" },
+          "node": { "type": "integer", "format": "int64" },
+          "section": { "type": "string" },
+          "note": { "type": "string" }
+        }
+      },
+      "ConfigValidateResult": {
+        "type": "object",
+        "required": ["ok", "valid", "effective", "diff"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "valid": { "type": "boolean" },
+          "effective": { "$ref": "#/components/schemas/EffectiveMode" },
+          "diff": { "$ref": "#/components/schemas/ConfigDiff" },
+          "errors": { "type": "array", "items": { "type": "string" } },
+          "plugin": { "type": "string" },
+          "node": { "type": "integer", "format": "int64" },
+          "section": { "type": "string" },
+          "note": { "type": "string" }
+        }
+      },
+      "ConfigVersion": {
+        "type": "object",
+        "required": ["version", "ts", "size"],
+        "properties": {
+          "version": { "type": "string" },
+          "ts": { "type": "integer", "format": "int64" },
+          "size": { "type": "integer", "format": "int64" }
+        }
+      },
+      "BrokerConfigOverview": {
+        "type": "object",
+        "properties": {
+          "file": { "type": "string" },
+          "writable_sections": { "type": "array", "items": { "type": "string" } },
+          "effective": { "$ref": "#/components/schemas/EffectiveMode" },
+          "note": { "type": "string" },
+          "mqtt": { "type": "object", "additionalProperties": true },
+          "listener": { "type": "object", "additionalProperties": true },
+          "log": { "type": "object", "additionalProperties": true }
         }
       },
       "StatsNode": {

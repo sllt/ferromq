@@ -226,12 +226,7 @@ impl AuthState {
         let hash = hash_password(password)?;
         self.users.write().await.insert(
             username.to_string(),
-            DashboardUser {
-                username: username.to_string(),
-                password_hash: hash,
-                role,
-                enabled: true,
-            },
+            DashboardUser { username: username.to_string(), password_hash: hash, role, enabled: true },
         );
         Ok(())
     }
@@ -241,10 +236,10 @@ impl AuthState {
     }
 
     async fn upsert_user(&self, username: String, password_hash: String, role: Role, enabled: bool) {
-        self.users.write().await.insert(
-            username.clone(),
-            DashboardUser { username, password_hash, role, enabled },
-        );
+        self.users
+            .write()
+            .await
+            .insert(username.clone(), DashboardUser { username, password_hash, role, enabled });
     }
 
     async fn list_users(&self) -> Vec<DashboardUser> {
@@ -253,17 +248,17 @@ impl AuthState {
         users
     }
 
-    async fn create_user(&self, username: String, password: &str, role: Role) -> Result<DashboardUser, String> {
+    async fn create_user(
+        &self,
+        username: String,
+        password: &str,
+        role: Role,
+    ) -> Result<DashboardUser, String> {
         if self.users.read().await.contains_key(&username) {
             return Err("exists".into());
         }
         let hash = hash_password(password)?;
-        let user = DashboardUser {
-            username: username.clone(),
-            password_hash: hash,
-            role,
-            enabled: true,
-        };
+        let user = DashboardUser { username: username.clone(), password_hash: hash, role, enabled: true };
         self.users.write().await.insert(username, user.clone());
         Ok(user)
     }
@@ -274,8 +269,10 @@ impl AuthState {
             return Err("not_found".into());
         }
         if users.get(username).is_some_and(|u| u.role == Role::Admin) && !enabled {
-            let other_admins =
-                users.values().filter(|u| u.role == Role::Admin && u.enabled && u.username != username).count();
+            let other_admins = users
+                .values()
+                .filter(|u| u.role == Role::Admin && u.enabled && u.username != username)
+                .count();
             if other_admins == 0 {
                 return Err("last_admin".into());
             }
@@ -1064,8 +1061,15 @@ pub(crate) async fn create_user(req: &mut Request, depot: &mut Depot, res: &mut 
     };
     match state.create_user(username.clone(), &body.password, role).await {
         Ok(user) => {
-            audit::record(req, depot, "user_create", Some(username), true, Some(json!({"role": role.as_str()})))
-                .await;
+            audit::record(
+                req,
+                depot,
+                "user_create",
+                Some(username),
+                true,
+                Some(json!({"role": role.as_str()})),
+            )
+            .await;
             res.status_code(StatusCode::CREATED);
             res.render(Json(user_to_json(&user)));
         }
@@ -1088,12 +1092,7 @@ pub(crate) async fn enable_user(req: &mut Request, depot: &mut Depot, res: &mut 
     set_user_enabled_handler(req, depot, res, true).await;
 }
 
-async fn set_user_enabled_handler(
-    req: &mut Request,
-    depot: &mut Depot,
-    res: &mut Response,
-    enabled: bool,
-) {
+async fn set_user_enabled_handler(req: &mut Request, depot: &mut Depot, res: &mut Response, enabled: bool) {
     let Some(state) = auth_state(depot) else {
         render_api_error(res, StatusCode::INTERNAL_SERVER_ERROR, "auth not configured");
         return;
@@ -1170,7 +1169,8 @@ pub(crate) async fn create_api_key(req: &mut Request, depot: &mut Depot, res: &m
             }
         },
     };
-    let created_by = identity_from_depot(depot).map(|id| id.username).unwrap_or_else(|| ANONYMOUS_USERNAME.into());
+    let created_by =
+        identity_from_depot(depot).map(|id| id.username).unwrap_or_else(|| ANONYMOUS_USERNAME.into());
     let (rec, secret) = state.create_api_key(name.clone(), role, created_by).await;
     audit::record(
         req,
