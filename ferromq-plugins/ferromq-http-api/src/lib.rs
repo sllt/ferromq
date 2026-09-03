@@ -28,6 +28,7 @@ mod auth;
 mod clients;
 mod config;
 mod config_mgmt;
+mod diagnostics;
 mod embed;
 mod flusher;
 mod handler;

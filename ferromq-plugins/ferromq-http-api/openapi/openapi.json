@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "FerroMQ HTTP API",
-    "description": "Management API for FerroMQ (`/api/v1`). Default list responses remain bare JSON arrays; pass `?format=page` for `{ items, offset, limit, truncated, total? }`. 4xx/5xx bodies are `{ code, message, details?, request_id }`. Cluster-aggregating endpoints return HTTP 200 with per-node `{ ok, error? }` instead of a single boolean when some nodes fail. Authentication: `Authorization: Bearer <http_bearer_token>` remains a static superuser (username `operator`, role `admin`). Dashboard login is `POST /api/v1/auth/login` (HttpOnly cookie `ferromq_session`). Created API keys also authenticate as `Authorization: Bearer <secret>` with a bound role. Roles: `admin` (users / keys / audit / broker config write / `?reveal=1` + writes), `operator` (kick / publish / plugin config write+reload / P5 integrations write), `viewer` (read-only, secrets redacted). When neither a bearer token, API key, nor dashboard password is configured, the API stays open (anonymous admin). P4 config `effective` is `hot` (already applied via plugin load_config; not a ferromqd restart), `reload` (file written; call PUT .../config/reload), or `restart_required` (file written; process restart needed). ferromqd is never claimed to hot-restart. P5 adds structured ACL / auth-provider / auto-subscription / topic-rewrite / webhook / bridge APIs on top of P4 plugin-config write. There is no blacklist plugin; GET /api/v1/blacklist documents the gap.",
+    "description": "Management API for FerroMQ (`/api/v1`). Default list responses remain bare JSON arrays; pass `?format=page` for `{ items, offset, limit, truncated, total? }`. 4xx/5xx bodies are `{ code, message, details?, request_id }`. Cluster-aggregating endpoints return HTTP 200 with per-node `{ ok, error? }` instead of a single boolean when some nodes fail. Authentication: `Authorization: Bearer <http_bearer_token>` remains a static superuser (username `operator`, role `admin`). Dashboard login is `POST /api/v1/auth/login` (HttpOnly cookie `ferromq_session`). Created API keys also authenticate as `Authorization: Bearer <secret>` with a bound role. Roles: `admin` (users / keys / audit / broker config write / `?reveal=1` + writes), `operator` (kick / publish / plugin config write+reload / P5 integrations write / P6 alarm ack and cluster writes), `viewer` (read-only, secrets redacted). When neither a bearer token, API key, nor dashboard password is configured, the API stays open (anonymous admin). P4 config `effective` is `hot` (already applied via plugin load_config; not a ferromqd restart), `reload` (file written; call PUT .../config/reload), or `restart_required` (file written; process restart needed). ferromqd is never claimed to hot-restart. P5 adds structured ACL / auth-provider / auto-subscription / topic-rewrite / webhook / bridge APIs on top of P4 plugin-config write. There is no blacklist plugin; GET /api/v1/blacklist documents the gap. P6 diagnostics: alarms are an in-memory bus derived from health/features/unreachable peers (not a native alarm plugin). GET /logs, /trace, /slow-subs return available=false. GET /topic-metrics is route-derived subscriber counts (no per-topic rates). GET /cluster is read-only topology; POST /cluster/join is always 501 (startup-only); POST /cluster/leave works only when ferromq-cluster-raft is active. Cluster write responses always include per-node results.",
     "version": "0.24.0",
     "license": { "name": "MIT OR Apache-2.0" }
   },
@@ -33,6 +33,12 @@
     { "name": "Topic rewrites", "description": "P5 ferromq-topic-rewrite rules." },
     { "name": "Webhooks", "description": "P5 ferromq-web-hook urls/rules; test is a TCP stub with SSRF checks." },
     { "name": "Bridges", "description": "P5 bridge plugins: status/attrs + P4 config write + load/unload." },
+    { "name": "Alarms", "description": "P6 in-memory alarm bus derived from health/features/unreachable peers. Not a native alarm plugin; lost on restart." },
+    { "name": "Logs", "description": "P6 gap: no log collector. GET returns available=false." },
+    { "name": "Trace", "description": "P6 gap: no packet-trace plugin." },
+    { "name": "Slow subscriptions", "description": "P6 gap: no slow-subscription tracker." },
+    { "name": "Topic metrics", "description": "P6 route-derived subscriber counts. Per-topic rates are not collected." },
+    { "name": "Cluster", "description": "P6 topology + membership. Join/leave only if ferromq-cluster-raft Plugin::send exists; otherwise 501 with per-node results." },
     { "name": "Stats" },
     { "name": "Metrics" }
   ],
@@ -1790,6 +1796,114 @@
     },
     "/api/v1/bridges/{plugin}/unload": {
       "put": { "operationId": "unloadBridge", "tags": ["Bridges"], "summary": "Stop/unload a bridge plugin", "responses": { "200": { "description": "Unloaded" } } }
+    },
+    "/api/v1/alarms": {
+      "get": {
+        "operationId": "listAlarms",
+        "tags": ["Alarms"],
+        "summary": "Current derived alarms",
+        "description": "In-memory bus refreshed from health, features, and node reachability. available=true means the bus exists, not that FerroMQ has a native alarm plugin.",
+        "responses": {
+          "200": { "description": "Alarm list", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AlarmList" } } } }
+        }
+      }
+    },
+    "/api/v1/alarms/history": {
+      "get": {
+        "operationId": "listAlarmHistory",
+        "tags": ["Alarms"],
+        "summary": "Cleared alarms (process memory)",
+        "responses": {
+          "200": { "description": "History", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AlarmList" } } } }
+        }
+      }
+    },
+    "/api/v1/alarms/{id}/acknowledge": {
+      "post": {
+        "operationId": "acknowledgeAlarm",
+        "tags": ["Alarms"],
+        "summary": "Acknowledge a current alarm (operator+)",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "Acknowledged" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/v1/logs": {
+      "get": {
+        "operationId": "getLogs",
+        "tags": ["Logs"],
+        "summary": "Log query availability (gap)",
+        "description": "No log collector. Returns available=false and points at GET /broker/config/log.",
+        "responses": { "200": { "description": "Gap document", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CapabilityGap" } } } } }
+      }
+    },
+    "/api/v1/trace": {
+      "get": {
+        "operationId": "getTrace",
+        "tags": ["Trace"],
+        "summary": "Packet-trace availability (gap)",
+        "responses": { "200": { "description": "Gap document", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CapabilityGap" } } } } }
+      },
+      "post": {
+        "operationId": "startTrace",
+        "tags": ["Trace"],
+        "summary": "Not implemented (no plugin)",
+        "responses": { "501": { "description": "No trace plugin; details.nodes not used (local gap)" } }
+      }
+    },
+    "/api/v1/slow-subs": {
+      "get": {
+        "operationId": "getSlowSubs",
+        "tags": ["Slow subscriptions"],
+        "summary": "Slow-subscription availability (gap)",
+        "responses": { "200": { "description": "Gap document", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CapabilityGap" } } } } }
+      }
+    },
+    "/api/v1/topic-metrics": {
+      "get": {
+        "operationId": "getTopicMetrics",
+        "tags": ["Topic metrics"],
+        "summary": "Route-derived subscriber counts",
+        "description": "available=true with kind=route_derived. Per-topic publish/deliver rates are not collected. $SYS topics are listed only when ferromq-sys-topic is loaded.",
+        "responses": { "200": { "description": "Topic metrics", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TopicMetrics" } } } } }
+      }
+    },
+    "/api/v1/cluster": {
+      "get": {
+        "operationId": "getCluster",
+        "tags": ["Cluster"],
+        "summary": "Read-only cluster topology",
+        "description": "mode is standalone | raft | broadcast. membership.join/leave say whether write APIs exist. GET /brokers and GET /nodes also include an additive cluster object.",
+        "responses": { "200": { "description": "Topology", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClusterTopology" } } } } }
+      }
+    },
+    "/api/v1/cluster/join": {
+      "post": {
+        "operationId": "clusterJoin",
+        "tags": ["Cluster"],
+        "summary": "Runtime join is not supported",
+        "description": "Always 501. Raft::join is consumed at ferromq-cluster-raft init from raft_peer_addrs. Response details.nodes is a per-node result array.",
+        "responses": {
+          "501": { "description": "Not implemented", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClusterWriteResult" } } } },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/v1/cluster/leave": {
+      "post": {
+        "operationId": "clusterLeave",
+        "tags": ["Cluster"],
+        "summary": "Leave when ferromq-cluster-raft is active",
+        "description": "Calls Plugin::send({op:leave}) → Mailbox::leave on the local node. Otherwise 501. Always returns per-node results.",
+        "responses": {
+          "200": { "description": "Per-node leave result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClusterWriteResult" } } } },
+          "501": { "description": "No runtime leave API", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClusterWriteResult" } } } },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
     }
   },
   "components": {
@@ -2443,6 +2557,100 @@
           "latency_ms": { "type": "integer" },
           "error": { "type": "string", "nullable": true },
           "note": { "type": "string" }
+        }
+      },
+      "CapabilityGap": {
+        "type": "object",
+        "required": ["available", "items", "gap"],
+        "properties": {
+          "available": { "type": "boolean", "enum": [false] },
+          "plugin": { "nullable": true },
+          "kind": { "type": "string" },
+          "items": { "type": "array" },
+          "gap": { "type": "string" },
+          "alternatives": { "type": "array" }
+        }
+      },
+      "Alarm": {
+        "type": "object",
+        "required": ["id", "name", "level", "message", "source", "activated_at", "acknowledged"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "level": { "type": "string", "enum": ["critical", "warning"] },
+          "node_id": { "type": "integer", "format": "int64", "nullable": true },
+          "message": { "type": "string" },
+          "source": { "type": "string", "enum": ["health", "features", "cluster"] },
+          "activated_at": { "type": "integer", "format": "int64" },
+          "acknowledged": { "type": "boolean" },
+          "acknowledged_at": { "type": "integer", "format": "int64" },
+          "acknowledged_by": { "type": "string" },
+          "cleared_at": { "type": "integer", "format": "int64" }
+        }
+      },
+      "AlarmList": {
+        "type": "object",
+        "required": ["available", "source", "items"],
+        "properties": {
+          "available": { "type": "boolean" },
+          "source": { "type": "string", "enum": ["derived"] },
+          "note": { "type": "string" },
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/Alarm" } }
+        }
+      },
+      "TopicMetrics": {
+        "type": "object",
+        "required": ["available", "kind", "items"],
+        "properties": {
+          "available": { "type": "boolean" },
+          "kind": { "type": "string", "enum": ["route_derived"] },
+          "note": { "type": "string" },
+          "sys_topic": { "type": "object" },
+          "alternatives": { "type": "array" },
+          "items": { "type": "array" },
+          "offset": { "type": "integer" },
+          "limit": { "type": "integer" },
+          "truncated": { "type": "boolean" }
+        }
+      },
+      "ClusterTopology": {
+        "type": "object",
+        "required": ["available", "mode", "local_node_id", "membership", "nodes"],
+        "properties": {
+          "available": { "type": "boolean" },
+          "mode": { "type": "string", "enum": ["standalone", "raft", "broadcast"] },
+          "plugin": { "type": "string", "nullable": true },
+          "plugin_active": { "type": "boolean" },
+          "local_node_id": { "type": "integer", "format": "int64" },
+          "leader_id": { "type": "integer", "format": "int64", "nullable": true },
+          "role": { "type": "string" },
+          "peers": { "type": "array", "items": { "type": "integer" } },
+          "nodes": { "type": "array" },
+          "membership": {
+            "type": "object",
+            "properties": {
+              "join": { "type": "boolean" },
+              "leave": { "type": "boolean" },
+              "reason": { "type": "string" }
+            }
+          },
+          "raft": { "description": "Plugin::send({op:status}) payload when raft is active" },
+          "note": { "type": "string" }
+        }
+      },
+      "ClusterWriteResult": {
+        "type": "object",
+        "description": "Cluster membership write. Always includes a per-node result array. On 501 the same shape is in Error.details.",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "action": { "type": "string", "enum": ["join", "leave"] },
+          "available": { "type": "boolean" },
+          "message": { "type": "string" },
+          "membership": { "type": "object" },
+          "nodes": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ClusterNodeError" }
+          }
         }
       },
       "BlacklistGap": {

@@ -50,6 +50,7 @@ use super::auth::{
     require_admin, require_write, AuthGuard, AuthState, AUTH_STATE,
 };
 use super::config_mgmt;
+use super::diagnostics::{self, AlarmBus, ALARM_BUS};
 use super::embed::DashboardAssets;
 use super::flusher::{HistoryCache, HistoryCaches};
 use super::integrations;
@@ -80,7 +81,7 @@ pub(crate) fn route(
     route_with_auth(scx, cfg, Arc::new(AuthState::new(token)), monitor, history_caches)
 }
 
-fn route_with_auth(
+pub(crate) fn route_with_auth(
     scx: ServerContext,
     cfg: PluginConfigType,
     auth_state: Arc<AuthState>,
@@ -99,6 +100,7 @@ fn route_with_auth(
         .hoop(affix_state::insert(PROME_MONITOR, monitor))
         .hoop(affix_state::insert(AUTH_STATE, auth_state.clone()))
         .hoop(affix_state::insert(AUDIT_LOG, audit_log))
+        .hoop(affix_state::insert(ALARM_BUS, Arc::new(AlarmBus::default_bus())))
         .hoop(request_id_hoop)
         .hoop(api_logger);
     // Inject history caches so query handlers can access LRU + storage.
@@ -330,6 +332,37 @@ fn route_with_auth(
                     .push(Router::with_path("load").hoop(require_write).put(integrations::bridge_load))
                     .push(Router::with_path("unload").hoop(require_write).put(integrations::bridge_unload)),
             ),
+        )
+        .push(
+            Router::with_path("alarms")
+                .get(diagnostics::alarms_current)
+                .push(Router::with_path("history").get(diagnostics::alarms_history))
+                .push(
+                    Router::with_path("{id}/acknowledge")
+                        .hoop(require_write)
+                        .post(diagnostics::alarms_acknowledge),
+                ),
+        )
+        .push(Router::with_path("logs").get(diagnostics::logs_get))
+        .push(
+            Router::with_path("trace")
+                .get(diagnostics::trace_get)
+                .push(Router::new().hoop(require_write).post(diagnostics::trace_write))
+                .push(
+                    Router::with_path("{*rest}")
+                        .hoop(require_write)
+                        .post(diagnostics::trace_write)
+                        .put(diagnostics::trace_write)
+                        .delete(diagnostics::trace_write),
+                ),
+        )
+        .push(Router::with_path("slow-subs").get(diagnostics::slow_subs_get))
+        .push(Router::with_path("topic-metrics").get(diagnostics::topic_metrics_get))
+        .push(
+            Router::with_path("cluster")
+                .get(diagnostics::cluster_get)
+                .push(Router::with_path("join").hoop(require_write).post(diagnostics::cluster_join))
+                .push(Router::with_path("leave").hoop(require_write).post(diagnostics::cluster_leave)),
         )
         .push(
             Router::with_path("stats")
@@ -838,6 +871,66 @@ async fn list_apis(res: &mut Response) {
             "path": "/api/v1/bridges/{plugin}",
             "descr": "Write a bridge plugin config via the P4 plugin-config path"
         },
+        {
+            "name": "alarms_current",
+            "method": "GET",
+            "path": "/api/v1/alarms",
+            "descr": "Current alarms derived from health/features/unreachable peers (in-memory)"
+        },
+        {
+            "name": "alarms_history",
+            "method": "GET",
+            "path": "/api/v1/alarms/history",
+            "descr": "Cleared alarms (process memory; lost on restart)"
+        },
+        {
+            "name": "alarms_acknowledge",
+            "method": "POST",
+            "path": "/api/v1/alarms/{id}/acknowledge",
+            "descr": "Acknowledge a current alarm (operator+)"
+        },
+        {
+            "name": "logs_get",
+            "method": "GET",
+            "path": "/api/v1/logs",
+            "descr": "Honest gap: no log collector; points at broker log config"
+        },
+        {
+            "name": "trace_get",
+            "method": "GET",
+            "path": "/api/v1/trace",
+            "descr": "Honest gap: no packet-trace plugin"
+        },
+        {
+            "name": "slow_subs_get",
+            "method": "GET",
+            "path": "/api/v1/slow-subs",
+            "descr": "Honest gap: no slow-subscription tracker"
+        },
+        {
+            "name": "topic_metrics_get",
+            "method": "GET",
+            "path": "/api/v1/topic-metrics",
+            "descr": "Route-derived subscriber counts; per-topic rates are not collected"
+        },
+        {
+            "name": "cluster_get",
+            "method": "GET",
+            "path": "/api/v1/cluster",
+            "descr": "Read-only cluster topology (raft/broadcast/standalone)"
+        },
+        {
+            "name": "cluster_join",
+            "method": "POST",
+            "path": "/api/v1/cluster/join",
+            "descr": "Runtime join is not supported (501 + per-node result); membership is startup config"
+        },
+        {
+            "name": "cluster_leave",
+            "method": "POST",
+            "path": "/api/v1/cluster/leave",
+            "descr": "Leave via ferromq-cluster-raft Plugin::send, else 501 with per-node result"
+        },
 
         {
             "name": "get_stats",
@@ -912,7 +1005,9 @@ async fn list_apis(res: &mut Response) {
     res.render(Json(data));
 }
 
-fn get_scx_cfg(depot: &mut Depot) -> std::result::Result<&(ServerContext, PluginConfigType), salvo::Error> {
+pub(crate) fn get_scx_cfg(
+    depot: &mut Depot,
+) -> std::result::Result<&(ServerContext, PluginConfigType), salvo::Error> {
     let scx_cfg = depot.obtain::<(ServerContext, PluginConfigType)>().map_err(|e| match e {
         None => salvo::Error::Io(std::io::Error::new(ErrorKind::NotFound, anyhow!("None"))),
         Some(e) => salvo::Error::Io(std::io::Error::new(ErrorKind::NotFound, format!("{e:?}"))),
@@ -976,9 +1071,10 @@ async fn get_brokers(
     let message_type = cfg.read().await.message_type;
 
     let id = req.param::<NodeId>("id");
+    let topo = diagnostics::cluster_snapshot(scx).await;
     if let Some(id) = id {
         match _get_broker(scx, message_type, id).await {
-            Ok(Some(broker_info)) => res.render(Json(broker_info)),
+            Ok(Some(broker_info)) => res.render(Json(diagnostics::attach_cluster_field(broker_info, &topo))),
             Ok(None) => {
                 //| Err(MqttError::None)
                 render_not_found(res, "not found");
@@ -989,7 +1085,13 @@ async fn get_brokers(
         }
     } else {
         match _get_brokers(scx, message_type).await {
-            Ok(brokers) => res.render(Json(brokers)),
+            Ok(brokers) => {
+                let brokers = brokers
+                    .into_iter()
+                    .map(|b| diagnostics::attach_cluster_field(b, &topo))
+                    .collect::<Vec<_>>();
+                res.render(Json(brokers));
+            }
             Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
     }
@@ -1090,9 +1192,12 @@ async fn get_nodes(
     let message_type = cfg.read().await.message_type;
 
     let id = req.param::<NodeId>("id");
+    let topo = diagnostics::cluster_snapshot(scx).await;
     if let Some(id) = id {
         match get_node(scx, message_type, id).await {
-            Ok(Some(node_info)) => res.render(Json(node_info.to_json())),
+            Ok(Some(node_info)) => {
+                res.render(Json(diagnostics::attach_cluster_field(node_info.to_json(), &topo)))
+            }
             Ok(None) => {
                 render_not_found(res, "not found");
             }
@@ -1105,7 +1210,10 @@ async fn get_nodes(
                 for item in node_infos {
                     match item {
                         Ok(node_info) => {
-                            nodes.push(cluster_node_success(node_info.to_json()));
+                            nodes.push(diagnostics::attach_cluster_field(
+                                cluster_node_success(node_info.to_json()),
+                                &topo,
+                            ));
                         }
                         Err((id, e)) => {
                             nodes.push(cluster_node_failure(id, e));
@@ -1308,7 +1416,10 @@ async fn get_feature(
 
 /// Query the feature support state of all cluster nodes.
 #[inline]
-async fn get_features_all(scx: &ServerContext, message_type: MessageType) -> Result<Vec<FeaturesNodeResult>> {
+pub(crate) async fn get_features_all(
+    scx: &ServerContext,
+    message_type: MessageType,
+) -> Result<Vec<FeaturesNodeResult>> {
     let mut features = vec![FeaturesNodeResult::ok(build_features(scx).await)];
     let grpc_clients = scx.extends.shared().await.get_grpc_clients();
     if !grpc_clients.is_empty() {
