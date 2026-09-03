@@ -20,8 +20,9 @@ use ferromq::Result;
 
 use super::audit;
 use super::config_mgmt::{
-    deny_reveal_if_needed, json_to_toml, local_write_plugin_lenient, parse_apply,
-    read_local_plugin_file_json, redact_secrets, toml_to_json, wants_reveal, WriteResult,
+    assign_object_preserving_secrets, deny_reveal_if_needed, json_to_toml, local_write_plugin_lenient,
+    merge_plugin_patch, parse_apply, read_local_plugin_file_json, redact_secrets, toml_to_json, wants_reveal,
+    WriteResult,
 };
 use super::plugin;
 use super::response::{
@@ -214,6 +215,27 @@ pub(crate) fn validate_callback_url(raw: &str, allow_private: bool) -> std::resu
     Ok(HttpUrl { host, port })
 }
 
+/// If the incoming URL has a redacted `***:***` userinfo, keep `existing`
+/// when the host/path still matches. Never persist the literal `***`.
+pub(crate) fn restore_webhook_url(
+    existing: Option<&str>,
+    incoming: &str,
+) -> std::result::Result<String, String> {
+    let incoming = normalize_webhook_url(incoming)?;
+    if incoming.contains("***") {
+        if let Some(prev) = existing {
+            let prev_n = normalize_webhook_url(prev)?;
+            if redact_url_userinfo(&prev_n) == redact_url_userinfo(&incoming)
+                || redact_url_userinfo(&prev_n) == incoming
+            {
+                return Ok(prev_n);
+            }
+        }
+        return Err("refusing to write redacted URL userinfo '***'".into());
+    }
+    Ok(incoming)
+}
+
 pub(crate) fn redact_url_userinfo(raw: &str) -> String {
     let Some((scheme, rest)) = raw.split_once("://") else {
         return raw.to_string();
@@ -255,10 +277,42 @@ fn prepare_body(mut value: Value, reveal: bool) -> Value {
     value
 }
 
-async fn tcp_probe(host: &str, port: u16, timeout: Duration) -> (bool, Option<u64>, Option<String>) {
-    let addr = format!("{host}:{port}");
+/// After `lookup_host`, reject blocked IPs unless `allow_private`.
+/// `tcp_probe` resolves first, then calls this, then connects (never HTTP GET).
+pub(crate) fn reject_blocked_resolved_ips(
+    addrs: impl IntoIterator<Item = IpAddr>,
+    allow_private: bool,
+) -> std::result::Result<(), String> {
+    if allow_private {
+        return Ok(());
+    }
+    for ip in addrs {
+        if is_blocked_ip(ip) {
+            return Err("private, loopback, link-local, or metadata IP is blocked".into());
+        }
+    }
+    Ok(())
+}
+
+async fn tcp_probe(
+    host: &str,
+    port: u16,
+    timeout: Duration,
+    allow_private: bool,
+) -> (bool, Option<u64>, Option<String>) {
     let start = Instant::now();
-    match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr)).await {
+    let addrs = match tokio::time::timeout(timeout, tokio::net::lookup_host((host, port))).await {
+        Ok(Ok(iter)) => iter.collect::<Vec<_>>(),
+        Ok(Err(e)) => return (false, Some(start.elapsed().as_millis() as u64), Some(e.to_string())),
+        Err(_) => return (false, Some(timeout.as_millis() as u64), Some("dns lookup timed out".into())),
+    };
+    if addrs.is_empty() {
+        return (false, Some(start.elapsed().as_millis() as u64), Some("host did not resolve".into()));
+    }
+    if let Err(e) = reject_blocked_resolved_ips(addrs.iter().map(|a| a.ip()), allow_private) {
+        return (false, Some(start.elapsed().as_millis() as u64), Some(e));
+    }
+    match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addrs.as_slice())).await {
         Ok(Ok(_stream)) => (true, Some(start.elapsed().as_millis() as u64), None),
         Ok(Err(e)) => (false, Some(start.elapsed().as_millis() as u64), Some(e.to_string())),
         Err(_) => (false, Some(timeout.as_millis() as u64), Some("tcp connect timed out".into())),
@@ -719,6 +773,7 @@ pub(crate) async fn acl_rules_update(
         if index >= rules.len() {
             return Err(format!("ACL rule index {index} not found"));
         }
+        let raw = merge_plugin_patch(rules[index].clone(), raw).map_err(|e| e.to_string())?;
         rules[index] = raw.clone();
         Ok(json!({"rule": acl_rule_view(&raw, index)}))
     })
@@ -978,14 +1033,7 @@ pub(crate) async fn auth_provider_put(
     let name_owned = name.clone();
     mutate_doc(req, depot, res, &name, "auth_provider_update", move |doc, body| {
         require_object(body, "auth provider config")?;
-        if let Some(obj) = body.as_object() {
-            for (k, v) in obj {
-                if k == "toml" {
-                    continue;
-                }
-                doc[k] = v.clone();
-            }
-        }
+        assign_object_preserving_secrets(doc, body);
         Ok(json!({"name": name_owned}))
     })
     .await
@@ -1073,7 +1121,7 @@ async fn test_auth_http(
     let parsed = validate_callback_url(url, allow_private)?;
     let host = parsed.host.clone();
     let port = parsed.port;
-    let (ok, ms, err) = tcp_probe(&host, port, Duration::from_secs(3)).await;
+    let (ok, ms, err) = tcp_probe(&host, port, Duration::from_secs(3), allow_private).await;
     Ok(json!({
         "ok": ok,
         "kind": "tcp_connect",
@@ -1660,9 +1708,12 @@ pub(crate) async fn webhooks_put(
         }
         if let Some(urls) = body.get("urls") {
             let arr = urls.as_array().ok_or_else(|| "urls must be an array".to_string())?;
+            let existing = doc.get("urls").and_then(|v| v.as_array()).cloned().unwrap_or_default();
             let mut out = Vec::new();
-            for u in arr {
-                out.push(normalize_webhook_url(u.as_str().ok_or("each url must be a string")?)?);
+            for (i, u) in arr.iter().enumerate() {
+                let incoming = u.as_str().ok_or_else(|| "each url must be a string".to_string())?;
+                let prev = existing.get(i).and_then(|v| v.as_str());
+                out.push(restore_webhook_url(prev, incoming)?);
             }
             doc["urls"] = json!(out);
         }
@@ -1683,7 +1734,7 @@ pub(crate) async fn webhook_urls_add(
             .and_then(|v| v.as_str())
             .or_else(|| body.as_str())
             .ok_or_else(|| "url is required".to_string())?;
-        let url = normalize_webhook_url(raw)?;
+        let url = restore_webhook_url(None, raw)?;
         let arr = array_mut(doc, "urls")?;
         if arr.iter().any(|v| v.as_str() == Some(url.as_str())) {
             return Err("url already present".into());
@@ -1881,7 +1932,7 @@ pub(crate) async fn webhook_test(
     };
     let host = parsed.host.clone();
     let port = parsed.port;
-    let (ok, ms, err) = tcp_probe(&host, port, Duration::from_secs(3)).await;
+    let (ok, ms, err) = tcp_probe(&host, port, Duration::from_secs(3), allow_private).await;
     let result = json!({
         "ok": ok,
         "kind": "tcp_connect",
@@ -2057,14 +2108,7 @@ pub(crate) async fn bridge_put(
     let name_owned = name.clone();
     mutate_doc(req, depot, res, &name, "bridge_config_update", move |doc, body| {
         require_object(body, "bridge config")?;
-        if let Some(obj) = body.as_object() {
-            for (k, v) in obj {
-                if k == "toml" {
-                    continue;
-                }
-                doc[k] = v.clone();
-            }
-        }
+        assign_object_preserving_secrets(doc, body);
         Ok(json!({"name": name_owned, "kind": bridge_kind(&name_owned)}))
     })
     .await
@@ -2214,6 +2258,62 @@ mod tests {
         assert!(validate_callback_url("http://127.0.0.1:8080/x", true).is_ok());
         assert!(is_blocked_ip("192.168.1.1".parse().unwrap()));
         assert!(!is_blocked_ip("1.1.1.1".parse().unwrap()));
+        // tcp_probe: lookup_host → reject_blocked_resolved_ips → TcpStream::connect.
+        // Unit-test the resolve-then-check helper (no live DNS).
+        assert!(reject_blocked_resolved_ips(["127.0.0.1".parse().unwrap()], false).is_err());
+        assert!(reject_blocked_resolved_ips(["127.0.0.1".parse().unwrap()], true).is_ok());
+        assert!(reject_blocked_resolved_ips(["1.1.1.1".parse().unwrap()], false).is_ok());
+        assert!(reject_blocked_resolved_ips(["169.254.169.254".parse().unwrap()], false).is_err());
+    }
+
+    #[test]
+    fn acl_update_preserves_omitted_or_redacted_password() {
+        let existing = json!(["allow", {"user": "dashboard", "password": "s3cret"}, "subscribe", ["$SYS/#"]]);
+        let omitted = normalize_acl_rule(&json!({
+            "access": "allow",
+            "who": {"user": "dashboard"},
+            "control": "subscribe",
+            "topics": ["$SYS/#"]
+        }))
+        .unwrap();
+        let merged = merge_plugin_patch(existing.clone(), omitted).unwrap();
+        assert_eq!(merged[1]["password"], "s3cret");
+
+        let redacted = normalize_acl_rule(&json!({
+            "access": "allow",
+            "who": {"user": "dashboard", "password": "***"},
+            "control": "subscribe",
+            "topics": ["$SYS/#"]
+        }))
+        .unwrap();
+        let merged = merge_plugin_patch(existing, redacted).unwrap();
+        assert_eq!(merged[1]["password"], "s3cret");
+        assert_ne!(merged[1]["password"], "***");
+    }
+
+    #[test]
+    fn auth_and_bridge_put_skip_redacted_secrets() {
+        let mut jwt = json!({"hmac_secret": "keep", "encrypt": "hmac-based"});
+        assign_object_preserving_secrets(&mut jwt, &json!({"hmac_secret": "***", "hmac_base64": true}));
+        assert_eq!(jwt["hmac_secret"], "keep");
+        assert_eq!(jwt["hmac_base64"], true);
+
+        let mut bridge = json!({"password": "old", "server": "mqtt.example.com"});
+        assign_object_preserving_secrets(
+            &mut bridge,
+            &json!({"password": "***", "server": "other.example.com"}),
+        );
+        assert_eq!(bridge["password"], "old");
+        assert_eq!(bridge["server"], "other.example.com");
+    }
+
+    #[test]
+    fn webhook_url_restores_redacted_userinfo() {
+        let prev = "https://user:hunter2@hooks.example.com/mqtt";
+        let incoming = redact_url_userinfo(prev);
+        let restored = restore_webhook_url(Some(prev), &incoming).unwrap();
+        assert_eq!(restored, prev);
+        assert!(restore_webhook_url(None, &incoming).is_err());
     }
 
     #[test]

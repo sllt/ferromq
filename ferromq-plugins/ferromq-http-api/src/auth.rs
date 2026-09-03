@@ -291,6 +291,19 @@ impl AuthState {
         self.users.read().await.values().filter(|u| u.role == Role::Admin && u.enabled).count()
     }
 
+    #[cfg(test)]
+    pub(crate) async fn set_user_role(&self, username: &str, role: Role) -> Result<(), String> {
+        let mut users = self.users.write().await;
+        let user = users.get_mut(username).ok_or_else(|| "not_found".to_string())?;
+        user.role = role;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn remove_user(&self, username: &str) {
+        self.users.write().await.remove(username);
+    }
+
     async fn create_session(&self, username: String, role: Role) -> String {
         self.purge_expired(Duration::from_secs(30 * 60), Duration::from_secs(12 * 60 * 60)).await;
         let id = new_session_id();
@@ -482,6 +495,53 @@ fn cookie_from_request(req: &Request, name: &str) -> Option<String> {
     req.cookie(name).map(|c| c.value().to_string()).filter(|v| !v.is_empty())
 }
 
+fn is_unsafe_http_method(method: &salvo::http::Method) -> bool {
+    matches!(
+        *method,
+        salvo::http::Method::POST
+            | salvo::http::Method::PUT
+            | salvo::http::Method::PATCH
+            | salvo::http::Method::DELETE
+    )
+}
+
+/// Host-port from `Origin` (`https://h:p`) or `Referer` (full URL).
+fn host_from_origin_or_referer(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    let rest = if let Some((_, rest)) = raw.split_once("://") { rest } else { raw };
+    let hostport = rest.split(['/', '?', '#']).next().unwrap_or("").trim();
+    if hostport.is_empty() {
+        return None;
+    }
+    Some(hostport.to_ascii_lowercase())
+}
+
+fn request_host(req: &Request) -> Option<String> {
+    req.headers().get("host").and_then(|v| v.to_str().ok()).map(|s| s.trim().to_ascii_lowercase())
+}
+
+/// Cookie CSRF: missing Origin and Referer is allowed (non-browser / API clients).
+/// When either header is present, its host must match the request `Host`.
+/// Bearer / API-key clients skip this check in [`AuthGuard`].
+pub(crate) fn cookie_csrf_ok(req: &Request) -> bool {
+    let origin = req.headers().get("origin").and_then(|v| v.to_str().ok());
+    let referer = req.headers().get("referer").and_then(|v| v.to_str().ok());
+    if origin.is_none() && referer.is_none() {
+        return true;
+    }
+    let Some(host) = request_host(req) else {
+        return true;
+    };
+    let presented = origin.or(referer).unwrap_or("");
+    match host_from_origin_or_referer(presented) {
+        Some(oh) => oh == host,
+        None => false,
+    }
+}
+
 fn set_session_cookie(res: &mut Response, cfg: &PluginConfig, session_id: &str) {
     let max_age = time::Duration::seconds(cfg.dashboard_session_max_age.as_secs() as i64);
     let cookie = Cookie::build((cfg.dashboard_cookie_name.clone(), session_id.to_string()))
@@ -557,11 +617,13 @@ async fn resolve_identity(req: &Request, state: &AuthState, cfg: &PluginConfig) 
         if let Some(rec) =
             state.get_session(&sid, cfg.dashboard_session_idle_timeout, cfg.dashboard_session_max_age).await
         {
-            if let Some(user) = state.get_user(&rec.username).await {
-                if !user.enabled {
-                    state.remove_session(&sid).await;
-                    return None;
-                }
+            let Some(user) = state.get_user(&rec.username).await else {
+                state.remove_session(&sid).await;
+                return None;
+            };
+            if !user.enabled {
+                state.remove_session(&sid).await;
+                return None;
             }
             let remaining = cfg
                 .dashboard_session_idle_timeout
@@ -569,7 +631,7 @@ async fn resolve_identity(req: &Request, state: &AuthState, cfg: &PluginConfig) 
                 .as_secs();
             return Some(AuthIdentity {
                 username: rec.username,
-                role: rec.role,
+                role: user.role,
                 source: AuthSource::Session,
                 expires_in: Some(remaining),
                 key_id: None,
@@ -606,6 +668,18 @@ impl Handler for AuthGuard {
             }
         };
         if let Some(id) = resolve_identity(req, &self.state, &cfg).await {
+            if id.source == AuthSource::Session
+                && is_unsafe_http_method(req.method())
+                && !cookie_csrf_ok(req)
+            {
+                render_api_error(
+                    res,
+                    StatusCode::FORBIDDEN,
+                    "csrf: Origin/Referer does not match Host (cookie session; same-origin browsers only)",
+                );
+                ctrl.skip_rest();
+                return;
+            }
             depot.insert(AUTH_IDENTITY, id);
             ctrl.call_next(req, depot, res).await;
             return;
@@ -716,23 +790,27 @@ async fn bootstrap_user_if_needed(
         return Ok(None);
     }
     let admin_user = cfg.dashboard_admin_username.trim();
-    if !admin_user.is_empty()
-        && admin_user == username
-        && cfg.dashboard_admin_password.as_deref().is_some_and(|p| p == password)
-    {
-        let hash = hash_password(password)?;
-        state.upsert_user(username.to_string(), hash, Role::Admin, true).await;
-        if let (Some(vuser), Some(vpass)) =
-            (cfg.dashboard_viewer_username.as_deref(), cfg.dashboard_viewer_password.as_deref())
-        {
-            let vuser = vuser.trim();
-            if !vuser.is_empty() && !vpass.is_empty() && vuser != username {
-                if let Ok(vhash) = hash_password(vpass) {
-                    state.upsert_user(vuser.to_string(), vhash, Role::Viewer, true).await;
+    let admin_pass = cfg.dashboard_admin_password.as_deref().unwrap_or("").trim();
+    let admin_configured = !admin_user.is_empty() && !admin_pass.is_empty();
+    if admin_configured {
+        if admin_user == username && admin_pass == password {
+            let hash = hash_password(password)?;
+            state.upsert_user(username.to_string(), hash, Role::Admin, true).await;
+            if let (Some(vuser), Some(vpass)) =
+                (cfg.dashboard_viewer_username.as_deref(), cfg.dashboard_viewer_password.as_deref())
+            {
+                let vuser = vuser.trim();
+                if !vuser.is_empty() && !vpass.is_empty() && vuser != username {
+                    if let Ok(vhash) = hash_password(vpass) {
+                        state.upsert_user(vuser.to_string(), vhash, Role::Viewer, true).await;
+                    }
                 }
             }
+            return Ok(Some(Role::Admin));
         }
-        return Ok(Some(Role::Admin));
+        // Admin credentials exist: a viewer (or anyone else) must not consume
+        // the empty-store bootstrap and lock out admin initialization.
+        return Ok(None);
     }
     let viewer_user = cfg.dashboard_viewer_username.as_deref().unwrap_or("").trim();
     if !viewer_user.is_empty()
@@ -1003,11 +1081,21 @@ pub(crate) async fn auth_change_password(req: &mut Request, depot: &mut Depot, r
         render_api_error(res, StatusCode::UNAUTHORIZED, "invalid old_password");
         return;
     }
+    let cfg = match plugin_cfg(depot) {
+        Some(c) => c,
+        None => {
+            render_api_error(res, StatusCode::INTERNAL_SERVER_ERROR, "auth not configured");
+            return;
+        }
+    };
     match hash_password(&body.new_password) {
         Ok(hash) => {
             state.upsert_user(user.username.clone(), hash, user.role, user.enabled).await;
+            state.revoke_sessions_for(&user.username).await;
+            let session_id = state.create_session(user.username.clone(), user.role).await;
+            set_session_cookie(res, &cfg, &session_id);
             audit::record(req, depot, "change_password", Some(user.username), true, None).await;
-            res.render(Json(json!({ "ok": true })));
+            res.render(Json(json!({ "ok": true, "session_rotated": true })));
         }
         Err(e) => render_api_error(res, StatusCode::INTERNAL_SERVER_ERROR, e),
     }
@@ -1308,5 +1396,36 @@ mod tests {
         assert_eq!(found.id, rec.id);
         assert_eq!(found.role, Role::Operator);
         assert!(state.lookup_api_key("fmqk_nope").await.is_none());
+    }
+
+    #[test]
+    fn origin_host_parsing_and_same_host() {
+        assert_eq!(host_from_origin_or_referer("https://127.0.0.1:6060").as_deref(), Some("127.0.0.1:6060"));
+        assert_eq!(
+            host_from_origin_or_referer("http://example.com/dashboard/#/acl").as_deref(),
+            Some("example.com")
+        );
+        assert!(host_from_origin_or_referer("null").is_none());
+        assert!(host_from_origin_or_referer("").is_none());
+    }
+
+    #[tokio::test]
+    async fn viewer_bootstrap_does_not_lock_out_configured_admin() {
+        let state = AuthState::new(None);
+        let cfg = PluginConfig {
+            dashboard_admin_username: "admin".into(),
+            dashboard_admin_password: Some("admin-secret".into()),
+            dashboard_viewer_username: Some("viewer".into()),
+            dashboard_viewer_password: Some("viewer-secret".into()),
+            ..serde_json::from_value(serde_json::json!({"http_bearer_token": null})).expect("defaults")
+        };
+        assert!(bootstrap_user_if_needed(&state, &cfg, "viewer", "viewer-secret").await.unwrap().is_none());
+        assert!(!state.has_users().await);
+        assert_eq!(
+            bootstrap_user_if_needed(&state, &cfg, "admin", "admin-secret").await.unwrap(),
+            Some(Role::Admin)
+        );
+        assert!(state.get_user("admin").await.is_some());
+        assert!(state.get_user("viewer").await.is_some());
     }
 }

@@ -166,7 +166,7 @@ HTTP API 接受以下凭证。**MQTT 客户端认证插件不受影响。**
 
 | 机制 | 用法 | 角色 |
 |------|------|------|
-| 会话 Cookie | `POST /api/v1/auth/login` 提交 `{ "username", "password" }`，设置 `ferromq_session` | 用户记录上的 `admin` / `operator` / `viewer` |
+| 会话 Cookie | `POST /api/v1/auth/login` 提交 `{ "username", "password" }`，设置 `ferromq_session`（`HttpOnly` / `SameSite=Lax`）。每次请求使用用户的**当前**角色；用户删除后会话失效。带 Cookie 的非安全方法在存在 `Origin`/`Referer` 时要求与 `Host` 同源（缺省 Origin 的非浏览器客户端放行；Bearer / API Key 不受此限）。 | 用户记录上的当前 `admin` / `operator` / `viewer` |
 | 静态 Bearer | `Authorization: Bearer <http_bearer_token>` | 始终为 `admin`（用户名 `operator`） |
 | API Key Bearer | `Authorization: Bearer <fmqk_…>`（`POST /api/v1/api-keys` 创建） | 绑定的角色 |
 | 开放访问 | 未配置 bearer / API Key / `dashboard_admin_password`，且尚无用户 | 匿名 `admin` |
@@ -175,11 +175,13 @@ HTTP API 接受以下凭证。**MQTT 客户端认证插件不受影响。**
 
 ### 角色
 
-| 角色 | 只读 | 踢人 / 发布 / 插件配置 / P5 集成 / P6 告警确认与集群写入 | 用户 / API Key / 审计 / Broker 写入 / `?reveal=1` |
+| 角色 | 只读 | 踢人 / 发布 / 插件配置 / P5 集成 / P6 告警确认与集群写入 | 用户 / API Key / 审计 / Broker 写入 / `?reveal=1` / **`ferromq-http-api` 配置** |
 |------|------|----------------------|--------------------------------------------------|
 | `admin` | 是 | 是 | 是 |
-| `operator` | 是 | 是 | 否（`403`，`required_role: admin`） |
+| `operator` | 是 | 是（但不能写 `ferromq-http-api` 的 validate/rollback/reload） | 否（`403`，`required_role: admin`） |
 | `viewer` | 是（密钥已脱敏） | 否（`403`，`required_role: operator`） | 否 |
+
+对插件 `ferromq-http-api` 的写入 / 校验 / 回滚 / 重载仅管理员可做（该文件可设置 `http_bearer_token`，解析为 admin）。通用插件 PUT 会对现有 TOML **深合并**：省略或值为 `***` 的密钥会保留，且不会把字面量 `***` 写入文件。
 
 密码以 **bcrypt** 哈希保存；API Key 密钥以 **SHA-256** 哈希保存。均在进程内存中。重启会清空用户 / 会话 / Key。集群需粘性会话。
 

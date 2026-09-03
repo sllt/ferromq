@@ -38,7 +38,7 @@ prometheus_metrics_cache_interval = "5s"
 
 ### Authentication
 
-- **Session:** `POST /api/v1/auth/login` `{ username, password }` → `ferromq_session` cookie (`HttpOnly`, `SameSite=Lax`). Also `POST /logout`, `GET /me`, `POST /change-password`, `POST /init`.
+- **Session:** `POST /api/v1/auth/login` `{ username, password }` → `ferromq_session` cookie (`HttpOnly`, `SameSite=Lax`). Role is read live from the user store (deleted user → 401). Cookie-authenticated unsafe methods check `Origin`/`Referer` against `Host` when present. Also `POST /logout`, `GET /me`, `POST /change-password` (revokes other sessions), `POST /init`.
 - **Bearer:** `Authorization: Bearer <http_bearer_token>` is still a superuser admin credential (username `operator`). Created API keys also use Bearer with a bound role.
 - **Open access:** if neither token nor `dashboard_admin_password` is set (and no users/keys), the API stays open.
 - **Roles:** `admin` manages users / keys / audit / broker config write / `?reveal=1`; `operator` can kick / publish / plugin config write+reload; `viewer` is read-only (`403`, secrets redacted).

@@ -432,7 +432,16 @@ pub(crate) async fn listen_and_serve(
     });
     let _ = started_tx.send(());
     let monitor = prome::Monitor::new();
-    let api_router = route(scx, cfg, http_bearer_token, monitor, history_caches);
+    let auth_state = Arc::new(AuthState::new(http_bearer_token));
+    {
+        let cfg_snap = cfg.read().await.clone();
+        if !auth_state.auth_required(&cfg_snap).await {
+            log::warn!(
+                "HTTP API authentication is not configured (no http_bearer_token, dashboard password, users, or API keys). Requests are treated as anonymous admin. Set http_bearer_token or dashboard_admin_password to require authentication."
+            );
+        }
+    }
+    let api_router = route_with_auth(scx, cfg, auth_state, monitor, history_caches);
 
     let mut root_router = Router::new().push(api_router);
     // Prefer dashboard_static_dir when it exists; otherwise rust-embed dashboard-dist/.
@@ -2835,6 +2844,9 @@ async fn node_plugin_config_reload(
         render_not_found(res, "plugin not found");
         return Ok(());
     };
+    if config_mgmt::deny_http_api_unless_admin(&name, depot, res) {
+        return Ok(());
+    }
 
     match _node_plugin_config_reload(scx, node_id, &name, message_type).await {
         Ok(r) => {
@@ -4371,6 +4383,21 @@ mod tests {
         assert_eq!(changed.status_code, Some(StatusCode::OK));
         let changed_body: serde_json::Value = changed.take_json().await.unwrap();
         assert_eq!(changed_body["ok"], true);
+        let rotated = session_cookie(&changed);
+
+        let me_stale = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
+            .add_header("cookie", &cookie, true)
+            .send(&svc)
+            .await;
+        assert_eq!(me_stale.status_code, Some(StatusCode::UNAUTHORIZED));
+
+        let mut me_fresh = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
+            .add_header("cookie", &rotated, true)
+            .send(&svc)
+            .await;
+        assert_eq!(me_fresh.status_code, Some(StatusCode::OK));
+        let me_fresh_body: serde_json::Value = me_fresh.take_json().await.unwrap();
+        assert_eq!(me_fresh_body["username"], "admin");
 
         let (bad, bad_body) = login(&svc, "admin", "admin-secret").await;
         assert_eq!(bad.status_code, Some(StatusCode::UNAUTHORIZED), "{bad_body}");
@@ -4522,6 +4549,115 @@ mod tests {
         assert_eq!(openapi.status_code, Some(StatusCode::OK));
         let (resp, body) = login(&svc, "admin", "admin-secret").await;
         assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
+    }
+
+    #[tokio::test]
+    async fn session_uses_live_user_role_and_invalidates_deleted_user() {
+        let (svc, state) = dashboard_service(dashboard_cfg(), None).await;
+        state.insert_user("ops", "ops-secret-1", crate::auth::Role::Operator).await.unwrap();
+        let (resp, body) = login(&svc, "ops", "ops-secret-1").await;
+        assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
+        let cookie = session_cookie(&resp);
+
+        let mut me = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
+            .add_header("cookie", &cookie, true)
+            .send(&svc)
+            .await;
+        assert_eq!(me.take_json().await.unwrap()["role"], "operator");
+
+        state.set_user_role("ops", crate::auth::Role::Viewer).await.unwrap();
+        let mut me2 = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
+            .add_header("cookie", &cookie, true)
+            .send(&svc)
+            .await;
+        assert_eq!(me2.status_code, Some(StatusCode::OK));
+        assert_eq!(me2.take_json().await.unwrap()["role"], "viewer");
+
+        let kick = TestClient::delete("http://127.0.0.1:0/api/v1/clients/no-such-client")
+            .add_header("cookie", &cookie, true)
+            .send(&svc)
+            .await;
+        assert_eq!(kick.status_code, Some(StatusCode::FORBIDDEN));
+
+        state.remove_user("ops").await;
+        let gone = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
+            .add_header("cookie", &cookie, true)
+            .send(&svc)
+            .await;
+        assert_eq!(gone.status_code, Some(StatusCode::UNAUTHORIZED));
+    }
+
+    #[tokio::test]
+    async fn change_password_revokes_other_sessions() {
+        let (svc, _) = dashboard_service(dashboard_cfg(), None).await;
+        let (a, _) = login(&svc, "admin", "admin-secret").await;
+        let (b, _) = login(&svc, "admin", "admin-secret").await;
+        let cookie_a = session_cookie(&a);
+        let cookie_b = session_cookie(&b);
+
+        let changed = TestClient::post("http://127.0.0.1:0/api/v1/auth/change-password")
+            .add_header("cookie", &cookie_a, true)
+            .json(&json!({"old_password": "admin-secret", "new_password": "admin-secret-2"}))
+            .send(&svc)
+            .await;
+        assert_eq!(changed.status_code, Some(StatusCode::OK));
+
+        let stale_b = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
+            .add_header("cookie", &cookie_b, true)
+            .send(&svc)
+            .await;
+        assert_eq!(stale_b.status_code, Some(StatusCode::UNAUTHORIZED));
+    }
+
+    #[tokio::test]
+    async fn viewer_first_login_does_not_block_admin_bootstrap() {
+        let (svc, _) = dashboard_service(dashboard_cfg(), None).await;
+        let (viewer, viewer_body) = login(&svc, "viewer", "viewer-secret").await;
+        assert_eq!(viewer.status_code, Some(StatusCode::UNAUTHORIZED), "{viewer_body}");
+
+        let (admin, admin_body) = login(&svc, "admin", "admin-secret").await;
+        assert_eq!(admin.status_code, Some(StatusCode::OK), "{admin_body}");
+
+        let (viewer2, viewer2_body) = login(&svc, "viewer", "viewer-secret").await;
+        assert_eq!(viewer2.status_code, Some(StatusCode::OK), "{viewer2_body}");
+        assert_eq!(viewer2_body["role"], "viewer");
+    }
+
+    #[tokio::test]
+    async fn cookie_csrf_rejects_cross_origin_but_allows_missing_and_bearer() {
+        let (svc, _) = dashboard_service(dashboard_cfg(), Some("secret".into())).await;
+        let (resp, _) = login(&svc, "admin", "admin-secret").await;
+        let cookie = session_cookie(&resp);
+
+        let blocked = TestClient::delete("http://127.0.0.1:0/api/v1/clients/no-such-client")
+            .add_header("cookie", &cookie, true)
+            .add_header("host", "127.0.0.1:0", true)
+            .add_header("origin", "https://evil.example", true)
+            .send(&svc)
+            .await;
+        assert_eq!(blocked.status_code, Some(StatusCode::FORBIDDEN));
+
+        let same = TestClient::delete("http://127.0.0.1:0/api/v1/clients/no-such-client")
+            .add_header("cookie", &cookie, true)
+            .add_header("host", "127.0.0.1:0", true)
+            .add_header("origin", "http://127.0.0.1:0", true)
+            .send(&svc)
+            .await;
+        assert_ne!(same.status_code, Some(StatusCode::FORBIDDEN));
+
+        let missing = TestClient::delete("http://127.0.0.1:0/api/v1/clients/no-such-client")
+            .add_header("cookie", &cookie, true)
+            .send(&svc)
+            .await;
+        assert_ne!(missing.status_code, Some(StatusCode::FORBIDDEN));
+
+        let bearer = TestClient::delete("http://127.0.0.1:0/api/v1/clients/no-such-client")
+            .add_header("authorization", "Bearer secret", true)
+            .add_header("origin", "https://evil.example", true)
+            .send(&svc)
+            .await;
+        assert_ne!(bearer.status_code, Some(StatusCode::FORBIDDEN));
+        assert_eq!(bearer.status_code, Some(StatusCode::NOT_FOUND));
     }
 
     #[tokio::test]
@@ -4912,6 +5048,20 @@ listener.tcp.external.addr = "0.0.0.0:1883"
 
         let disk = std::fs::read_to_string(env.dir.join("p4-demo.toml")).unwrap();
         assert!(disk.contains("max_row_limit"));
+        assert!(disk.contains("file-secret"), "omitted secret must be preserved: {disk}");
+        assert!(!disk.contains("***"), "must never persist redacted placeholder: {disk}");
+
+        let mut redacted_put =
+            TestClient::put("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config?apply=none")
+                .json(&json!({"http_bearer_token": "***", "max_row_limit": 44}))
+                .send(&env.svc)
+                .await;
+        assert_eq!(redacted_put.status_code, Some(StatusCode::OK));
+        let disk2 = std::fs::read_to_string(env.dir.join("p4-demo.toml")).unwrap();
+        assert!(disk2.contains("file-secret"), "redacted *** must keep previous secret: {disk2}");
+        assert!(!disk2.contains("***"), "must never persist ***: {disk2}");
+        let rbody: serde_json::Value = redacted_put.take_json().await.unwrap();
+        assert_eq!(rbody["written"], true);
 
         let mut applied = TestClient::put("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config?apply=reload")
             .json(&json!({"max_row_limit": 43, "http_laddr": "127.0.0.1:6061"}))
@@ -4975,6 +5125,51 @@ listener.tcp.external.addr = "0.0.0.0:1883"
         assert_eq!(ok.status_code, Some(StatusCode::OK));
         let body: serde_json::Value = ok.take_json().await.unwrap();
         assert_eq!(body["written"], true);
+    }
+
+    #[tokio::test]
+    async fn http_api_plugin_config_writes_are_admin_only() {
+        let env = p4_env(dashboard_cfg()).await;
+        env.state.insert_user("ops", "ops-secret-1", crate::auth::Role::Operator).await.unwrap();
+        let (ops_resp, _) = login(&env.svc, "ops", "ops-secret-1").await;
+        let ops = session_cookie(&ops_resp);
+        let (admin_resp, _) = login(&env.svc, "admin", "admin-secret").await;
+        let admin = session_cookie(&admin_resp);
+
+        for path in [
+            "http://127.0.0.1:0/api/v1/plugins/1/ferromq-http-api/config",
+            "http://127.0.0.1:0/api/v1/plugins/1/ferromq-http-api/config/reload",
+        ] {
+            let denied = TestClient::put(path)
+                .add_header("cookie", &ops, true)
+                .json(&json!({"http_bearer_token": "stolen"}))
+                .send(&env.svc)
+                .await;
+            assert_eq!(denied.status_code, Some(StatusCode::FORBIDDEN), "{path}");
+        }
+
+        let validate = TestClient::post("http://127.0.0.1:0/api/v1/plugins/1/ferromq-http-api/config/validate")
+            .add_header("cookie", &ops, true)
+            .json(&json!({"http_bearer_token": "stolen"}))
+            .send(&env.svc)
+            .await;
+        assert_eq!(validate.status_code, Some(StatusCode::FORBIDDEN));
+
+        let rollback = TestClient::post(
+            "http://127.0.0.1:0/api/v1/plugins/1/ferromq-http-api/config/rollback/1?apply=none",
+        )
+        .add_header("cookie", &ops, true)
+        .send(&env.svc)
+        .await;
+        assert_eq!(rollback.status_code, Some(StatusCode::FORBIDDEN));
+
+        let admin_validate =
+            TestClient::post("http://127.0.0.1:0/api/v1/plugins/1/ferromq-http-api/config/validate")
+                .add_header("cookie", &admin, true)
+                .json(&json!({"max_row_limit": 1}))
+                .send(&env.svc)
+                .await;
+        assert_ne!(admin_validate.status_code, Some(StatusCode::FORBIDDEN));
     }
 
     #[tokio::test]

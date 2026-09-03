@@ -31,6 +31,8 @@ use super::PluginConfigType;
 const REDACTED: &str = "***";
 const DEFAULT_HISTORY_KEEP: usize = 10;
 const BROKER_WRITABLE: &[&str] = &["mqtt", "listener", "log"];
+/// Well-known name of this plugin. Writes can change `http_bearer_token`.
+pub(crate) const HTTP_API_PLUGIN: &str = "ferromq-http-api";
 
 /// How a written (or validated) config becomes effective.
 ///
@@ -467,12 +469,13 @@ pub(crate) fn local_validate_plugin(
             note: None,
         });
     }
-    let _toml = json_to_toml(json)?;
     let reloadable = plugin_reloadable(scx, name)?;
     let old = match plugin_config_dir(scx) {
         Ok(dir) => read_file_json(&plugin_toml_path(dir, name))?.unwrap_or(Value::Object(Default::default())),
         Err(_) => Value::Object(Default::default()),
     };
+    let merged = merge_plugin_patch(old.clone(), json.clone())?;
+    let _toml = json_to_toml(&merged)?;
     let effective = planned_effective(reloadable, apply);
     let note = match effective {
         EffectiveMode::Hot => {
@@ -489,7 +492,7 @@ pub(crate) fn local_validate_plugin(
         ok: true,
         valid: true,
         effective,
-        diff: diff_json(&old, json),
+        diff: diff_json(&old, &merged),
         errors: vec![],
         plugin: Some(name.into()),
         node: Some(scx.node.id()),
@@ -502,7 +505,7 @@ pub(crate) async fn local_write_plugin(
     scx: &ServerContext,
     name: &str,
     json: &Value,
-    toml_text: &str,
+    _toml_text: &str,
     apply: bool,
     keep: usize,
 ) -> Result<WriteResult> {
@@ -512,8 +515,9 @@ pub(crate) async fn local_write_plugin(
     let path = plugin_toml_path(dir, name);
     let hist = history_dir(dir, name);
     let old = read_file_json(&path)?.unwrap_or(Value::Object(Default::default()));
+    let (merged, merged_toml) = prepare_merged_plugin_write(&old, json)?;
     let backup = backup_current(&path, &hist, keep)?;
-    atomic_write(&path, toml_text)?;
+    atomic_write(&path, &merged_toml)?;
 
     let mut applied = false;
     let mut apply_error = None;
@@ -536,7 +540,7 @@ pub(crate) async fn local_write_plugin(
         written: true,
         applied,
         effective,
-        diff: diff_json(&old, json),
+        diff: diff_json(&old, &merged),
         backup,
         apply_error,
         plugin: Some(name.into()),
@@ -717,6 +721,137 @@ fn merge_object(base: Value, patch: Value) -> Value {
     }
 }
 
+fn is_redacted_value(v: &Value) -> bool {
+    v.as_str() == Some(REDACTED)
+}
+
+/// Deep-merge `patch` over `base` for plugin TOML writes.
+///
+/// Missing keys keep `base`. Secret fields that are omitted or exactly `***`
+/// keep the previous file value. Nested objects and same-index array elements
+/// (e.g. ACL `who`) recurse. Never emits the literal `***` for a secret key
+/// — that is rejected so a redacted password cannot be persisted.
+pub(crate) fn merge_plugin_patch(base: Value, patch: Value) -> Result<Value> {
+    let merged = merge_preserving_secrets(base, patch, "");
+    reject_literal_redacted_secrets(&merged)?;
+    Ok(merged)
+}
+
+fn merge_preserving_secrets(base: Value, patch: Value, key: &str) -> Value {
+    if is_secret_key(key) && is_redacted_value(&patch) {
+        return if !base.is_null() && !is_redacted_value(&base) { base } else { patch };
+    }
+    match (base, patch) {
+        (Value::Object(mut a), Value::Object(b)) => {
+            for (k, v) in b {
+                let next = match a.remove(&k) {
+                    Some(prev) => merge_preserving_secrets(prev, v, &k),
+                    None => merge_preserving_secrets(Value::Null, v, &k),
+                };
+                a.insert(k, next);
+            }
+            Value::Object(a)
+        }
+        (Value::Array(a), Value::Array(b)) => {
+            let mut out = Vec::with_capacity(b.len());
+            for (i, v) in b.into_iter().enumerate() {
+                let prev = a.get(i).cloned().unwrap_or(Value::Null);
+                out.push(merge_preserving_secrets(prev, v, ""));
+            }
+            Value::Array(out)
+        }
+        (_, patch) => patch,
+    }
+}
+
+/// Copy `patch` keys onto `dst`, skipping secret fields that are `***` so a
+/// structured integration PUT cannot wipe hmac_secret / password / tokens.
+pub(crate) fn assign_object_preserving_secrets(dst: &mut Value, patch: &Value) {
+    let Some(obj) = patch.as_object() else {
+        return;
+    };
+    for (k, v) in obj {
+        if k == "toml" {
+            continue;
+        }
+        if is_secret_key(k) && is_redacted_value(v) {
+            continue;
+        }
+        if let (Some(prev), true) = (dst.get(k).cloned(), v.is_object()) {
+            let mut child = prev;
+            assign_object_preserving_secrets(&mut child, v);
+            dst[k] = child;
+        } else {
+            dst[k] = v.clone();
+        }
+    }
+}
+
+fn reject_literal_redacted_secrets(value: &Value) -> Result<()> {
+    fn walk(v: &Value, key: &str) -> Result<()> {
+        match v {
+            Value::String(s) if is_secret_key(key) && s == REDACTED => Err(anyhow!(
+                "refusing to write redacted secret placeholder '{REDACTED}' for '{key}'"
+            )),
+            Value::Object(map) => {
+                for (k, child) in map {
+                    walk(child, k)?;
+                }
+                Ok(())
+            }
+            Value::Array(items) => {
+                for child in items {
+                    walk(child, "")?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+    walk(value, "")
+}
+
+fn prepare_merged_plugin_write(old: &Value, incoming: &Value) -> Result<(Value, String)> {
+    let merged = merge_plugin_patch(old.clone(), incoming.clone())?;
+    let toml_text = json_to_toml(&merged)?;
+    Ok((merged, toml_text))
+}
+
+pub(crate) fn is_http_api_plugin(name: &str) -> bool {
+    name == HTTP_API_PLUGIN
+}
+
+/// Writing `ferromq-http-api` can set `http_bearer_token` (resolves as admin).
+/// Operators may write other plugins; this one is admin-only.
+/// Anonymous-admin (open access) still passes — identity role is admin.
+pub(crate) fn deny_http_api_unless_admin(name: &str, depot: &Depot, res: &mut Response) -> bool {
+    if !is_http_api_plugin(name) {
+        return false;
+    }
+    match identity_from_depot(depot) {
+        Some(id) if id.can_admin() => false,
+        Some(id) => {
+            render_api_error_with(
+                res,
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                Some(json!({
+                    "required_role": "admin",
+                    "role": id.role.as_str(),
+                    "username": id.username,
+                    "plugin": HTTP_API_PLUGIN,
+                    "reason": "writing ferromq-http-api can change http_bearer_token (an admin credential)",
+                })),
+            );
+            true
+        }
+        None => {
+            render_api_error(res, StatusCode::UNAUTHORIZED, "unauthorized");
+            true
+        }
+    }
+}
+
 fn write_broker_section(path: &Path, section: &str, patch: &Value, keep: usize) -> Result<WriteResult> {
     let section = normalize_section(section)?;
     validate_broker_section(section, patch)?;
@@ -867,6 +1002,9 @@ pub(crate) async fn node_plugin_config_update(
     let Some((node_id, name)) = path_node_plugin(req, res) else {
         return Ok(());
     };
+    if deny_http_api_unless_admin(&name, depot, res) {
+        return Ok(());
+    }
     let apply = match parse_apply(req) {
         Ok(v) => v,
         Err(e) => {
@@ -946,6 +1084,9 @@ pub(crate) async fn node_plugin_config_validate(
     let Some((node_id, name)) = path_node_plugin(req, res) else {
         return Ok(());
     };
+    if deny_http_api_unless_admin(&name, depot, res) {
+        return Ok(());
+    }
     let apply = parse_apply(req).unwrap_or(true);
     let (bytes, ct) = match read_body(req).await {
         Ok(v) => v,
@@ -1021,6 +1162,9 @@ pub(crate) async fn node_plugin_config_rollback(
     let Some((node_id, name)) = path_node_plugin(req, res) else {
         return Ok(());
     };
+    if deny_http_api_unless_admin(&name, depot, res) {
+        return Ok(());
+    }
     let version = match req.param::<String>("version") {
         Some(v) => v,
         None => {
@@ -1496,14 +1640,15 @@ pub(crate) async fn local_write_plugin_lenient(
             let path = plugin_toml_path(dir, name);
             let hist = history_dir(dir, name);
             let old = read_file_json(&path)?.unwrap_or(Value::Object(Default::default()));
+            let (merged, merged_toml) = prepare_merged_plugin_write(&old, json)?;
             let backup = backup_current(&path, &hist, keep)?;
-            atomic_write(&path, toml_text)?;
+            atomic_write(&path, &merged_toml)?;
             Ok(WriteResult {
                 ok: true,
                 written: true,
                 applied: false,
                 effective: EffectiveMode::RestartRequired,
-                diff: diff_json(&old, json),
+                diff: diff_json(&old, &merged),
                 backup,
                 apply_error: None,
                 plugin: Some(name.into()),
@@ -1599,6 +1744,71 @@ mod tests {
         assert!(validate_broker_section("mqtt", &json!({"nope": 1})).is_err());
         assert!(validate_broker_section("log", &json!({"level": "info", "to": "console"})).is_ok());
         assert!(validate_broker_section("log", &json!({"to": "somewhere"})).is_err());
+    }
+
+    #[test]
+    fn plugin_merge_preserves_omitted_and_redacted_secrets() {
+        let old = json!({
+            "hmac_secret": "keep-me",
+            "password": "old-pass",
+            "level": "info",
+            "nested": {"token": "old-token", "ok": 1}
+        });
+        let omitted = json!({"level": "warn"});
+        let merged = merge_plugin_patch(old.clone(), omitted).unwrap();
+        assert_eq!(merged["hmac_secret"], "keep-me");
+        assert_eq!(merged["password"], "old-pass");
+        assert_eq!(merged["level"], "warn");
+        assert_eq!(merged["nested"]["token"], "old-token");
+
+        let redacted = json!({
+            "hmac_secret": "***",
+            "password": "***",
+            "level": "debug",
+            "nested": {"token": "***", "ok": 2}
+        });
+        let merged = merge_plugin_patch(old.clone(), redacted).unwrap();
+        assert_eq!(merged["hmac_secret"], "keep-me");
+        assert_eq!(merged["password"], "old-pass");
+        assert_eq!(merged["level"], "debug");
+        assert_eq!(merged["nested"]["token"], "old-token");
+        assert_eq!(merged["nested"]["ok"], 2);
+
+        let fresh = json!({"password": "new-pass", "level": "error"});
+        let merged = merge_plugin_patch(old, fresh).unwrap();
+        assert_eq!(merged["password"], "new-pass");
+        assert_eq!(merged["hmac_secret"], "keep-me");
+        assert_eq!(merged["level"], "error");
+    }
+
+    #[test]
+    fn plugin_merge_rejects_writing_literal_redacted_secret() {
+        let old = json!({"level": "info"});
+        let err = merge_plugin_patch(old, json!({"password": "***"})).unwrap_err();
+        assert!(err.to_string().contains("***"), "{err}");
+    }
+
+    #[test]
+    fn plugin_merge_preserves_acl_who_password_by_index() {
+        let old = json!({
+            "rules": [[
+                "allow",
+                {"user": "dashboard", "password": "s3cret"},
+                "subscribe",
+                ["$SYS/#"]
+            ]]
+        });
+        let patch = json!({
+            "rules": [[
+                "allow",
+                {"user": "dashboard"},
+                "subscribe",
+                ["$SYS/#"]
+            ]]
+        });
+        let merged = merge_plugin_patch(old, patch).unwrap();
+        assert_eq!(merged["rules"][0][1]["password"], "s3cret");
+        assert_eq!(merged["rules"][0][1]["user"], "dashboard");
     }
 
     #[test]

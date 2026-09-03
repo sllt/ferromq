@@ -3,6 +3,7 @@
 //! Defines [`PluginConfig`] with HTTP server settings, message expiry,
 //! metrics sampling, Prometheus cache intervals, and history flush.
 
+use std::fmt;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -19,7 +20,7 @@ use ferromq::{
 /// Specifies the HTTP listen address, bearer token, message type for gRPC,
 /// metrics/Prometheus settings, request logging options, and optional
 /// history flush configuration.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct PluginConfig {
     #[serde(default = "PluginConfig::max_row_limit_default")]
     pub max_row_limit: usize,
@@ -266,7 +267,9 @@ impl PluginConfig {
     }
 
     /// Returns `true` if any config values that require a hot-reload
-    /// (without restart) have changed.
+    /// (without restart) have changed. Auth-related fields are included so a
+    /// `load_config` of `http_bearer_token` / dashboard credentials updates
+    /// the in-memory snapshot instead of silently no-oping.
     #[inline]
     pub fn changed(&self, other: &Self) -> bool {
         self.max_row_limit != other.max_row_limit
@@ -277,12 +280,104 @@ impl PluginConfig {
             || self.dashboard_static_dir != other.dashboard_static_dir
             || self.config_history_keep != other.config_history_keep
             || self.broker_config_file != other.broker_config_file
+            || self.http_bearer_token != other.http_bearer_token
+            || self.dashboard_admin_username != other.dashboard_admin_username
+            || self.dashboard_admin_password != other.dashboard_admin_password
+            || self.dashboard_viewer_username != other.dashboard_viewer_username
+            || self.dashboard_viewer_password != other.dashboard_viewer_password
+            || self.dashboard_cookie_name != other.dashboard_cookie_name
+            || self.dashboard_cookie_secure != other.dashboard_cookie_secure
+            || self.dashboard_session_idle_timeout != other.dashboard_session_idle_timeout
+            || self.dashboard_session_max_age != other.dashboard_session_max_age
+            || self.dashboard_login_rate_limit != other.dashboard_login_rate_limit
+            || self.dashboard_login_rate_window != other.dashboard_login_rate_window
+            || self.audit_max_events != other.audit_max_events
+            || self.audit_file != other.audit_file
+            || self.http_reuseaddr != other.http_reuseaddr
+            || self.http_reuseport != other.http_reuseport
+            || self.message_expiry_interval != other.message_expiry_interval
+            || self.message_type != other.message_type
     }
 
-    /// Returns `true` if a full server restart is required (listen address
-    /// changed).
+    /// Returns `true` if a full HTTP server restart is required (listen
+    /// address / socket flags / static dashboard dir changed).
     #[inline]
     pub fn restart_enable(&self, other: &Self) -> bool {
-        self.http_laddr != other.http_laddr || self.dashboard_static_dir != other.dashboard_static_dir
+        self.http_laddr != other.http_laddr
+            || self.dashboard_static_dir != other.dashboard_static_dir
+            || self.http_reuseaddr != other.http_reuseaddr
+            || self.http_reuseport != other.http_reuseport
+    }
+
+    /// One-line summary safe for logs: secrets are never included.
+    pub fn log_summary(&self) -> String {
+        format!(
+            "http_laddr={} auth_bearer={} dashboard_admin_password={} users_bootstrap={} max_row_limit={}",
+            self.http_laddr,
+            if self.http_bearer_token.as_deref().is_some_and(|s| !s.is_empty()) { "set" } else { "unset" },
+            if self.dashboard_admin_password.as_deref().is_some_and(|s| !s.is_empty()) {
+                "set"
+            } else {
+                "unset"
+            },
+            self.dashboard_admin_username,
+            self.max_row_limit
+        )
+    }
+}
+
+impl fmt::Debug for PluginConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PluginConfig")
+            .field("max_row_limit", &self.max_row_limit)
+            .field("http_laddr", &self.http_laddr)
+            .field("http_bearer_token", &redacted_opt(&self.http_bearer_token))
+            .field("dashboard_admin_username", &self.dashboard_admin_username)
+            .field("dashboard_admin_password", &redacted_opt(&self.dashboard_admin_password))
+            .field("dashboard_viewer_username", &self.dashboard_viewer_username)
+            .field("dashboard_viewer_password", &redacted_opt(&self.dashboard_viewer_password))
+            .field("dashboard_cookie_name", &self.dashboard_cookie_name)
+            .field("dashboard_cookie_secure", &self.dashboard_cookie_secure)
+            .field("http_request_log", &self.http_request_log)
+            .field("dashboard_static_dir", &self.dashboard_static_dir)
+            .finish_non_exhaustive()
+    }
+}
+
+fn redacted_opt(value: &Option<String>) -> Option<&'static str> {
+    value.as_deref().filter(|s| !s.is_empty()).map(|_| "***")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_and_log_summary_never_include_secrets() {
+        let cfg = PluginConfig {
+            http_bearer_token: Some("super-bearer-secret".into()),
+            dashboard_admin_password: Some("admin-plain-password".into()),
+            dashboard_viewer_password: Some("viewer-plain-password".into()),
+            ..serde_json::from_value(serde_json::json!({"http_bearer_token": null})).expect("defaults")
+        };
+        let dbg = format!("{cfg:?}");
+        let summary = cfg.log_summary();
+        for leak in ["super-bearer-secret", "admin-plain-password", "viewer-plain-password"] {
+            assert!(!dbg.contains(leak), "Debug leaked {leak}: {dbg}");
+            assert!(!summary.contains(leak), "log_summary leaked {leak}: {summary}");
+        }
+        assert!(dbg.contains("***"));
+        assert!(summary.contains("auth_bearer=set"));
+        assert!(summary.contains("dashboard_admin_password=set"));
+    }
+
+    #[test]
+    fn changed_detects_bearer_token() {
+        let a = serde_json::from_value::<PluginConfig>(serde_json::json!({"http_bearer_token": "a"}))
+            .expect("a");
+        let b = serde_json::from_value::<PluginConfig>(serde_json::json!({"http_bearer_token": "b"}))
+            .expect("b");
+        assert!(a.changed(&b));
+        assert!(!a.restart_enable(&b));
     }
 }

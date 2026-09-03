@@ -167,7 +167,7 @@ Credentials accepted on the HTTP API. **MQTT client auth plugins are unchanged.*
 
 | Mechanism | How | Role |
 |-----------|-----|------|
-| Session cookie | `POST /api/v1/auth/login` with `{ "username", "password" }` sets `ferromq_session` (`HttpOnly`, `SameSite=Lax`, `Secure` when `dashboard_cookie_secure`) | `admin`, `operator`, or `viewer` from the user record |
+| Session cookie | `POST /api/v1/auth/login` with `{ "username", "password" }` sets `ferromq_session` (`HttpOnly`, `SameSite=Lax`, `Secure` when `dashboard_cookie_secure`). Each request uses the **live** user role (and `enabled`); a deleted user invalidates the session. Cookie-authenticated `POST`/`PUT`/`PATCH`/`DELETE` require `Origin`/`Referer` to match `Host` when those headers are present (missing Origin is allowed for non-browser clients). Bearer / API keys skip this check. | `admin`, `operator`, or `viewer` from the **current** user record |
 | Static Bearer | `Authorization: Bearer <http_bearer_token>` | Always `admin` (username `operator`) for automation |
 | API key Bearer | `Authorization: Bearer <fmqk_…>` created via `POST /api/v1/api-keys` | Bound role (`admin` / `operator` / `viewer`) |
 | Open access | Neither bearer, API keys, nor `dashboard_admin_password` is set, and no users exist yet | Anonymous `admin` (backward compatible) |
@@ -176,11 +176,13 @@ Public without a session/bearer: `POST /auth/login`, `POST /auth/logout`, `POST 
 
 ### Roles
 
-| Role | Read | Kick / publish / plugin config / P5 integrations / P6 alarm ack + cluster writes | Users / API keys / audit / broker write / `?reveal=1` |
+| Role | Read | Kick / publish / plugin config / P5 integrations / P6 alarm ack + cluster writes | Users / API keys / audit / broker write / `?reveal=1` / **`ferromq-http-api` config** |
 |------|------|--------------------------------|------------------------------------------------------|
 | `admin` | yes | yes | yes |
-| `operator` | yes | yes | no (`403`, `required_role: admin`) |
+| `operator` | yes | yes (except `ferromq-http-api` write/validate/rollback/reload) | no (`403`, `required_role: admin`) |
 | `viewer` | yes (secrets redacted) | no (`403`, `required_role: operator`) | no |
+
+`PUT`/`POST` of plugin `ferromq-http-api` (including validate / rollback / reload) is **admin-only**: that file can set `http_bearer_token`, which authenticates as admin. Generic plugin PUTs **deep-merge** into the existing TOML so omitted or `***` secrets (`hmac_secret`, `password`, …) are preserved and never written as the literal `***`.
 
 Passwords are **bcrypt** hashes; API key secrets are **SHA-256** hashes. Both stay in process memory (never plaintext). Restart drops users/sessions/keys; the next login/init re-creates the configured admin. In a cluster, each node has its own store — use sticky sessions.
 
