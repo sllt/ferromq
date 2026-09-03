@@ -178,7 +178,7 @@ Public without a session/bearer: `POST /auth/login`, `POST /auth/logout`, `POST 
 
 ### Roles
 
-| Role | Read | Kick / publish / plugin config | Users / API keys / audit / broker write / `?reveal=1` |
+| Role | Read | Kick / publish / plugin config / P5 integrations | Users / API keys / audit / broker write / `?reveal=1` |
 |------|------|--------------------------------|------------------------------------------------------|
 | `admin` | yes | yes | yes |
 | `operator` | yes | yes | no (`403`, `required_role: admin`) |
@@ -1257,6 +1257,112 @@ curl -sS -b cookie.txt -X PUT "http://localhost:6060/api/v1/broker/config/mqtt" 
 ```
 
 Audit actions: `broker_config_update`, `broker_config_rollback`.
+
+## Access control & integrations (P5)
+
+Structured REST on top of P4 plugin-config write + `load_config`. Query `?node=` selects a node (default: the HTTP API local node). Writes default to `apply=reload` (in-process `load_config`, `effective=hot` — **not** a `ferromqd` restart). Secrets (`password` / `token` / `secret` / `jwt`, and URL userinfo) are `***` unless `?reveal=1` and admin. Role: viewer read; operator+ write.
+
+There is **no** FerroMQ blacklist / connection-policy plugin. `GET /api/v1/blacklist` returns `available: false` and points at ACL `control=connect` rules.
+
+### ACL (`ferromq-acl`)
+
+```
+GET    /api/v1/acl
+PUT    /api/v1/acl                 # settings and/or full rules replace
+GET    /api/v1/acl/rules
+POST   /api/v1/acl/rules
+PUT    /api/v1/acl/rules/{index}
+DELETE /api/v1/acl/rules/{index}
+```
+
+```bash
+# List rules (passwords redacted)
+curl -sS http://127.0.0.1:6060/api/v1/acl/rules
+
+# Add a deny-connect rule and hot-apply
+curl -sS -X POST http://127.0.0.1:6060/api/v1/acl/rules \
+  -H 'Content-Type: application/json' \
+  -d '{"access":"deny","who":{"ipaddr":"10.1.2.3"},"control":"connect"}'
+# {"ok":true,"written":true,"applied":true,"effective":"hot","rule":{"index":2,...}}
+
+# Structured or raw array are both accepted
+curl -sS -X POST http://127.0.0.1:6060/api/v1/acl/rules \
+  -H 'Content-Type: application/json' \
+  -d '["allow",{"user":"sensor"},"pubsub",["iot/%u/#"]]'
+```
+
+Audit: `acl_rule_add`, `acl_rule_update`, `acl_rule_delete`, `acl_config_update`.
+
+### Auth providers (`ferromq-auth-http` / `ferromq-auth-jwt`)
+
+MQTT **client** auth plugins — not dashboard login.
+
+```
+GET  /api/v1/auth-providers
+GET  /api/v1/auth-providers/{http|jwt}
+PUT  /api/v1/auth-providers/{http|jwt}
+POST /api/v1/auth-providers/{name}/test
+```
+
+`POST .../test` is a stub: HTTP does a **TCP connect** after SSRF checks (no HTTP request). JWT checks that `hmac_secret` is present or `public_key` exists. Pass `allow_private=1` as admin to probe loopback.
+
+### Auto-subscription / topic-rewrite
+
+```
+GET/POST          /api/v1/auto-subscriptions
+PUT/DELETE        /api/v1/auto-subscriptions/{index}
+GET/POST          /api/v1/topic-rewrites
+PUT/DELETE        /api/v1/topic-rewrites/{index}
+```
+
+### Webhooks (`ferromq-web-hook`)
+
+```
+GET    /api/v1/webhooks
+PUT    /api/v1/webhooks
+POST   /api/v1/webhooks/urls
+DELETE /api/v1/webhooks/urls/{index}
+POST   /api/v1/webhooks/rules
+PUT    /api/v1/webhooks/rules/{hook}/{index}
+DELETE /api/v1/webhooks/rules/{hook}/{index}
+POST   /api/v1/webhooks/test
+```
+
+```bash
+curl -sS http://127.0.0.1:6060/api/v1/webhooks
+# urls have userinfo redacted: https://***:***@hooks.example.com/mqtt
+
+curl -sS -X POST http://127.0.0.1:6060/api/v1/webhooks/urls \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://hooks.example.com/mqtt"}'
+
+curl -sS -X POST http://127.0.0.1:6060/api/v1/webhooks/test \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://hooks.example.com/mqtt"}'
+# {"ok":true,"kind":"tcp_connect",...}  — no HTTP POST is sent (SSRF)
+```
+
+`file://` urls are allowed in config; test ping rejects them. `queue_capacity` / `concurrency_limit` still need a plugin restart (plugin docs).
+
+### Bridges
+
+```
+GET /api/v1/bridges
+GET /api/v1/bridges/{plugin}
+PUT /api/v1/bridges/{plugin}           # P4 config write
+PUT /api/v1/bridges/{plugin}/load
+PUT /api/v1/bridges/{plugin}/unload
+```
+
+```bash
+curl -sS http://127.0.0.1:6060/api/v1/bridges
+curl -sS http://127.0.0.1:6060/api/v1/bridges/ferromq-bridge-egress-mqtt
+# attrs come from the plugin attrs() hook when loaded (clients/errors if the plugin exposes them)
+
+curl -sS -X PUT http://127.0.0.1:6060/api/v1/bridges/ferromq-bridge-egress-mqtt?apply=reload \
+  -H 'Content-Type: application/json' \
+  -d '{"bridges":[{"enable":true,"name":"b1","server":"tcp://127.0.0.1:2883"}]}'
+```
 
 ### PUT /api/v1/plugins/{node}/{plugin}/config/reload
 

@@ -142,6 +142,13 @@ All endpoints are prefixed with `/api/v1`.
 | PUT | `/plugins/{node}/{plugin}/config/reload` | Reload a plugin's configuration |
 | GET | `/broker/config` | Read-only `ferromq.toml` overview (mqtt/listener/log) |
 | PUT | `/broker/config/{mqtt\|listener\|log}` | Write a broker section (admin; always `restart_required`) |
+| GET/POST | `/acl/rules` | Structured `ferromq-acl` rules (hot apply via `load_config`) |
+| GET | `/auth-providers` | MQTT client auth plugins (`http` / `jwt`) |
+| GET | `/blacklist` | Honest gap: no blacklist plugin |
+| GET/POST | `/auto-subscriptions` | `ferromq-auto-subscription` items |
+| GET/POST | `/topic-rewrites` | `ferromq-topic-rewrite` rules |
+| GET/POST | `/webhooks` | `ferromq-web-hook` urls/rules; `POST /webhooks/test` is a TCP stub |
+| GET/PUT | `/bridges/{plugin}` | Bridge status/attrs + P4 config write + load/unload |
 | PUT | `/plugins/{node}/{plugin}/load` | Load/start a plugin on a node |
 | PUT | `/plugins/{node}/{plugin}/unload` | Unload/stop a plugin on a node |
 | **Statistics** | | |

@@ -143,6 +143,29 @@ POST   /api/v1/broker/config/rollback/{version}      # admin
 
 Always `effective=restart_required`. ferromqd is not hot-restarted.
 
+## 2d. Access control & integrations (P5)
+
+```
+GET/PUT     /api/v1/acl
+GET/POST    /api/v1/acl/rules
+PUT/DELETE  /api/v1/acl/rules/{index}
+GET         /api/v1/auth-providers
+GET/PUT     /api/v1/auth-providers/{http|jwt}
+POST        /api/v1/auth-providers/{name}/test
+GET         /api/v1/blacklist          # available=false (no plugin)
+GET/POST    /api/v1/auto-subscriptions
+PUT/DELETE  /api/v1/auto-subscriptions/{index}
+GET/POST    /api/v1/topic-rewrites
+PUT/DELETE  /api/v1/topic-rewrites/{index}
+GET/PUT     /api/v1/webhooks
+POST        /api/v1/webhooks/urls | /rules | /test
+GET         /api/v1/bridges
+GET/PUT     /api/v1/bridges/{plugin}
+PUT         /api/v1/bridges/{plugin}/load|unload
+```
+
+Writes reuse P4 plugin-config + `load_config`. Webhook/auth-http tests are TCP stubs with SSRF checks (no HTTP fetch).
+
 ## 3. Client Management
 
 ### Search Clients

@@ -61,6 +61,13 @@ prometheus_metrics_cache_interval = "5s"
 | `PUT` | `/api/v1/plugins/{node}/{plugin}/config/reload` | 重载插件配置 |
 | `GET` | `/api/v1/broker/config` | 只读 ferromq.toml 总览 |
 | `PUT` | `/api/v1/broker/config/{mqtt\|listener\|log}` | 写 Broker 段（admin，仅落盘，`restart_required`） |
+| `GET` / `POST` | `/api/v1/acl/rules` | ACL 规则列表 / 添加（P5，热加载） |
+| `GET` | `/api/v1/auth-providers` | MQTT 客户端认证插件（非 Dashboard 登录） |
+| `GET` | `/api/v1/blacklist` | 无独立黑名单插件（诚实缺口） |
+| `GET` / `POST` | `/api/v1/auto-subscriptions` | 自动订阅 |
+| `GET` / `POST` | `/api/v1/topic-rewrites` | 主题重写 |
+| `GET` / `POST` | `/api/v1/webhooks` / `.../urls` / `.../test` | Webhook（密钥脱敏；test 为 TCP stub） |
+| `GET` / `PUT` | `/api/v1/bridges` / `{plugin}` | Bridge 状态 + P4 配置写入 |
 | `GET` | `/api/v1/stats` | 统计信息 |
 | `GET` | `/api/v1/metrics` | 指标（JSON） |
 | `GET` | `/api/v1/metrics/prometheus` | 指标（Prometheus 格式） |

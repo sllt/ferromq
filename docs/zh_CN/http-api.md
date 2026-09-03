@@ -1207,6 +1207,47 @@ curl -sS -b cookie.txt -X PUT "http://localhost:6060/api/v1/broker/config/mqtt" 
 
 审计动作：`broker_config_update`、`broker_config_rollback`。
 
+## 访问控制与集成管理（P5）
+
+在 P4 插件配置写入 + `load_config` 之上的结构化 REST。`?node=` 选节点（默认本机）。写入默认 `apply=reload`（进程内 `load_config`，`effective=hot`，**不是** `ferromqd` 重启）。密钥与 URL userinfo 默认 `***`，仅 `?reveal=1` 且 admin 可见。viewer 只读，operator+ 可写。
+
+FerroMQ **没有**独立黑名单 / 连接策略插件。`GET /api/v1/blacklist` 返回 `available: false`，并指向 ACL `control=connect` 规则。
+
+### ACL（`ferromq-acl`）
+
+```bash
+curl -sS http://127.0.0.1:6060/api/v1/acl/rules
+curl -sS -X POST http://127.0.0.1:6060/api/v1/acl/rules \
+  -H 'Content-Type: application/json' \
+  -d '{"access":"deny","who":{"ipaddr":"10.1.2.3"},"control":"connect"}'
+```
+
+### Webhook（`ferromq-web-hook`）
+
+```bash
+curl -sS http://127.0.0.1:6060/api/v1/webhooks
+curl -sS -X POST http://127.0.0.1:6060/api/v1/webhooks/urls \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://hooks.example.com/mqtt"}'
+curl -sS -X POST http://127.0.0.1:6060/api/v1/webhooks/test \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://hooks.example.com/mqtt"}'
+```
+
+测试是 **TCP 连通性 stub**，不会发 HTTP POST（SSRF）。`file://` 可写入配置，但不能用于 test。
+
+### Bridge
+
+```bash
+curl -sS http://127.0.0.1:6060/api/v1/bridges
+curl -sS http://127.0.0.1:6060/api/v1/bridges/ferromq-bridge-egress-mqtt
+curl -sS -X PUT "http://127.0.0.1:6060/api/v1/bridges/ferromq-bridge-egress-mqtt?apply=reload" \
+  -H 'Content-Type: application/json' \
+  -d '{"bridges":[{"enable":true,"name":"b1","server":"tcp://127.0.0.1:2883"}]}'
+```
+
+状态/错误来自已加载插件的 `attrs()`，不会虚构插件没有的能力。
+
 ### PUT /api/v1/plugins/{node}/{plugin}/config/reload
 
 重新载入指定节点下指定插件名称的插件配置信息。

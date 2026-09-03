@@ -142,6 +142,13 @@ prometheus_metrics_cache_interval = "5s"
 | PUT | `/plugins/{node}/{plugin}/config/reload` | 重新加载插件配置 |
 | GET | `/broker/config` | 只读 `ferromq.toml` 总览（mqtt/listener/log） |
 | PUT | `/broker/config/{mqtt\|listener\|log}` | 写入 Broker 段（admin；始终 `restart_required`） |
+| GET/POST | `/acl/rules` | 结构化 `ferromq-acl` 规则（经 `load_config` 热生效） |
+| GET | `/auth-providers` | MQTT 客户端认证插件（`http` / `jwt`） |
+| GET | `/blacklist` | 无独立黑名单插件（诚实缺口） |
+| GET/POST | `/auto-subscriptions` | 自动订阅 |
+| GET/POST | `/topic-rewrites` | 主题重写 |
+| GET/POST | `/webhooks` | Webhook；`POST /webhooks/test` 为 TCP stub |
+| GET/PUT | `/bridges/{plugin}` | Bridge 状态 / 配置 / 加载卸载 |
 | PUT | `/plugins/{node}/{plugin}/load` | 在节点上加载/启动插件 |
 | PUT | `/plugins/{node}/{plugin}/unload` | 在节点上卸载/停止插件 |
 | **统计** | | |
