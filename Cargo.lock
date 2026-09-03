@@ -762,6 +762,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2877,6 +2887,19 @@ checksum = "f0d8a4362ccb29cb0b265253fb0a2728f592895ee6854fd9bc13f2ffda266ff1"
 dependencies = [
  "opaque-debug",
  "polyval",
+]
+
+[[package]]
+name = "globset"
+version = "0.4.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07c34a9410465b45bd9787443bc7370f37735bad04b0f0cd57ff1a3186c98988"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -5706,6 +5729,7 @@ version = "8.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42ffa149f6aa81b58a5b3011d01a857c4ed12c7a732d2c51947a4c7c692185f0"
 dependencies = [
+ "globset",
  "sha2 0.11.0",
  "walkdir",
 ]
@@ -5842,10 +5866,29 @@ version = "0.90.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "550fb7b471666333b7342cd0457785bc976045033ac7f96f3729085f526f5b3f"
 dependencies = [
+ "salvo-compression",
  "salvo-proxy",
  "salvo-serve-static",
  "salvo_core",
  "salvo_extra",
+]
+
+[[package]]
+name = "salvo-compression"
+version = "0.90.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7346ddaec87d23a64b228beec51cf8a1bae4d471d0ecb879182103ebb7f412d8"
+dependencies = [
+ "brotli",
+ "bytes",
+ "flate2",
+ "futures-util",
+ "indexmap 2.14.0",
+ "salvo_core",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "zstd",
 ]
 
 [[package]]

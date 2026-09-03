@@ -41,8 +41,6 @@ use ferromq::{
     Result,
 };
 
-use salvo::serve_static::{static_embed, StaticDir};
-
 use super::audit::{list_audit, AuditLog, AUDIT_LOG};
 use super::auth::{
     auth_change_password, auth_init, auth_login, auth_logout, auth_me, create_api_key, create_user,
@@ -51,7 +49,7 @@ use super::auth::{
 };
 use super::config_mgmt;
 use super::diagnostics::{self, AlarmBus, ALARM_BUS};
-use super::embed::DashboardAssets;
+use super::embed::mount_dashboard;
 use super::flusher::{HistoryCache, HistoryCaches};
 use super::integrations;
 use super::openapi::{get_docs, get_openapi};
@@ -437,40 +435,8 @@ pub(crate) async fn listen_and_serve(
     let api_router = route(scx, cfg, http_bearer_token, monitor, history_caches);
 
     let mut root_router = Router::new().push(api_router);
-
-    // Mount Dashboard SPA — prefer filesystem directory (dev hot-reload) over embedded assets.
-    // If dashboard_static_dir is configured AND the directory exists, use StaticDir
-    // (supports live editing of dashboard files during development).
-    // Otherwise, fall back to assets embedded via rust-embed (production mode, no config needed).
-    let dashboard_mounted = if let Some(dir) = &dashboard_static_dir {
-        let path = std::path::Path::new(dir);
-        if path.exists() {
-            root_router = root_router.push(
-                Router::with_path("dashboard/{**path}").get(StaticDir::new([dir]).defaults("index.html")),
-            );
-            root_router = root_router
-                .push(Router::with_path("{**path}").get(StaticDir::new([dir]).defaults("index.html")));
-            log::info!("Dashboard SPA mounted from filesystem: {dir}, canonical: {:?}", path.canonicalize());
-            true
-        } else {
-            log::warn!(
-                "Dashboard static dir configured but not found: {dir}, falling back to embedded assets"
-            );
-            false
-        }
-    } else {
-        false
-    };
-
-    if !dashboard_mounted {
-        root_router = root_router.push(
-            Router::with_path("dashboard/{*path}")
-                .get(static_embed::<DashboardAssets>().fallback("index.html")),
-        );
-        root_router = root_router
-            .push(Router::with_path("{*path}").get(static_embed::<DashboardAssets>().fallback("index.html")));
-        log::info!("Dashboard SPA mounted from embedded assets (rust-embed)");
-    }
+    // Prefer dashboard_static_dir when it exists; otherwise rust-embed dashboard-dist/.
+    root_router = mount_dashboard(root_router, dashboard_static_dir.as_deref());
 
     server.try_serve(root_router).await?;
     Ok(())
@@ -4228,6 +4194,33 @@ mod tests {
         assert_eq!(resp.status_code, Some(StatusCode::OK));
         let body = resp.take_string().await.unwrap();
         assert!(body.contains("swagger") || body.contains("openapi.json"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn api_and_embedded_dashboard_share_one_router() {
+        let scx = ServerContext::new().node_id(1).busy_check_enable(false).build().await;
+        let cfg = Arc::new(RwLock::new(test_cfg()));
+        let api = route(scx, cfg, None, prome::Monitor::new(), None);
+        let svc = Service::new(mount_dashboard(Router::new().push(api), None));
+
+        let mut openapi = TestClient::get("http://127.0.0.1:0/api/v1/openapi.json").send(&svc).await;
+        assert_eq!(openapi.status_code, Some(StatusCode::OK));
+        let spec: serde_json::Value = openapi.take_json().await.unwrap();
+        assert!(spec["openapi"].as_str().unwrap().starts_with("3."));
+
+        let mut docs = TestClient::get("http://127.0.0.1:0/api/v1/docs").send(&svc).await;
+        assert_eq!(docs.status_code, Some(StatusCode::OK));
+        let docs_body = docs.take_string().await.unwrap();
+        assert!(docs_body.contains("swagger") || docs_body.contains("openapi.json"));
+
+        let mut dash = TestClient::get("http://127.0.0.1:0/dashboard/").send(&svc).await;
+        assert_eq!(dash.status_code, Some(StatusCode::OK));
+        let html = dash.take_string().await.unwrap();
+        assert!(html.contains("root"), "{html}");
+        assert_eq!(
+            dash.headers().get("x-content-type-options").and_then(|v| v.to_str().ok()),
+            Some("nosniff")
+        );
     }
 
     #[tokio::test]
