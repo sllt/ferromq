@@ -61,6 +61,7 @@ ferromq_http_api::register_named(&scx, "ferromq-http-api", true, false).await?;
 | `message_expiry_interval` | `string` | `"5m"` | 发布操作消息的默认过期时间 |
 | `metrics_sample_interval` | `string` | `"5s"` | 指标采样间隔 |
 | `prometheus_metrics_cache_interval` | `string` | `"5s"` | Prometheus 指标数据缓存间隔 |
+| `dashboard_static_dir` | `string` | — | 可选的 React 控制台 `dist/` 目录。路径存在时在 `/dashboard/` 覆盖 rust-embed 的 `dashboard-dist/` |
 | `storage` | `object` | — | 历史数据存储配置（可选，不配置则不启用历史功能） |
 | `flush_interval` | `string` | `"5s"` | 历史数据刷盘间隔 |
 | `history_retention` | `string` | `"7d"` | 历史数据保留时长。Warmup 从存储加载时，会检查每条数据的时间戳是否在 `history_retention` 范围内，已过期的数据不会被加载到缓存并从存储中删除。 |
@@ -277,6 +278,17 @@ HTTP API 接受两种凭证（**不影响 MQTT 客户端认证插件**）：
 - **开放访问** — 未配置 bearer 与 `dashboard_admin_password`（且尚无用户/Key）时保持开放（匿名 admin）。
 
 引导：尚无用户时，首次匹配的登录或 `POST /api/v1/auth/init` 会创建配置中的 admin（及可选 viewer）。密码以 bcrypt 哈希保存在**进程内存**（重启丢失；集群节点不共享会话，需粘性会话）。健康检查、OpenAPI、login/logout/init 保持公开。仅 admin：`GET/POST /users`、`GET/POST/DELETE /api-keys`、`GET /audit`。
+
+## Dashboard
+
+默认界面是 [`sllt/ferromq-dashboard`](https://github.com/sllt/ferromq-dashboard) 的 React 控制台，以 `dashboard-dist/` 入库并用 rust-embed 嵌入（Hash Router，`base: './'`）。打开 `http://<host>:6060/dashboard/`。
+
+- **嵌入（默认）：** 无需额外文件。重新生成：`./scripts/sync-dashboard-dist.sh`，然后 `cargo build -p ferromq-http-api`。
+- **覆盖：** 将 `dashboard_static_dir` 设为磁盘上存在的 Vite `dist/`（相对进程 cwd）。路径不存在时打警告并回退到嵌入资源。
+- **开发热更新：** 在 dashboard 仓库运行 `pnpm dev`；不要把 `dashboard_static_dir` 指到源码树。
+- **验证：** `curl -sI http://127.0.0.1:6060/dashboard/`（`no-cache`、`nosniff`、`DENY`）；带 hash 的 `/dashboard/assets/*.js` 为 `immutable`。`/api/v1/openapi.json` 与 `/api/v1/docs` 仍走 API 路由。
+
+详见 [docs/zh_CN/dashboard.md](../../docs/zh_CN/dashboard.md)。
 
 ## 依赖
 

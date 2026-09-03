@@ -61,6 +61,7 @@ File: `ferromq-http-api.toml` (in the plugin config directory). Loaded via `scx.
 | `message_expiry_interval` | `string` | `"5m"` | Default message expiration interval for publish operations |
 | `metrics_sample_interval` | `string` | `"5s"` | Metrics sampling interval |
 | `prometheus_metrics_cache_interval` | `string` | `"5s"` | Prometheus metrics data caching interval |
+| `dashboard_static_dir` | `string` | — | Optional filesystem `dist/` for the React console. When set and the path exists, served at `/dashboard/` instead of the rust-embed `dashboard-dist/` assets |
 | `storage` | `object` | — | History data storage config (optional; omit to disable history) |
 | `flush_interval` | `string` | `"5s"` | History flush interval |
 | `history_retention` | `string` | `"7d"` | History data retention. During warmup, each data point's timestamp is checked against this duration — expired entries are discarded from the cache and removed from storage. |
@@ -277,6 +278,17 @@ Two credentials are accepted (MQTT client auth plugins are not involved):
 - **Open access** — if neither a bearer token nor `dashboard_admin_password` is set (and no users/keys exist yet), the API stays open (anonymous admin).
 
 Bootstrap: when no dashboard users exist, the first matching login or `POST /api/v1/auth/init` creates the configured admin (and optional viewer). Passwords are bcrypt hashes in **process memory** (lost on restart; cluster nodes do not share sessions — use sticky sessions). Health, OpenAPI, login, logout, and init stay public. Admin-only: `GET/POST /users`, `GET/POST/DELETE /api-keys`, `GET /audit`. Operator+ can acknowledge alarms and call cluster join/leave (leave only when the raft plugin is active).
+
+## Dashboard
+
+Default UI is the React console from [`sllt/ferromq-dashboard`](https://github.com/sllt/ferromq-dashboard), vendored as `dashboard-dist/` and rust-embedded (Hash Router, `base: './'`). Open `http://<host>:6060/dashboard/`.
+
+- **Embedded (default):** no extra files. Rebuild with `./scripts/sync-dashboard-dist.sh` then `cargo build -p ferromq-http-api`.
+- **Override:** set `dashboard_static_dir` to a Vite `dist/` that exists on disk (resolved from the process cwd). Missing path logs a warning and falls back to the embed.
+- **Dev HMR:** run `pnpm dev` in the dashboard repo; do not point `dashboard_static_dir` at the source tree.
+- **Verify:** `curl -sI http://127.0.0.1:6060/dashboard/` (`no-cache`, `nosniff`, `DENY`); hashed `/dashboard/assets/*.js` is `immutable`. `/api/v1/openapi.json` and `/api/v1/docs` stay on the API router.
+
+See [docs/en_US/dashboard.md](../../docs/en_US/dashboard.md).
 
 ## Dependencies
 

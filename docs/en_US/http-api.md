@@ -84,13 +84,11 @@ message_expiry_interval = "5m"
 prometheus_metrics_cache_interval = "5s"
 
 ## Dashboard static directory (optional).
-## By default (when unset), the Dashboard SPA is served from assets embedded
-## directly into the binary via rust-embed at compile time, so no external
-## files are needed.
-## If set, the plugin loads the Dashboard SPA from this external directory
-## at the `/dashboard/` path instead, allowing swapping the frontend build
-## without recompiling the binary.
-# dashboard_static_dir = "/path/to/dashboard/dist"
+## By default the React console is rust-embedded from crate-local
+## dashboard-dist/ (https://github.com/sllt/ferromq-dashboard).
+## If set AND the path exists, that directory is served at `/dashboard/`
+## instead (typically a local Vite dist/). Missing path → embed.
+# dashboard_static_dir = "/path/to/ferromq-dashboard/dist"
 
 ##─── Stats/Metrics History Persistence (optional) ───────────────────────
 ## When `storage` is configured, the plugin periodically snapshots Stats
