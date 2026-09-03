@@ -2830,8 +2830,6 @@ async fn node_plugin_config_reload(
     depot: &mut Depot,
     res: &mut Response,
 ) -> std::result::Result<(), salvo::Error> {
-    let (scx, cfg) = get_scx_cfg(depot)?;
-    let message_type = cfg.read().await.message_type;
     let node_id = if let Some(node_id) = req.param::<NodeId>("node") {
         node_id
     } else {
@@ -2847,6 +2845,8 @@ async fn node_plugin_config_reload(
     if config_mgmt::deny_http_api_unless_admin(&name, depot, res) {
         return Ok(());
     }
+    let (scx, cfg) = get_scx_cfg(depot)?;
+    let message_type = cfg.read().await.message_type;
 
     match _node_plugin_config_reload(scx, node_id, &name, message_type).await {
         Ok(r) => {
@@ -4563,7 +4563,8 @@ mod tests {
             .add_header("cookie", &cookie, true)
             .send(&svc)
             .await;
-        assert_eq!(me.take_json().await.unwrap()["role"], "operator");
+        let me_body: serde_json::Value = me.take_json().await.unwrap();
+        assert_eq!(me_body["role"], "operator");
 
         state.set_user_role("ops", crate::auth::Role::Viewer).await.unwrap();
         let mut me2 = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
@@ -4571,7 +4572,8 @@ mod tests {
             .send(&svc)
             .await;
         assert_eq!(me2.status_code, Some(StatusCode::OK));
-        assert_eq!(me2.take_json().await.unwrap()["role"], "viewer");
+        let me2_body: serde_json::Value = me2.take_json().await.unwrap();
+        assert_eq!(me2_body["role"], "viewer");
 
         let kick = TestClient::delete("http://127.0.0.1:0/api/v1/clients/no-such-client")
             .add_header("cookie", &cookie, true)
@@ -5130,11 +5132,12 @@ listener.tcp.external.addr = "0.0.0.0:1883"
     #[tokio::test]
     async fn http_api_plugin_config_writes_are_admin_only() {
         let env = p4_env(dashboard_cfg()).await;
+        let (admin_resp, admin_body) = login(&env.svc, "admin", "admin-secret").await;
+        assert_eq!(admin_resp.status_code, Some(StatusCode::OK), "{admin_body}");
+        let admin = session_cookie(&admin_resp);
         env.state.insert_user("ops", "ops-secret-1", crate::auth::Role::Operator).await.unwrap();
         let (ops_resp, _) = login(&env.svc, "ops", "ops-secret-1").await;
         let ops = session_cookie(&ops_resp);
-        let (admin_resp, _) = login(&env.svc, "admin", "admin-secret").await;
-        let admin = session_cookie(&admin_resp);
 
         for path in [
             "http://127.0.0.1:0/api/v1/plugins/1/ferromq-http-api/config",

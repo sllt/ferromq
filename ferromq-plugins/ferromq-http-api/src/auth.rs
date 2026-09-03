@@ -155,6 +155,8 @@ struct DashboardUser {
 #[derive(Debug, Clone)]
 struct SessionRecord {
     username: String,
+    /// Role captured at login. Authorization uses the live `DashboardUser.role`.
+    #[allow(dead_code)]
     role: Role,
     created_at: Instant,
     last_seen: Instant,
