@@ -55,6 +55,8 @@ File: `ferromq-http-api.toml` (in the plugin config directory). Loaded via `scx.
 | `dashboard_login_rate_window` | `string` | `"1m"` | Login rate-limit window |
 | `audit_max_events` | `usize` | `10000` | In-memory audit ring-buffer size |
 | `audit_file` | `string` | — | Optional JSONL file for durable audit events |
+| `config_history_keep` | `usize` | `10` | Last-N backups kept when writing plugin or `ferromq.toml` config |
+| `broker_config_file` | `string` | — | Path to this node's `ferromq.toml` for `/api/v1/broker/config` |
 | `message_type` | `u8` | `99` | gRPC message type identifier for plugin communication |
 | `message_expiry_interval` | `string` | `"5m"` | Default message expiration interval for publish operations |
 | `metrics_sample_interval` | `string` | `"5s"` | Metrics sampling interval |
@@ -132,8 +134,14 @@ All endpoints are prefixed with `/api/v1`.
 | GET | `/plugins` | Returns information of all plugins in the cluster |
 | GET | `/plugins/{node}` | Returns plugin information for a specific node |
 | GET | `/plugins/{node}/{plugin}` | Get a specific plugin's info |
-| GET | `/plugins/{node}/{plugin}/config` | Get a plugin's configuration |
+| GET | `/plugins/{node}/{plugin}/config` | Get a plugin's configuration (secrets redacted unless `?reveal=1` + admin) |
+| PUT | `/plugins/{node}/{plugin}/config` | Write a plugin config (`?apply=reload\|none`); returns diff + `effective` |
+| POST | `/plugins/{node}/{plugin}/config/validate` | Dry-run validate a plugin config |
+| GET | `/plugins/{node}/{plugin}/config/versions` | List last-N plugin config backups |
+| POST | `/plugins/{node}/{plugin}/config/rollback/{version}` | Restore a plugin config backup |
 | PUT | `/plugins/{node}/{plugin}/config/reload` | Reload a plugin's configuration |
+| GET | `/broker/config` | Read-only `ferromq.toml` overview (mqtt/listener/log) |
+| PUT | `/broker/config/{mqtt\|listener\|log}` | Write a broker section (admin; always `restart_required`) |
 | PUT | `/plugins/{node}/{plugin}/load` | Load/start a plugin on a node |
 | PUT | `/plugins/{node}/{plugin}/unload` | Unload/stop a plugin on a node |
 | **Statistics** | | |

@@ -44,6 +44,8 @@ dashboard_static_dir = "/path/to/ferromq-plugins/ferromq-http-api/dashboard"
 | `#/api-keys` | API Keys | Create hashed keys; secret shown once (admin) |
 | `#/audit` | Audit Log | Write-operation audit events (admin) |
 
+P4 plugin / broker config write, validate, and rollback are HTTP API only (`PUT /api/v1/plugins/{node}/{plugin}/config`, `GET /api/v1/broker/config`). See [HTTP API](http-api.md). The plugins page stays read-oriented in this milestone.
+
 ## Internationalization
 
 The Dashboard ships with **12 languages** (`locales/*.json`), switchable from the top-right of the UI:

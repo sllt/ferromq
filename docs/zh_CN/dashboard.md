@@ -44,6 +44,8 @@ dashboard_static_dir = "/path/to/ferromq-plugins/ferromq-http-api/dashboard"
 | `#/api-keys` | API 密钥 | 创建哈希 API Key，密钥只显示一次（admin） |
 | `#/audit` | 审计日志 | 写操作审计（admin） |
 
+P4 插件 / Broker 配置的写入、校验与回滚目前仅提供 HTTP API（`PUT /api/v1/plugins/{node}/{plugin}/config`、`GET /api/v1/broker/config`），见 [HTTP API](http-api.md)。本里程碑插件页仍以只读为主。
+
 ## 国际化
 
 Dashboard 内置 **12 种语言**（`locales/*.json`），可在界面右上角切换：

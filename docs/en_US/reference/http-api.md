@@ -41,7 +41,7 @@ prometheus_metrics_cache_interval = "5s"
 - **Session:** `POST /api/v1/auth/login` `{ username, password }` → `ferromq_session` cookie (`HttpOnly`, `SameSite=Lax`). Also `POST /logout`, `GET /me`, `POST /change-password`, `POST /init`.
 - **Bearer:** `Authorization: Bearer <http_bearer_token>` is still a superuser admin credential (username `operator`). Created API keys also use Bearer with a bound role.
 - **Open access:** if neither token nor `dashboard_admin_password` is set (and no users/keys), the API stays open.
-- **Roles:** `admin` manages users / keys / audit and can write; `operator` can kick / publish / plugins; `viewer` is read-only (`403`).
+- **Roles:** `admin` manages users / keys / audit / broker config write / `?reveal=1`; `operator` can kick / publish / plugin config write+reload; `viewer` is read-only (`403`, secrets redacted).
 - **Scope:** http-api only. MQTT client auth plugins are unchanged. Users/sessions/keys are in-memory (sticky sessions in a cluster).
 
 ## Base URL
@@ -129,6 +129,19 @@ GET    /api/v1/audit             # ?action=&username=&success=&_limit=&_offset=&
 ```
 
 See the full [HTTP API](../http-api.md) document for curl examples.
+
+## 2c. Broker config (P4)
+
+```
+GET    /api/v1/broker/config
+GET    /api/v1/broker/config/{mqtt|listener|log}
+PUT    /api/v1/broker/config/{mqtt|listener|log}     # admin; file only
+POST   /api/v1/broker/config/{section}/validate
+GET    /api/v1/broker/config/versions
+POST   /api/v1/broker/config/rollback/{version}      # admin
+```
+
+Always `effective=restart_required`. ferromqd is not hot-restarted.
 
 ## 3. Client Management
 
@@ -342,7 +355,21 @@ GET /api/v1/plugins/{node}/{plugin}
 
 ```
 GET /api/v1/plugins/{node}/{plugin}/config
+GET /api/v1/plugins/{node}/{plugin}/config?reveal=1   # admin only
 ```
+
+Secrets (`password` / `token` / `private_key` / `secret` / `jwt`) are redacted unless `reveal=1` and admin. Body stays a bare JSON object.
+
+### Write / validate / version plugin config (P4)
+
+```
+PUT  /api/v1/plugins/{node}/{plugin}/config            # ?apply=reload|none
+POST /api/v1/plugins/{node}/{plugin}/config/validate
+GET  /api/v1/plugins/{node}/{plugin}/config/versions
+POST /api/v1/plugins/{node}/{plugin}/config/rollback/{version}
+```
+
+JSON object, `{ "toml": "..." }`, or raw TOML. Atomic write + last-N backups. `effective`: `hot` (applied via plugin `load_config`, not a ferromqd restart), `reload` (call PUT .../config/reload), `restart_required` (process restart). See the full [HTTP API](../http-api.md) document for curl examples.
 
 ### Reload Plugin Config
 

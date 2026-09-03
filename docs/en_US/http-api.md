@@ -52,6 +52,8 @@ http_laddr = "0.0.0.0:6060"
 ## In-memory audit ring buffer (newest first). Optional JSONL file:
 # audit_max_events = 10000
 # audit_file = "/var/log/ferromq/http-api-audit.jsonl"
+# config_history_keep = 10
+# broker_config_file = "ferromq.toml"
 ## Users/sessions/API keys are in-memory (single node). Restart re-bootstraps from config.
 ## Cluster: use sticky sessions.
 
@@ -176,11 +178,11 @@ Public without a session/bearer: `POST /auth/login`, `POST /auth/logout`, `POST 
 
 ### Roles
 
-| Role | Read | Kick / publish / plugins | Users / API keys / audit |
-|------|------|--------------------------|--------------------------|
+| Role | Read | Kick / publish / plugin config | Users / API keys / audit / broker write / `?reveal=1` |
+|------|------|--------------------------------|------------------------------------------------------|
 | `admin` | yes | yes | yes |
 | `operator` | yes | yes | no (`403`, `required_role: admin`) |
-| `viewer` | yes | no (`403`, `required_role: operator`) | no |
+| `viewer` | yes (secrets redacted) | no (`403`, `required_role: operator`) | no |
 
 Passwords are **bcrypt** hashes; API key secrets are **SHA-256** hashes. Both stay in process memory (never plaintext). Restart drops users/sessions/keys; the next login/init re-creates the configured admin. In a cluster, each node has its own store — use sticky sessions.
 
@@ -1156,28 +1158,105 @@ A missing plugin returns HTTP 404 with `{"code":404,"message":"plugin not found:
 
 ### GET /api/v1/plugins/{node}/{plugin}/config
 
-Returns the plugin configuration information of the specified plugin name under the specified node.
+Returns the plugin configuration of the specified plugin on the specified node.
 
-**Path Parameters:**
+Secret keys (`password`, `token`, `private_key`, `secret`, `jwt` and names that contain them) are replaced with `"***"` unless `?reveal=1` **and** the caller is `admin`. GET remains a bare JSON object (backward compatible).
 
-| Name | Type | Required | Description |
-| ---- | --------- | ------------|-------------|
-| node | Integer    | True       | Node ID, Such as: 1    |
-| plugin | String    | True       | Plugin name        |
-
-**Success Response Body (JSON):**
-
-| Name           | Type     | Description |
-|----------------|----------|-------------|
-| {}             | Object   | Plugin configuration information      |
+**Query:** `reveal=1` — admin only (`403` otherwise).
 
 **Examples:**
 
 ```bash
-$ curl -i -X GET "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config"
+$ curl -sS "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config"
+# {"http_laddr":"0.0.0.0:6060","http_bearer_token":"***",...}
 
-{"http_laddr":"0.0.0.0:6060","max_row_limit":10000,"workers":1}
+$ curl -sS -b cookie.txt "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config?reveal=1"
+# admin only; file contents when `{plugins.dir}/{plugin}.toml` exists
 ```
+
+### PUT /api/v1/plugins/{node}/{plugin}/config
+
+Write a plugin config file (operator+). Body is a JSON object, `{ "toml": "..." }`, or raw TOML (`Content-Type: application/toml`). The file `{plugins.dir}/{plugin}.toml` is written atomically; the previous file is copied to `{plugins.dir}/.config-history/{plugin}/{version}.toml` (last `config_history_keep`, default 10).
+
+**Query:** `apply=reload` (default) calls the plugin `load_config` hook after the write. `apply=none` writes the file only.
+
+**Success body:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| ok / written / applied | Bool | Write outcome |
+| effective | String | `hot` \| `reload` \| `restart_required` (see below) |
+| diff | Object | `{ added, removed, changed }` dotted keys |
+| backup | String | Version id of the file replaced, if any |
+| note | String | Human-readable effective-mode hint |
+
+**`effective` semantics (honest — ferromqd is never hot-restarted):**
+
+| Mode | Meaning |
+|------|---------|
+| `hot` | Already applied in this process via the plugin `load_config` hook. **Not** a `ferromqd` process restart. |
+| `reload` | File is on disk. Call `PUT .../config/reload` (or re-PUT with `apply=reload`) so the plugin picks it up. |
+| `restart_required` | File is on disk. The running process will not use it until `ferromqd` (or an immutable plugin on next start) is restarted. |
+
+```bash
+# Dry-run
+curl -sS -X POST "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config/validate" \
+  -H 'Content-Type: application/json' \
+  -d '{"max_row_limit":5000,"http_laddr":"0.0.0.0:6060"}'
+
+# Write + apply via plugin reload
+curl -sS -X PUT "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config?apply=reload" \
+  -H 'Content-Type: application/json' \
+  -d '{"max_row_limit":5000,"http_laddr":"0.0.0.0:6060"}'
+
+# Write only (then reload yourself)
+curl -sS -X PUT "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config?apply=none" \
+  -H 'Content-Type: application/toml' \
+  --data-binary $'max_row_limit = 5000\nhttp_laddr = "0.0.0.0:6060"\n'
+
+# Versions + rollback
+curl -sS "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config/versions"
+curl -sS -X POST "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config/rollback/1710000000000?apply=reload"
+```
+
+Audit actions: `plugin_config_update`, `plugin_config_rollback`. Existing `GET` / `PUT .../reload` / `load` / `unload` are unchanged.
+
+### POST /api/v1/plugins/{node}/{plugin}/config/validate
+
+Same body as PUT. Parses and checks the payload; does **not** write. Returns `{ valid, effective, diff, errors }`.
+
+### GET /api/v1/plugins/{node}/{plugin}/config/versions
+
+Last-N backups, newest first: `[{ "version", "ts", "size" }]`.
+
+### POST /api/v1/plugins/{node}/{plugin}/config/rollback/{version}
+
+Restore a backup (operator+). Same `apply` / `effective` rules as PUT.
+
+### Broker / listener / log (`ferromq.toml`)
+
+Read-only overview first. Writable `mqtt` / `listener` / `log` sections update the file only and **always** return `effective=restart_required`. FerroMQ does not hot-restart `ferromqd`.
+
+| Method | Path | Role |
+|--------|------|------|
+| GET | `/api/v1/broker/config` | any authenticated (secrets redacted unless `?reveal=1` + admin) |
+| GET | `/api/v1/broker/config/{mqtt\|listener\|log}` | same |
+| PUT | `/api/v1/broker/config/{mqtt\|listener\|log}` | admin |
+| POST | `/api/v1/broker/config/{section}/validate` | admin |
+| GET | `/api/v1/broker/config/versions` | any authenticated |
+| POST | `/api/v1/broker/config/rollback/{version}` | admin |
+
+File path: `broker_config_file` in `ferromq-http-api.toml`, else `FERROMQ_CONFIG`, else `Settings` `-f` path, else `./ferromq.toml`.
+
+```bash
+curl -sS "http://localhost:6060/api/v1/broker/config"
+curl -sS -b cookie.txt -X PUT "http://localhost:6060/api/v1/broker/config/mqtt" \
+  -H 'Content-Type: application/json' \
+  -d '{"max_sessions": 10000, "delayed_publish_max": 100000}'
+# {"ok":true,"written":true,"applied":false,"effective":"restart_required",...}
+```
+
+Audit actions: `broker_config_update`, `broker_config_rollback`.
 
 ### PUT /api/v1/plugins/{node}/{plugin}/config/reload
 

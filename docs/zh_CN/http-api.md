@@ -51,6 +51,8 @@ http_laddr = "0.0.0.0:6060"
 # dashboard_login_rate_window = "1m"
 # audit_max_events = 10000
 # audit_file = "/var/log/ferromq/http-api-audit.jsonl"
+# config_history_keep = 10
+# broker_config_file = "ferromq.toml"
 ## 用户 / 会话 / API Key 仅存于本节点内存。重启后按配置重新引导。
 ## 集群需粘性会话。
 
@@ -175,11 +177,11 @@ HTTP API 接受以下凭证。**MQTT 客户端认证插件不受影响。**
 
 ### 角色
 
-| 角色 | 只读 | 踢人 / 发布 / 插件 | 用户 / API Key / 审计 |
-|------|------|-------------------|----------------------|
+| 角色 | 只读 | 踢人 / 发布 / 插件配置 | 用户 / API Key / 审计 / Broker 写入 / `?reveal=1` |
+|------|------|----------------------|--------------------------------------------------|
 | `admin` | 是 | 是 | 是 |
 | `operator` | 是 | 是 | 否（`403`，`required_role: admin`） |
-| `viewer` | 是 | 否（`403`，`required_role: operator`） | 否 |
+| `viewer` | 是（密钥已脱敏） | 否（`403`，`required_role: operator`） | 否 |
 
 密码以 **bcrypt** 哈希保存；API Key 密钥以 **SHA-256** 哈希保存。均在进程内存中。重启会清空用户 / 会话 / Key。集群需粘性会话。
 
@@ -1144,28 +1146,66 @@ $ curl -i -X GET "http://localhost:6060/api/v1/plugins/1/ferromq-web-hook"
 
 ### GET /api/v1/plugins/{node}/{plugin}/config
 
-返回指定节点下指定插件名称的插件配置信息。
-
-**Path Parameters:**
-
-| Name | Type | Required | Description |
-| ---- | --------- | ------------|-------------|
-| node | Integer    | True       | 节点ID，如：1    |
-| plugin | String    | True       | 插件名称        |
-
-**Success Response Body (JSON):**
-
-| Name           | Type     | Description |
-|----------------|----------|-------------|
-| {}             | Object   | 插件配置信息      |
-
-**Examples:**
+返回指定节点上指定插件的配置。密钥字段（`password` / `token` / `private_key` / `secret` / `jwt` 及包含这些词的键）默认替换为 `"***"`；仅当 `?reveal=1` **且** 调用者为 `admin` 时才返回明文。GET 仍是裸 JSON 对象（向后兼容）。
 
 ```bash
-$ curl -i -X GET "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config"
-
-{"http_laddr":"0.0.0.0:6060","max_row_limit":10000,"workers":1}
+curl -sS "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config"
+# {"http_laddr":"0.0.0.0:6060","http_bearer_token":"***",...}
 ```
+
+### PUT /api/v1/plugins/{node}/{plugin}/config
+
+写入插件配置文件（operator+）。请求体可以是 JSON 对象、`{ "toml": "..." }`，或原始 TOML。原子写入 `{plugins.dir}/{plugin}.toml`，覆盖前备份到 `{plugins.dir}/.config-history/{plugin}/{version}.toml`（保留最近 `config_history_keep` 份，默认 10）。
+
+**Query：** `apply=reload`（默认）写入后调用插件 `load_config`；`apply=none` 只写文件。
+
+**`effective` 语义（不会伪装 ferromqd 热重启）：**
+
+| 模式 | 含义 |
+|------|------|
+| `hot` | 已通过插件 `load_config` 在本进程生效。**不是** `ferromqd` 进程重启。 |
+| `reload` | 文件已写入。调用 `PUT .../config/reload`（或带 `apply=reload` 再 PUT）让插件加载。 |
+| `restart_required` | 文件已写入。运行中的进程要用到新值必须重启 `ferromqd`（或不可变插件下次启动）。 |
+
+```bash
+curl -sS -X POST "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config/validate" \
+  -H 'Content-Type: application/json' \
+  -d '{"max_row_limit":5000}'
+
+curl -sS -X PUT "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config?apply=reload" \
+  -H 'Content-Type: application/json' \
+  -d '{"max_row_limit":5000,"http_laddr":"0.0.0.0:6060"}'
+
+curl -sS "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config/versions"
+curl -sS -X POST "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config/rollback/1710000000000?apply=reload"
+```
+
+审计动作：`plugin_config_update`、`plugin_config_rollback`。原有 GET / reload / load / unload 不变。
+
+### POST /api/v1/plugins/{node}/{plugin}/config/validate
+
+与 PUT 相同的请求体，只校验不落盘。
+
+### GET /api/v1/plugins/{node}/{plugin}/config/versions
+
+最近 N 份备份，最新在前。
+
+### POST /api/v1/plugins/{node}/{plugin}/config/rollback/{version}
+
+回滚到指定备份（operator+）。
+
+### Broker / listener / log（`ferromq.toml`）
+
+先提供只读总览。可写的 `mqtt` / `listener` / `log` 只改文件，**始终**返回 `effective=restart_required`，不会热重启 `ferromqd`。
+
+```bash
+curl -sS "http://localhost:6060/api/v1/broker/config"
+curl -sS -b cookie.txt -X PUT "http://localhost:6060/api/v1/broker/config/mqtt" \
+  -H 'Content-Type: application/json' \
+  -d '{"max_sessions": 10000}'
+```
+
+审计动作：`broker_config_update`、`broker_config_rollback`。
 
 ### PUT /api/v1/plugins/{node}/{plugin}/config/reload
 

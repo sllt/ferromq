@@ -53,7 +53,14 @@ prometheus_metrics_cache_interval = "5s"
 | `POST` | `/api/v1/mqtt/subscribe` | 订阅主题 |
 | `POST` | `/api/v1/mqtt/unsubscribe` | 取消订阅 |
 | `GET` | `/api/v1/plugins` | 插件列表 |
+| `GET` | `/api/v1/plugins/{node}/{plugin}/config` | 读插件配置（默认脱敏） |
+| `PUT` | `/api/v1/plugins/{node}/{plugin}/config` | 写插件配置（operator+） |
+| `POST` | `/api/v1/plugins/{node}/{plugin}/config/validate` | 校验插件配置（不落盘） |
+| `GET` | `/api/v1/plugins/{node}/{plugin}/config/versions` | 插件配置备份列表 |
+| `POST` | `/api/v1/plugins/{node}/{plugin}/config/rollback/{version}` | 回滚插件配置 |
 | `PUT` | `/api/v1/plugins/{node}/{plugin}/config/reload` | 重载插件配置 |
+| `GET` | `/api/v1/broker/config` | 只读 ferromq.toml 总览 |
+| `PUT` | `/api/v1/broker/config/{mqtt\|listener\|log}` | 写 Broker 段（admin，仅落盘，`restart_required`） |
 | `GET` | `/api/v1/stats` | 统计信息 |
 | `GET` | `/api/v1/metrics` | 指标（JSON） |
 | `GET` | `/api/v1/metrics/prometheus` | 指标（Prometheus 格式） |

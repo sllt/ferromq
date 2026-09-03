@@ -55,6 +55,8 @@ ferromq_http_api::register_named(&scx, "ferromq-http-api", true, false).await?;
 | `dashboard_login_rate_window` | `string` | `"1m"` | 登录限流窗口 |
 | `audit_max_events` | `usize` | `10000` | 内存审计环形缓冲区大小 |
 | `audit_file` | `string` | — | 可选的 JSONL 审计文件 |
+| `config_history_keep` | `usize` | `10` | 写入插件 / `ferromq.toml` 时保留的备份份数 |
+| `broker_config_file` | `string` | — | 本节点 `ferromq.toml` 路径，供 `/api/v1/broker/config` 使用 |
 | `message_type` | `u8` | `99` | 插件间 gRPC 通信的消息类型标识符 |
 | `message_expiry_interval` | `string` | `"5m"` | 发布操作消息的默认过期时间 |
 | `metrics_sample_interval` | `string` | `"5s"` | 指标采样间隔 |
@@ -132,8 +134,14 @@ prometheus_metrics_cache_interval = "5s"
 | GET | `/plugins` | 返回集群中所有插件的信息 |
 | GET | `/plugins/{node}` | 返回指定节点的插件信息 |
 | GET | `/plugins/{node}/{plugin}` | 获取指定插件的详细信息 |
-| GET | `/plugins/{node}/{plugin}/config` | 获取插件的配置 |
+| GET | `/plugins/{node}/{plugin}/config` | 获取插件配置（默认脱敏；`?reveal=1` 仅 admin） |
+| PUT | `/plugins/{node}/{plugin}/config` | 写入插件配置（`?apply=reload\|none`），返回 diff 与 `effective` |
+| POST | `/plugins/{node}/{plugin}/config/validate` | 校验插件配置（不落盘） |
+| GET | `/plugins/{node}/{plugin}/config/versions` | 列出最近 N 份配置备份 |
+| POST | `/plugins/{node}/{plugin}/config/rollback/{version}` | 回滚插件配置 |
 | PUT | `/plugins/{node}/{plugin}/config/reload` | 重新加载插件配置 |
+| GET | `/broker/config` | 只读 `ferromq.toml` 总览（mqtt/listener/log） |
+| PUT | `/broker/config/{mqtt\|listener\|log}` | 写入 Broker 段（admin；始终 `restart_required`） |
 | PUT | `/plugins/{node}/{plugin}/load` | 在节点上加载/启动插件 |
 | PUT | `/plugins/{node}/{plugin}/unload` | 在节点上卸载/停止插件 |
 | **统计** | | |
