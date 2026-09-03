@@ -270,6 +270,15 @@ pub(crate) fn timestamp_millis() -> TimestampMillis {
     feature = "sled",
     feature = "redb"
 ))]
+#[allow(
+    clippy::bool_assert_comparison,
+    clippy::collapsible_if,
+    clippy::identity_op,
+    clippy::needless_borrow,
+    clippy::needless_update,
+    clippy::print_literal,
+    clippy::useless_vec
+)]
 mod tests {
     use super::*;
     use std::borrow::Cow;
