@@ -44,7 +44,7 @@ dashboard_static_dir = "/path/to/ferromq-plugins/ferromq-http-api/dashboard"
 | `#/api-keys` | API Keys | Create hashed keys; secret shown once (admin) |
 | `#/audit` | Audit Log | Write-operation audit events (admin) |
 
-P4 plugin / broker config write and P5 ACL / webhook / bridge / auth-provider APIs are HTTP API first (`/api/v1/acl/rules`, `/api/v1/webhooks`, `/api/v1/bridges`, `/api/v1/auth-providers`). See [HTTP API](http-api.md). The plugins page stays read-oriented in this milestone; sidebar Blacklist remains disabled because FerroMQ has no blacklist plugin.
+P4 plugin / broker config write, P5 ACL / webhook / bridge / auth-provider, and P6 diagnostics / cluster APIs are HTTP API first (`/api/v1/alarms`, `/api/v1/logs`, `/api/v1/trace`, `/api/v1/slow-subs`, `/api/v1/topic-metrics`, `/api/v1/cluster`). See [HTTP API](http-api.md) for what is real vs `available: false`. The plugins page stays read-oriented in this milestone; sidebar Alarms / Slow Subscription / Trace remain disabled until a UI is wired to those APIs. Blacklist stays disabled because FerroMQ has no blacklist plugin.
 
 ## Internationalization
 

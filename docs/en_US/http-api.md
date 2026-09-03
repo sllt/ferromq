@@ -178,7 +178,7 @@ Public without a session/bearer: `POST /auth/login`, `POST /auth/logout`, `POST 
 
 ### Roles
 
-| Role | Read | Kick / publish / plugin config / P5 integrations | Users / API keys / audit / broker write / `?reveal=1` |
+| Role | Read | Kick / publish / plugin config / P5 integrations / P6 alarm ack + cluster writes | Users / API keys / audit / broker write / `?reveal=1` |
 |------|------|--------------------------------|------------------------------------------------------|
 | `admin` | yes | yes | yes |
 | `operator` | yes | yes | no (`403`, `required_role: admin`) |
@@ -320,6 +320,7 @@ Return basic information of all nodes in the cluster.
 | .uptime        | String    | FerroMQ Broker runtime, in the format of "D days, H hours, m minutes, s seconds"     |
 | .version       | String    | FerroMQ Broker version                                                 |
 | .rustc_version | String    | RUSTC version                                         |
+| .cluster       | Object    | Additive P6 topology (`mode`, `plugin`, `leader_id`, `role`, `peers`). Absent on failed peer objects. |
 
 **Examples:**
 
@@ -372,6 +373,7 @@ Return the status of the node.
 | .uptime        | String                  | FerroMQ Broker runtime, in the format of "D days, H hours, m minutes, s seconds"                                                                                                          |
 | .version       | String                  | FerroMQ Broker version                                                                                                            |
 | .rustc_version | String                  | RUSTC version                                         |
+| .cluster       | Object                  | Additive P6 topology (`mode`, `plugin`, `leader_id`, `role`, `peers`) |
 
 **Examples:**
 
@@ -1363,6 +1365,41 @@ curl -sS -X PUT http://127.0.0.1:6060/api/v1/bridges/ferromq-bridge-egress-mqtt?
   -H 'Content-Type: application/json' \
   -d '{"bridges":[{"enable":true,"name":"b1","server":"tcp://127.0.0.1:2883"}]}'
 ```
+
+## Diagnostics & cluster ops (P6)
+
+What FerroMQ can actually support is exposed. Gaps return structured `available: false` (or HTTP 501 for writes) instead of fake UIs. Viewer can read; operator+ can acknowledge alarms and attempt cluster writes. Existing `/brokers`, `/nodes`, `/health/check`, `/features`, `/stats`, `/metrics` stay compatible; `/brokers` and `/nodes` gain an additive `cluster` object.
+
+| Endpoint | Reality |
+|----------|---------|
+| `GET /api/v1/alarms` / `/alarms/history` | **Real (derived).** Thin in-memory bus fed from health, feature inconsistency / partial failures, and unreachable peers. Lost on restart. Not a native alarm plugin. |
+| `POST /api/v1/alarms/{id}/acknowledge` | **Real.** Marks a current alarm. Audit: `alarm_acknowledge`. |
+| `GET /api/v1/logs` | **Gap.** No log collector. Points at `GET /broker/config/log`. |
+| `GET /api/v1/trace` (+ write) | **Gap.** No packet-trace plugin. Writes are 501. |
+| `GET /api/v1/slow-subs` | **Gap.** No per-subscriber latency tracker. |
+| `GET /api/v1/topic-metrics` | **Partial.** `available: true`, `kind: route_derived`. Subscriber counts from the topic router (same as `/routes`). **No per-topic rates.** `$SYS/brokers/{id}/stats\|metrics` listed only when `ferromq-sys-topic` is loaded. |
+| `GET /api/v1/cluster` | **Real (read-only topology).** `mode`: `standalone` / `raft` / `broadcast`. `membership.join` / `leave` say whether write APIs exist. |
+| `POST /api/v1/cluster/join` | **501.** `Raft::join` is consumed at `ferromq-cluster-raft` init (`raft_peer_addrs`). Always returns per-node results in `details.nodes`. |
+| `POST /api/v1/cluster/leave` | **Raft only.** Forwards `Plugin::send({"op":"leave"})` → `Mailbox::leave` on the local node. Broadcast / standalone: 501. Per-node results always. Audit: `cluster_leave`. |
+
+```bash
+curl -sS http://127.0.0.1:6060/api/v1/alarms
+# {"available":true,"source":"derived","items":[...]}
+
+curl -sS http://127.0.0.1:6060/api/v1/logs
+# {"available":false,"kind":"logs","gap":"...", "alternatives":[...]}
+
+curl -sS http://127.0.0.1:6060/api/v1/topic-metrics
+# {"available":true,"kind":"route_derived","items":[{"topic":"t","subscribers":1,"node_ids":[1]}],"sys_topic":{"active":false,...}}
+
+curl -sS http://127.0.0.1:6060/api/v1/cluster
+# {"mode":"standalone","membership":{"join":false,"leave":false,"reason":"..."},"nodes":[...]}
+
+curl -sS -X POST http://127.0.0.1:6060/api/v1/cluster/join
+# HTTP 501 {"code":501,"details":{"ok":false,"action":"join","nodes":[{"ok":false,"node_id":1,"error":"..."}]}}
+```
+
+`GET /brokers` / `GET /nodes` include `cluster: { mode, plugin, leader_id, role, peers }` without removing existing fields.
 
 ### PUT /api/v1/plugins/{node}/{plugin}/config/reload
 

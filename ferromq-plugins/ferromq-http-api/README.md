@@ -149,6 +149,16 @@ All endpoints are prefixed with `/api/v1`.
 | GET/POST | `/topic-rewrites` | `ferromq-topic-rewrite` rules |
 | GET/POST | `/webhooks` | `ferromq-web-hook` urls/rules; `POST /webhooks/test` is a TCP stub |
 | GET/PUT | `/bridges/{plugin}` | Bridge status/attrs + P4 config write + load/unload |
+| GET | `/alarms` | Current alarms derived from health/features/unreachable peers (in-memory) |
+| GET | `/alarms/history` | Cleared alarms (process memory) |
+| POST | `/alarms/{id}/acknowledge` | Acknowledge a current alarm (operator+) |
+| GET | `/logs` | Honest gap: no log collector (`available: false`) |
+| GET | `/trace` | Honest gap: no packet-trace plugin |
+| GET | `/slow-subs` | Honest gap: no slow-subscription tracker |
+| GET | `/topic-metrics` | Route-derived subscriber counts; no per-topic rates |
+| GET | `/cluster` | Read-only topology (`standalone` / `raft` / `broadcast`) |
+| POST | `/cluster/join` | Always 501 (startup-only join); per-node result |
+| POST | `/cluster/leave` | `ferromq-cluster-raft` `Plugin::send` leave, else 501; per-node result |
 | PUT | `/plugins/{node}/{plugin}/load` | Load/start a plugin on a node |
 | PUT | `/plugins/{node}/{plugin}/unload` | Unload/stop a plugin on a node |
 | **Statistics** | | |
@@ -244,6 +254,17 @@ Response example:
 - `nodes`: per-node `{ ok, node_id, features? / error? }` (no bare error strings)
 - A `features inconsistent across cluster` warning log is emitted when an inconsistency is detected
 
+### Diagnostics & cluster (P6)
+
+| Surface | Real vs stub |
+|---------|----------------|
+| Alarms | Real **derived** bus (health / features / unreachable peers). No native alarm plugin; not persisted. |
+| Logs / Trace / Slow sub | `available: false` (no collector plugins). |
+| Topic metrics | Real **route-derived** subscriber counts. No per-topic rates. `$SYS` listed only if `ferromq-sys-topic` is loaded. |
+| Cluster GET | Real topology. `/brokers` and `/nodes` get an additive `cluster` object. |
+| Cluster join | **501** — `Raft::join` is startup-only (`raft_peer_addrs`). |
+| Cluster leave | Real when `ferromq-cluster-raft` is active (`Plugin::send` → `Mailbox::leave`); otherwise 501. Writes always return per-node results. |
+
 OpenAPI 3: `GET /api/v1/openapi.json`. Optional list envelope: `?format=page` → `{ items, offset, limit, truncated, total? }` (default remains a bare array). Errors: `{ code, message, details?, request_id }`.
 
 ### Authentication
@@ -255,7 +276,7 @@ Two credentials are accepted (MQTT client auth plugins are not involved):
 - **API keys** — `POST /api/v1/api-keys` (admin). Secret is SHA-256 hashed and shown once; authenticate as `Authorization: Bearer <secret>` with the bound role.
 - **Open access** — if neither a bearer token nor `dashboard_admin_password` is set (and no users/keys exist yet), the API stays open (anonymous admin).
 
-Bootstrap: when no dashboard users exist, the first matching login or `POST /api/v1/auth/init` creates the configured admin (and optional viewer). Passwords are bcrypt hashes in **process memory** (lost on restart; cluster nodes do not share sessions — use sticky sessions). Health, OpenAPI, login, logout, and init stay public. Admin-only: `GET/POST /users`, `GET/POST/DELETE /api-keys`, `GET /audit`.
+Bootstrap: when no dashboard users exist, the first matching login or `POST /api/v1/auth/init` creates the configured admin (and optional viewer). Passwords are bcrypt hashes in **process memory** (lost on restart; cluster nodes do not share sessions — use sticky sessions). Health, OpenAPI, login, logout, and init stay public. Admin-only: `GET/POST /users`, `GET/POST/DELETE /api-keys`, `GET /audit`. Operator+ can acknowledge alarms and call cluster join/leave (leave only when the raft plugin is active).
 
 ## Dependencies
 

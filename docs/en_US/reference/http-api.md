@@ -166,6 +166,23 @@ PUT         /api/v1/bridges/{plugin}/load|unload
 
 Writes reuse P4 plugin-config + `load_config`. Webhook/auth-http tests are TCP stubs with SSRF checks (no HTTP fetch).
 
+## 2e. Diagnostics & cluster (P6)
+
+```
+GET         /api/v1/alarms                  # derived in-memory bus (health/features/peers)
+GET         /api/v1/alarms/history
+POST        /api/v1/alarms/{id}/acknowledge
+GET         /api/v1/logs                    # available=false
+GET         /api/v1/trace                   # available=false; writes 501
+GET         /api/v1/slow-subs               # available=false
+GET         /api/v1/topic-metrics           # route-derived subscriber counts
+GET         /api/v1/cluster                 # read-only topology
+POST        /api/v1/cluster/join            # 501 (startup-only); per-node result
+POST        /api/v1/cluster/leave           # raft Plugin::send leave, else 501
+```
+
+`/brokers` and `/nodes` include an additive `cluster` object. See [HTTP API](../http-api.md#diagnostics--cluster-ops-p6) for real vs stub.
+
 ## 3. Client Management
 
 ### Search Clients

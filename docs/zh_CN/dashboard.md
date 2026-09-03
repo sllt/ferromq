@@ -44,7 +44,7 @@ dashboard_static_dir = "/path/to/ferromq-plugins/ferromq-http-api/dashboard"
 | `#/api-keys` | API 密钥 | 创建哈希 API Key，密钥只显示一次（admin） |
 | `#/audit` | 审计日志 | 写操作审计（admin） |
 
-P4 插件 / Broker 配置写入以及 P5 ACL / Webhook / Bridge / 认证提供者 API 目前以 HTTP API 为主（`/api/v1/acl/rules`、`/api/v1/webhooks`、`/api/v1/bridges`、`/api/v1/auth-providers`），见 [HTTP API](http-api.md)。本里程碑插件页仍以只读为主；侧栏黑名单保持禁用，因为没有独立黑名单插件。
+P4 插件 / Broker 配置写入、P5 ACL / Webhook / Bridge / 认证提供者，以及 P6 诊断 / 集群 API 目前以 HTTP API 为主（`/api/v1/alarms`、`/api/v1/logs`、`/api/v1/trace`、`/api/v1/slow-subs`、`/api/v1/topic-metrics`、`/api/v1/cluster`），真实性见 [HTTP API](http-api.md)。本里程碑插件页仍以只读为主；侧栏告警 / 慢订阅 / 追踪在接上这些 API 之前保持禁用。黑名单保持禁用，因为没有独立黑名单插件。
 
 ## 国际化
 

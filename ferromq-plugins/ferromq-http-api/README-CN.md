@@ -149,6 +149,16 @@ prometheus_metrics_cache_interval = "5s"
 | GET/POST | `/topic-rewrites` | 主题重写 |
 | GET/POST | `/webhooks` | Webhook；`POST /webhooks/test` 为 TCP stub |
 | GET/PUT | `/bridges/{plugin}` | Bridge 状态 / 配置 / 加载卸载 |
+| GET | `/alarms` | 由健康检查 / 功能一致性 / 不可达节点派生的当前告警（内存） |
+| GET | `/alarms/history` | 已清除告警（进程内存） |
+| POST | `/alarms/{id}/acknowledge` | 确认当前告警（operator+） |
+| GET | `/logs` | 无日志查询插件（`available: false`） |
+| GET | `/trace` | 无报文追踪插件 |
+| GET | `/slow-subs` | 无慢订阅统计 |
+| GET | `/topic-metrics` | 由路由派生的订阅数；无按主题速率 |
+| GET | `/cluster` | 只读拓扑（`standalone` / `raft` / `broadcast`） |
+| POST | `/cluster/join` | 始终 501（仅启动时加入）；按节点结果 |
+| POST | `/cluster/leave` | `ferromq-cluster-raft` 的 `Plugin::send` leave，否则 501 |
 | PUT | `/plugins/{node}/{plugin}/load` | 在节点上加载/启动插件 |
 | PUT | `/plugins/{node}/{plugin}/unload` | 在节点上卸载/停止插件 |
 | **统计** | | |
@@ -243,6 +253,17 @@ prometheus_metrics_cache_interval = "5s"
 - `conflicts`：取值不一致的字段（按值分组列出节点），`consistent` 为 `true` 时为空
 - `nodes`：逐节点 `{ ok, node_id, features? / error? }`（不再使用裸错误字符串）
 - 检测到不一致时后端会输出 `features inconsistent across cluster` 警告日志
+
+### 诊断与集群（P6）
+
+| 能力 | 真实 / 缺口 |
+|------|-------------|
+| 告警 | **派生**总线（健康检查 / 功能一致性 / 不可达节点）。无独立告警插件，不落盘。 |
+| 日志 / 追踪 / 慢订阅 | `available: false`（无采集插件）。 |
+| 主题指标 | **由路由派生**的订阅数。无按主题速率。仅当加载 `ferromq-sys-topic` 时列出 `$SYS`。 |
+| 集群 GET | 真实拓扑。`/brokers` 与 `/nodes` 增加附加 `cluster` 字段。 |
+| 集群 join | **501** — `Raft::join` 仅启动时（`raft_peer_addrs`）。 |
+| 集群 leave | `ferromq-cluster-raft` 激活时真实（`Plugin::send` → `Mailbox::leave`）；否则 501。写入始终返回按节点结果。 |
 
 OpenAPI 3：`GET /api/v1/openapi.json`。可选列表信封：`?format=page` → `{ items, offset, limit, truncated, total? }`（默认仍为裸数组）。错误体：`{ code, message, details?, request_id }`。
 

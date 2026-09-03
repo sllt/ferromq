@@ -177,7 +177,7 @@ HTTP API 接受以下凭证。**MQTT 客户端认证插件不受影响。**
 
 ### 角色
 
-| 角色 | 只读 | 踢人 / 发布 / 插件配置 | 用户 / API Key / 审计 / Broker 写入 / `?reveal=1` |
+| 角色 | 只读 | 踢人 / 发布 / 插件配置 / P5 集成 / P6 告警确认与集群写入 | 用户 / API Key / 审计 / Broker 写入 / `?reveal=1` |
 |------|------|----------------------|--------------------------------------------------|
 | `admin` | 是 | 是 | 是 |
 | `operator` | 是 | 是 | 否（`403`，`required_role: admin`） |
@@ -1247,6 +1247,33 @@ curl -sS -X PUT "http://127.0.0.1:6060/api/v1/bridges/ferromq-bridge-egress-mqtt
 ```
 
 状态/错误来自已加载插件的 `attrs()`，不会虚构插件没有的能力。
+
+## 诊断与集群操作（P6）
+
+只暴露 FerroMQ **实际具备** 的能力。缺口返回结构化 `available: false`（写操作为 HTTP 501），不编造数据源。viewer 只读；operator+ 可确认告警、尝试集群写入。既有 `/brokers`、`/nodes`、`/health/check`、`/features`、`/stats`、`/metrics` 保持兼容；`/brokers` 与 `/nodes` 增加附加字段 `cluster`。
+
+| 端点 | 真实性 |
+|------|--------|
+| `GET /api/v1/alarms` / `/alarms/history` | **真实（派生）。** 内存总线，来源为健康检查、功能不一致 / 部分失败、不可达节点。进程重启丢失。没有独立告警插件。 |
+| `POST /api/v1/alarms/{id}/acknowledge` | **真实。** 确认当前告警。审计：`alarm_acknowledge`。 |
+| `GET /api/v1/logs` | **缺口。** 无日志查询插件。指向 `GET /broker/config/log`。 |
+| `GET /api/v1/trace`（含写） | **缺口。** 无报文追踪插件。写入 501。 |
+| `GET /api/v1/slow-subs` | **缺口。** 无慢订阅时延统计。 |
+| `GET /api/v1/topic-metrics` | **部分。** `available: true`，`kind: route_derived`。订阅数来自主题路由（同 `/routes`）。**没有按主题的速率。** 仅当加载 `ferromq-sys-topic` 时列出 `$SYS/brokers/{id}/stats\|metrics`。 |
+| `GET /api/v1/cluster` | **真实（只读拓扑）。** `mode`：`standalone` / `raft` / `broadcast`。`membership.join` / `leave` 标明写接口是否存在。 |
+| `POST /api/v1/cluster/join` | **501。** `Raft::join` 只在 `ferromq-cluster-raft` 启动时消费（`raft_peer_addrs`）。`details.nodes` 始终为按节点结果。 |
+| `POST /api/v1/cluster/leave` | **仅 Raft。** 转发 `Plugin::send({"op":"leave"})` → `Mailbox::leave`（本节点）。broadcast / 单机为 501。始终按节点返回。审计：`cluster_leave`。 |
+
+```bash
+curl -sS http://127.0.0.1:6060/api/v1/alarms
+curl -sS http://127.0.0.1:6060/api/v1/logs
+# {"available":false,"kind":"logs",...}
+curl -sS http://127.0.0.1:6060/api/v1/cluster
+curl -sS -X POST http://127.0.0.1:6060/api/v1/cluster/join
+# HTTP 501，details.nodes 为按节点结果
+```
+
+`GET /brokers` / `GET /nodes` 增加 `cluster: { mode, plugin, leader_id, role, peers }`，不删除原有字段。
 
 ### PUT /api/v1/plugins/{node}/{plugin}/config/reload
 

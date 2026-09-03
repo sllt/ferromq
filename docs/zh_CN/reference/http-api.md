@@ -68,6 +68,11 @@ prometheus_metrics_cache_interval = "5s"
 | `GET` / `POST` | `/api/v1/topic-rewrites` | 主题重写 |
 | `GET` / `POST` | `/api/v1/webhooks` / `.../urls` / `.../test` | Webhook（密钥脱敏；test 为 TCP stub） |
 | `GET` / `PUT` | `/api/v1/bridges` / `{plugin}` | Bridge 状态 + P4 配置写入 |
+| `GET` | `/api/v1/alarms` | 派生告警（健康检查 / 功能 / 不可达节点） |
+| `GET` | `/api/v1/logs` / `/trace` / `/slow-subs` | 无采集插件（`available: false`） |
+| `GET` | `/api/v1/topic-metrics` | 由路由派生的订阅数 |
+| `GET` | `/api/v1/cluster` | 只读拓扑 |
+| `POST` | `/api/v1/cluster/join` / `leave` | join 始终 501；leave 仅 raft |
 | `GET` | `/api/v1/stats` | 统计信息 |
 | `GET` | `/api/v1/metrics` | 指标（JSON） |
 | `GET` | `/api/v1/metrics/prometheus` | 指标（Prometheus 格式） |
