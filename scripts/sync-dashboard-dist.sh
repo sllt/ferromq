@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$ROOT/ferromq-plugins/ferromq-http-api/dashboard-dist"
 REPO="${FERROMQ_DASHBOARD_REPO:-https://github.com/sllt/ferromq-dashboard}"
-REF="${FERROMQ_DASHBOARD_REF:-cursor/ferromq-p6-diagnostics-cluster-2bc6}"
+REF="${FERROMQ_DASHBOARD_REF:-cursor/ferromq-p7-release-quality-586c}"
 WORKDIR="${TMPDIR:-/tmp}/ferromq-dashboard-sync-$$"
 
 if ! command -v pnpm >/dev/null 2>&1; then
