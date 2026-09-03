@@ -10,7 +10,7 @@ English | [简体中文](../zh_CN/benchmark-testing.md)
 | Disk        |                                           | 2T                                                              |
 | Container   | podman                                    | v4.4.1                                                          |
 | MQTT Bench  | docker.io/rmqtt/rmqtt-bench:latest        | v0.1.3                                                          |
-| MQTT Broker | docker.io/ferromq/ferromq:latest              | v0.21.0                                                        |
+| MQTT Broker | docker.io/sllt/ferromq:latest              | v0.21.0                                                        |
 | Other       | MQTT Bench and MQTT Broker coexistence    |                                                                 |
 
 
@@ -77,7 +77,7 @@ podman network create compose_ferromq_bridge1
 
 Podman command for a single-instance Broker:
 ```
-podman run  -d --name ferromq1 --privileged --ulimit nofile=1024000 --network="compose_ferromq_bridge1" --network-alias="node1.ferromq.local" -p 1884:1883 -p 8884:8883 -p 21884:11883 -p 7064:6060 -v /home/dev/app/compose/log/1:/var/log/ferromq -v /home/dev/app/compose/etc:/app/ferromq/etc  ferromq/ferromq:latest -f ./etc/ferromq.toml --id 1
+podman run  -d --name ferromq1 --privileged --ulimit nofile=1024000 --network="compose_ferromq_bridge1" --network-alias="node1.ferromq.local" -p 1884:1883 -p 8884:8883 -p 21884:11883 -p 7064:6060 -v /home/dev/app/compose/log/1:/var/log/ferromq -v /home/dev/app/compose/etc:/app/ferromq/etc  sllt/ferromq:latest -f ./etc/ferromq.toml --id 1
 ```
 
 Generate a 'podman-compose' configuration script for a single-instance subscription client:
@@ -397,9 +397,9 @@ podman network create compose_ferromq_bridge11
 
 Podman command for the Broker:
 ```
-podman run -d --name ferromq1 --privileged --ulimit nofile=1024000 --network="compose_ferromq_bridge11" --network-alias="node14.ferromq.local" -p 1884:1883 -p 8884:8883 -p 21884:11883 -p 7064:6060 -v /home/dev/app/compose/log/1:/var/log/ferromq -v /home/dev/app/compose/etc:/app/ferromq/etc  ferromq/ferromq:latest -f ./etc/ferromq.toml --id 1
-podman run -d --name ferromq2 --privileged --ulimit nofile=1024000 --network="compose_ferromq_bridge11" --network-alias="node15.ferromq.local"  -p 1885:1883 -p 8885:8883 -p 11885:11883 -p 7065:6060 -v /home/try/app/compose/log/2:/var/log/ferromq -v /home/try/app/compose/etc:/app/ferromq/etc  ferromq/ferromq:latest -f ./etc/ferromq.toml --id 2
-podman run -d --name ferromq3 --privileged --ulimit nofile=1024000 --network="compose_ferromq_bridge11" --network-alias="node16.ferromq.local"  -p 1886:1883 -p 8886:8883 -p 11886:11883 -p 7066:6060 -v /home/try/app/compose/log/3:/var/log/ferromq -v /home/try/app/compose/etc:/app/ferromq/etc  ferromq/ferromq:latest -f ./etc/ferromq.toml --id 3
+podman run -d --name ferromq1 --privileged --ulimit nofile=1024000 --network="compose_ferromq_bridge11" --network-alias="node14.ferromq.local" -p 1884:1883 -p 8884:8883 -p 21884:11883 -p 7064:6060 -v /home/dev/app/compose/log/1:/var/log/ferromq -v /home/dev/app/compose/etc:/app/ferromq/etc  sllt/ferromq:latest -f ./etc/ferromq.toml --id 1
+podman run -d --name ferromq2 --privileged --ulimit nofile=1024000 --network="compose_ferromq_bridge11" --network-alias="node15.ferromq.local"  -p 1885:1883 -p 8885:8883 -p 11885:11883 -p 7065:6060 -v /home/try/app/compose/log/2:/var/log/ferromq -v /home/try/app/compose/etc:/app/ferromq/etc  sllt/ferromq:latest -f ./etc/ferromq.toml --id 2
+podman run -d --name ferromq3 --privileged --ulimit nofile=1024000 --network="compose_ferromq_bridge11" --network-alias="node16.ferromq.local"  -p 1886:1883 -p 8886:8883 -p 11886:11883 -p 7066:6060 -v /home/try/app/compose/log/3:/var/log/ferromq -v /home/try/app/compose/etc:/app/ferromq/etc  sllt/ferromq:latest -f ./etc/ferromq.toml --id 3
 ```
 
 

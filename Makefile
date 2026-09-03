@@ -1,4 +1,4 @@
-IMAGE ?= ferromq/ferromq
+IMAGE ?= sllt/ferromq
 VERSION ?= $(shell awk '/^\[workspace.package\]/{in_pkg=1; next} /^\[/{in_pkg=0} in_pkg && /^version = /{gsub(/"/, "", $$3); print $$3; exit}' Cargo.toml)
 
 all: release
@@ -6,7 +6,7 @@ all: release
 release:
 	cargo build -p ferromqd --release
 
-# Docker image name ferromq/ferromq is the planned default; confirm the org before push.
+# Docker image target: Docker Hub sllt/ferromq.
 
 release-amd64:
 	cargo build -p ferromqd --release --target x86_64-unknown-linux-musl

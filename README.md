@@ -65,21 +65,23 @@ x86_64 architecture servers and ARM devices like Raspberry Pi.
 
 #### Run FerroMQ using Docker
 
+> The image will be published to Docker Hub as `sllt/ferromq`. The commands below become available after the first image push.
+
 * Single node
 
 ```bash
 mkdir -p /app/log/ferromq
-docker run -d --name ferromq -p 1883:1883 -p 8883:8883 -p 11883:11883 -p 6060:6060 -v /app/log/ferromq:/var/log/ferromq  ferromq/ferromq:latest
+docker run -d --name ferromq -p 1883:1883 -p 8883:8883 -p 11883:11883 -p 6060:6060 -v /app/log/ferromq:/var/log/ferromq  sllt/ferromq:latest
 ```
 
 * Multi node
 
 ```bash
-  docker run -d --name ferromq1 -p 1884:1883 -p 8884:8883 -p 11884:11883 -p 6064:6060 -v /app/log/ferromq/1:/var/log/ferromq  ferromq/ferromq:latest --id 1 --plugins-default-startups "ferromq-cluster-raft" --node-grpc-addrs "1@172.17.0.3:5363" "2@172.17.0.4:5363" "3@172.17.0.5:5363" --raft-peer-addrs "1@172.17.0.3:6003" "2@172.17.0.4:6003" "3@172.17.0.5:6003"
+  docker run -d --name ferromq1 -p 1884:1883 -p 8884:8883 -p 11884:11883 -p 6064:6060 -v /app/log/ferromq/1:/var/log/ferromq  sllt/ferromq:latest --id 1 --plugins-default-startups "ferromq-cluster-raft" --node-grpc-addrs "1@172.17.0.3:5363" "2@172.17.0.4:5363" "3@172.17.0.5:5363" --raft-peer-addrs "1@172.17.0.3:6003" "2@172.17.0.4:6003" "3@172.17.0.5:6003"
 
-  docker run -d --name ferromq2 -p 1885:1883 -p 8885:8883 -p 11885:11883 -p 6065:6060 -v /app/log/ferromq/2:/var/log/ferromq  ferromq/ferromq:latest --id 2 --plugins-default-startups "ferromq-cluster-raft" --node-grpc-addrs "1@172.17.0.3:5363" "2@172.17.0.4:5363" "3@172.17.0.5:5363" --raft-peer-addrs "1@172.17.0.3:6003" "2@172.17.0.4:6003" "3@172.17.0.5:6003"
+  docker run -d --name ferromq2 -p 1885:1883 -p 8885:8883 -p 11885:11883 -p 6065:6060 -v /app/log/ferromq/2:/var/log/ferromq  sllt/ferromq:latest --id 2 --plugins-default-startups "ferromq-cluster-raft" --node-grpc-addrs "1@172.17.0.3:5363" "2@172.17.0.4:5363" "3@172.17.0.5:5363" --raft-peer-addrs "1@172.17.0.3:6003" "2@172.17.0.4:6003" "3@172.17.0.5:6003"
 
-  docker run -d --name ferromq3 -p 1886:1883 -p 8886:8883 -p 11886:11883 -p 6066:6060 -v /app/log/ferromq/3:/var/log/ferromq  ferromq/ferromq:latest --id 3 --plugins-default-startups "ferromq-cluster-raft" --node-grpc-addrs "1@172.17.0.3:5363" "2@172.17.0.4:5363" "3@172.17.0.5:5363" --raft-peer-addrs "1@172.17.0.3:6003" "2@172.17.0.4:6003" "3@172.17.0.5:6003"
+  docker run -d --name ferromq3 -p 1886:1883 -p 8886:8883 -p 11886:11883 -p 6066:6060 -v /app/log/ferromq/3:/var/log/ferromq  sllt/ferromq:latest --id 3 --plugins-default-startups "ferromq-cluster-raft" --node-grpc-addrs "1@172.17.0.3:5363" "2@172.17.0.4:5363" "3@172.17.0.5:5363" --raft-peer-addrs "1@172.17.0.3:6003" "2@172.17.0.4:6003" "3@172.17.0.5:6003"
 ```
 
 Node IDs: 1, 2, 3; Node IP Addrs: 172.17.0.3, 172.17.0.4, 172.17.0.5
@@ -93,7 +95,7 @@ version: '3'
 services:
   ferromq:
     container_name: ferromq
-    image: ferromq/ferromq:latest
+    image: sllt/ferromq:latest
     volumes:
       - /etc/localtime:/etc/localtime
       - /app/ferromq-single/etc/:/app/ferromq/etc
