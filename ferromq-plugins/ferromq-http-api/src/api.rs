@@ -44,14 +44,16 @@ use salvo::serve_static::{static_embed, StaticDir};
 
 use super::embed::DashboardAssets;
 use super::flusher::{HistoryCache, HistoryCaches};
+use super::openapi::{get_docs, get_openapi};
 use super::prome::{Monitor, PROME_MONITOR};
 use super::response::{
-    apply_list_headers, render_api_error, render_not_found, status_for_plugin_error, subscription_to_json,
-    ListPaging,
+    apply_list_headers, cluster_node_failure, cluster_node_success, new_request_id, render_api_error,
+    render_list, render_not_found, status_for_plugin_error, subscription_to_json, wants_page_format,
+    ListPaging, DEPOT_REQUEST_ID, HEADER_REQUEST_ID,
 };
 use super::types::{
     ClientSearchParams, ClientSearchResult, FeatureConflict, FeatureValueGroup, Features, FeaturesInfo,
-    FeaturesInfoOrError, FeaturesSummary, HistoryData, HistoryQuery, Message, MessageReply,
+    FeaturesNodeResult, FeaturesSummary, HistoryData, HistoryQuery, Message, MessageReply,
     PrometheusDataType, PublishParams, RetainInfo, RetainQueryParams, SubscribeParams, UnsubscribeParams,
 };
 use super::{clients, plugin, prome, subs, PluginConfigType};
@@ -90,6 +92,7 @@ pub(crate) fn route(
     let mut router = Router::with_path("api/v1")
         .hoop(affix_state::inject((scx, cfg)))
         .hoop(affix_state::insert(PROME_MONITOR, monitor))
+        .hoop(request_id_hoop)
         .hoop(api_logger);
     if let Some(token) = token {
         router = router.hoop(BearerValidator::new(&token));
@@ -100,6 +103,8 @@ pub(crate) fn route(
     }
     router
         .get(list_apis)
+        .push(Router::with_path("openapi.json").get(get_openapi))
+        .push(Router::with_path("docs").get(get_docs))
         .push(Router::with_path("brokers").get(get_brokers).push(Router::with_path("{id}").get(get_brokers)))
         .push(Router::with_path("nodes").get(get_nodes).push(Router::with_path("{id}").get(get_nodes)))
         .push(
@@ -274,8 +279,30 @@ fn bind(
 }
 
 #[handler]
+async fn request_id_hoop(req: &mut Request, depot: &mut Depot, res: &mut Response, ctrl: &mut FlowCtrl) {
+    let id = req.header::<String>("x-request-id").filter(|s| !s.is_empty()).unwrap_or_else(new_request_id);
+    depot.insert(DEPOT_REQUEST_ID, id.clone());
+    if let Ok(v) = HeaderValue::from_str(&id) {
+        res.add_header(HEADER_REQUEST_ID, v, true).ok();
+    }
+    ctrl.call_next(req, depot, res).await;
+}
+
+#[handler]
 async fn list_apis(res: &mut Response) {
     let data = serde_json::json!([
+        {
+            "name": "get_openapi",
+            "method": "GET",
+            "path": "/api/v1/openapi.json",
+            "descr": "OpenAPI 3 document for the /api/v1 management surface"
+        },
+        {
+            "name": "get_docs",
+            "method": "GET",
+            "path": "/api/v1/docs",
+            "descr": "Swagger UI for the OpenAPI document"
+        },
         {
             "name": "get_brokers",
             "method": "GET",
@@ -613,24 +640,25 @@ async fn _get_broker(
             )
             .send()
             .await;
-            let broker_info = match reply {
+            match reply {
                 Ok(GrpcMessageReply::Data(msg)) => match MessageReply::decode(&msg)? {
-                    MessageReply::BrokerInfo(broker_info) => broker_info.to_json(),
+                    MessageReply::BrokerInfo(broker_info) => {
+                        Ok(Some(cluster_node_success(broker_info.to_json())))
+                    }
                     _ => {
                         log::error!("unreachable!(), msg: {msg:?}");
-                        serde_json::Value::String("unreachable!()".into())
+                        Err(anyhow!("unreachable!()"))
                     }
                 },
                 Ok(reply) => {
                     log::info!("Get GrpcMessage::BrokerInfo from other node({id}), reply: {reply:?}");
-                    serde_json::Value::String("Invalid Result".into())
+                    Err(anyhow!("Invalid Result"))
                 }
                 Err(e) => {
                     log::warn!("Get GrpcMessage::BrokerInfo from other node, error: {e}");
-                    serde_json::Value::String(e.to_string())
+                    Err(e)
                 }
-            };
-            Ok(Some(broker_info))
+            }
         } else {
             Ok(None)
         }
@@ -639,7 +667,7 @@ async fn _get_broker(
 
 #[inline]
 async fn _get_brokers(scx: &ServerContext, message_type: MessageType) -> Result<Vec<serde_json::Value>> {
-    let mut brokers = vec![scx.node.broker_info(scx).await.to_json()];
+    let mut brokers = vec![cluster_node_success(scx.node.broker_info(scx).await.to_json())];
     let grpc_clients = scx.extends.shared().await.get_grpc_clients();
     if !grpc_clients.is_empty() {
         let msg = Message::BrokerInfo.encode()?;
@@ -654,7 +682,7 @@ async fn _get_brokers(scx: &ServerContext, message_type: MessageType) -> Result<
         .drain(..)
         .map(|reply| match reply {
             (_, Ok(GrpcMessageReply::Data(msg))) => match MessageReply::decode(&msg) {
-                Ok(MessageReply::BrokerInfo(broker_info)) => Ok(broker_info.to_json()),
+                Ok(MessageReply::BrokerInfo(broker_info)) => Ok(cluster_node_success(broker_info.to_json())),
                 Err(e) => Err(e),
                 _ => {
                     log::error!("unreachable!(), msg: {msg:?}");
@@ -663,11 +691,11 @@ async fn _get_brokers(scx: &ServerContext, message_type: MessageType) -> Result<
             },
             (id, Ok(reply)) => {
                 log::info!("Get GrpcMessage::BrokerInfo from other node({id}), reply: {reply:?}");
-                Ok(serde_json::Value::String("Invalid Result".into()))
+                Ok(cluster_node_failure(id, "Invalid Result"))
             }
             (id, Err(e)) => {
                 log::warn!("Get GrpcMessage::BrokerInfo from other node({id}), error: {e}");
-                Ok(serde_json::Value::String(e.to_string()))
+                Ok(cluster_node_failure(id, e))
             }
         })
         .collect::<Result<Vec<_>>>()?;
@@ -701,10 +729,10 @@ async fn get_nodes(
                 for item in node_infos {
                     match item {
                         Ok(node_info) => {
-                            nodes.push(node_info.to_json());
+                            nodes.push(cluster_node_success(node_info.to_json()));
                         }
-                        Err(e) => {
-                            nodes.push(serde_json::Value::String(e.to_string()));
+                        Err((id, e)) => {
+                            nodes.push(cluster_node_failure(id, e));
                         }
                     }
                 }
@@ -746,7 +774,7 @@ async fn _get_nodes(scx: &ServerContext, message_type: MessageType) -> Result<Ve
             }
             (id, Err(e)) => {
                 log::warn!("Get GrpcMessage::NodeInfo from other node({id}), error: {e}");
-                Ok(serde_json::Value::String(e.to_string()))
+                Ok(cluster_node_failure(id, e))
             }
         })
         .collect::<Result<Vec<_>>>()?;
@@ -802,7 +830,7 @@ pub(crate) async fn get_node(
 pub(crate) async fn get_nodes_all(
     scx: &ServerContext,
     message_type: MessageType,
-) -> Result<Vec<Result<NodeInfo>>> {
+) -> Result<Vec<std::result::Result<NodeInfo, (NodeId, anyhow::Error)>>> {
     let mut nodes = vec![Ok(scx.node.node_info(scx).await)];
     let grpc_clients = scx.extends.shared().await.get_grpc_clients();
     if !grpc_clients.is_empty() {
@@ -827,11 +855,11 @@ pub(crate) async fn get_nodes_all(
             },
             (id, Ok(reply)) => {
                 log::info!("Get GrpcMessage::NodeInfo from other node({id}), reply: {reply:?}");
-                Err(anyhow!("Invalid Result"))
+                Ok(Err((id, anyhow!("Invalid Result"))))
             }
             (id, Err(e)) => {
                 log::warn!("Get GrpcMessage::NodeInfo from other node({id}), error: {e}");
-                Ok(Err(e))
+                Ok(Err((id, e)))
             }
         })
         .collect::<Result<Vec<_>>>()?;
@@ -904,11 +932,8 @@ async fn get_feature(
 
 /// Query the feature support state of all cluster nodes.
 #[inline]
-async fn get_features_all(
-    scx: &ServerContext,
-    message_type: MessageType,
-) -> Result<Vec<Result<FeaturesInfo>>> {
-    let mut features = vec![Ok(build_features(scx).await)];
+async fn get_features_all(scx: &ServerContext, message_type: MessageType) -> Result<Vec<FeaturesNodeResult>> {
+    let mut features = vec![FeaturesNodeResult::ok(build_features(scx).await)];
     let grpc_clients = scx.extends.shared().await.get_grpc_clients();
     if !grpc_clients.is_empty() {
         let msg = Message::Features.encode()?;
@@ -923,7 +948,7 @@ async fn get_features_all(
         .drain(..)
         .map(|reply| match reply {
             (_, Ok(GrpcMessageReply::Data(msg))) => match MessageReply::decode(&msg) {
-                Ok(MessageReply::Features(features_info)) => Ok(Ok(features_info)),
+                Ok(MessageReply::Features(features_info)) => Ok(FeaturesNodeResult::ok(features_info)),
                 Err(e) => Err(e),
                 _ => {
                     log::error!("unreachable!(), msg: {msg:?}");
@@ -932,11 +957,11 @@ async fn get_features_all(
             },
             (id, Ok(reply)) => {
                 log::info!("Get GrpcMessage::Features from other node({id}), reply: {reply:?}");
-                Err(anyhow!("Invalid Result"))
+                Ok(FeaturesNodeResult::err(id, "Invalid Result"))
             }
             (id, Err(e)) => {
                 log::warn!("Get GrpcMessage::Features from other node({id}), error: {e}");
-                Ok(Err(e))
+                Ok(FeaturesNodeResult::err(id, e.to_string()))
             }
         })
         .collect::<Result<Vec<_>>>()?;
@@ -986,6 +1011,21 @@ fn summarize_features(successes: &[FeaturesInfo]) -> (bool, Vec<FeatureConflict>
     (conflicts.is_empty(), conflicts)
 }
 
+/// OR-aggregate feature flags across reachable nodes (dashboard menu gating).
+#[inline]
+fn aggregate_enabled(successes: &[FeaturesInfo]) -> Features {
+    let mut enabled = Features::default();
+    for info in successes {
+        enabled.retain |= info.features.retain;
+        enabled.message_storage |= info.features.message_storage;
+        enabled.session_storage |= info.features.session_storage;
+        enabled.delayed |= info.features.delayed;
+        enabled.shared_subscription |= info.features.shared_subscription;
+        enabled.auto_subscription |= info.features.auto_subscription;
+    }
+    enabled
+}
+
 /// Query which broker features are supported.
 ///
 /// `GET /api/v1/features` returns the feature support state of every cluster
@@ -1011,16 +1051,20 @@ async fn get_features(
         }
     } else {
         match get_features_all(scx, message_type).await {
-            Ok(features_infos) => {
-                let mut nodes: Vec<FeaturesInfoOrError> = Vec::with_capacity(features_infos.len());
+            Ok(nodes) => {
                 let mut successes: Vec<FeaturesInfo> = Vec::new();
-                for item in features_infos {
-                    match item {
-                        Ok(features_info) => {
-                            successes.push(features_info.clone());
-                            nodes.push(FeaturesInfoOrError::Info(features_info));
+                let mut failed_count = 0usize;
+                for item in &nodes {
+                    if item.ok {
+                        if let Some(features) = item.features.clone() {
+                            successes.push(FeaturesInfo {
+                                node_id: item.node_id,
+                                node_name: item.node_name.clone().unwrap_or_default(),
+                                features,
+                            });
                         }
-                        Err(e) => nodes.push(FeaturesInfoOrError::Error(e.to_string())),
+                    } else {
+                        failed_count += 1;
                     }
                 }
                 let (consistent, conflicts) = summarize_features(&successes);
@@ -1034,6 +1078,9 @@ async fn get_features(
                 res.render(Json(FeaturesSummary {
                     consistent,
                     node_count: successes.len(),
+                    failed_count,
+                    partial: failed_count > 0,
+                    enabled: aggregate_enabled(&successes),
                     conflicts,
                     nodes,
                 }))
@@ -1210,8 +1257,7 @@ async fn search_clients(
         Ok(replys) => {
             let (page, truncated) = paging.apply(replys);
             let replys = page.iter().map(|res| res.to_json()).collect::<Vec<_>>();
-            apply_list_headers(res, replys.len(), truncated);
-            res.render(Json(replys))
+            render_list(req, res, replys, paging, truncated, None);
         }
         Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
     }
@@ -1242,8 +1288,7 @@ async fn search_offlines(
         Ok(replys) => {
             let (page, truncated) = paging.apply(replys);
             let replys = page.iter().map(|res| res.to_json()).collect::<Vec<_>>();
-            apply_list_headers(res, replys.len(), truncated);
-            res.render(Json(replys))
+            render_list(req, res, replys, paging, truncated, None);
         }
         Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
     }
@@ -1424,8 +1469,7 @@ async fn query_subscriptions(
         .map(|res| subscription_to_json(res.to_json()))
         .collect::<Vec<serde_json::Value>>();
     let (page, truncated) = paging.apply(replys);
-    apply_list_headers(res, page.len(), truncated);
-    res.render(Json(page));
+    render_list(req, res, page, paging, truncated, None);
     Ok(())
 }
 
@@ -1444,8 +1488,8 @@ async fn get_client_subscriptions(
                 .into_iter()
                 .map(|res| subscription_to_json(res.to_json()))
                 .collect::<Vec<serde_json::Value>>();
-            apply_list_headers(res, subs.len(), false);
-            res.render(Json(subs));
+            let paging = ListPaging::new(0, subs.len(), subs.len().max(1));
+            render_list(req, res, subs, paging, false, None);
         } else {
             render_not_found(res, "client not found");
         }
@@ -1467,8 +1511,7 @@ async fn get_routes(
     let paging = ListPaging::from_request(req, requested, max_row_limit);
     let replys = scx.extends.router().await.gets(paging.fetch_limit).await;
     let (page, truncated) = paging.apply(replys);
-    apply_list_headers(res, page.len(), truncated);
-    res.render(Json(page));
+    render_list(req, res, page, paging, truncated, None);
     Ok(())
 }
 
@@ -1483,8 +1526,8 @@ async fn get_route(
     if let Some(topic) = topic {
         match scx.extends.router().await.get(&topic).await {
             Ok(replys) => {
-                apply_list_headers(res, replys.len(), false);
-                res.render(Json(replys))
+                let paging = ListPaging::new(0, replys.len(), replys.len().max(1));
+                render_list(req, res, replys, paging, false, None);
             }
             Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         }
@@ -1562,7 +1605,17 @@ async fn get_retains(
     };
 
     apply_list_headers(res, items.len(), has_more);
-    res.render(Json(json!({"items": items, "has_more": has_more})));
+    if wants_page_format(req) {
+        res.render(Json(json!({
+            "items": items,
+            "has_more": has_more,
+            "offset": q.offset,
+            "limit": q.limit,
+            "truncated": has_more,
+        })));
+    } else {
+        res.render(Json(json!({"items": items, "has_more": has_more})));
+    }
     Ok(())
 }
 
@@ -1949,14 +2002,21 @@ async fn _unsubscribe_on_other_node(
 }
 
 #[handler]
-async fn all_plugins(depot: &mut Depot, res: &mut Response) -> std::result::Result<(), salvo::Error> {
+async fn all_plugins(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+) -> std::result::Result<(), salvo::Error> {
     let (scx, cfg) = get_scx_cfg(depot)?;
     let message_type = cfg.read().await.message_type;
+    let max_row_limit = cfg.read().await.max_row_limit;
+    let requested = req.query::<usize>("_limit").or_else(|| req.query::<usize>("limit")).unwrap_or(0);
+    let paging = ListPaging::from_request(req, requested, max_row_limit);
 
     match _all_plugins(scx, message_type).await {
         Ok(pluginss) => {
-            apply_list_headers(res, pluginss.len(), false);
-            res.render(Json(pluginss))
+            let (page, truncated) = paging.apply(pluginss);
+            render_list(req, res, page, paging, truncated, None);
         }
         Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
     }
@@ -1970,6 +2030,7 @@ async fn _all_plugins(scx: &ServerContext, message_type: MessageType) -> Result<
     let plugins = plugin::get_plugins(scx).await?;
     let plugins = plugins.into_iter().map(|p| p.to_json()).collect::<Result<Vec<_>>>()?;
     pluginss.push(json!({
+        "ok": true,
         "node": node_id,
         "plugins": plugins,
     }));
@@ -1986,28 +2047,51 @@ async fn _all_plugins(scx: &ServerContext, message_type: MessageType) -> Result<
         .join_all()
         .await
         .drain(..)
-        .map(|(node_id, reply)| {
-            let plugins = match reply {
-                Ok(GrpcMessageReply::Data(reply_msg)) => match MessageReply::decode(&reply_msg) {
-                    Ok(MessageReply::GetPlugins(plugins)) => {
-                        match plugins.into_iter().map(|p| p.to_json()).collect::<Result<Vec<_>>>() {
-                            Ok(plugins) => serde_json::Value::Array(plugins),
-                            Err(e) => serde_json::Value::String(e.to_string()),
-                        }
+        .map(|(node_id, reply)| match reply {
+            Ok(GrpcMessageReply::Data(reply_msg)) => match MessageReply::decode(&reply_msg) {
+                Ok(MessageReply::GetPlugins(plugins)) => {
+                    match plugins.into_iter().map(|p| p.to_json()).collect::<Result<Vec<_>>>() {
+                        Ok(plugins) => json!({
+                            "ok": true,
+                            "node": node_id,
+                            "plugins": plugins,
+                        }),
+                        Err(e) => json!({
+                            "ok": false,
+                            "node": node_id,
+                            "plugins": [],
+                            "error": e.to_string(),
+                        }),
                     }
-                    Err(e) => serde_json::Value::String(e.to_string()),
-                    _ => {
-                        log::error!("unreachable!(), reply_msg: {reply_msg:?}");
-                        serde_json::Value::String("unreachable!()".into())
-                    }
-                },
-                Ok(_) => serde_json::Value::String("Invalid Result".into()),
-                Err(e) => serde_json::Value::String(e.to_string()),
-            };
-            json!({
+                }
+                Err(e) => json!({
+                    "ok": false,
+                    "node": node_id,
+                    "plugins": [],
+                    "error": e.to_string(),
+                }),
+                _ => {
+                    log::error!("unreachable!(), reply_msg: {reply_msg:?}");
+                    json!({
+                        "ok": false,
+                        "node": node_id,
+                        "plugins": [],
+                        "error": "unreachable!()",
+                    })
+                }
+            },
+            Ok(_) => json!({
+                "ok": false,
                 "node": node_id,
-                "plugins": plugins,
-            })
+                "plugins": [],
+                "error": "Invalid Result",
+            }),
+            Err(e) => json!({
+                "ok": false,
+                "node": node_id,
+                "plugins": [],
+                "error": e.to_string(),
+            }),
         })
         .collect::<Vec<_>>();
         pluginss.extend(replys);
@@ -2029,10 +2113,13 @@ async fn node_plugins(
         render_not_found(res, "node not found");
         return Ok(());
     };
+    let max_row_limit = cfg.read().await.max_row_limit;
+    let requested = req.query::<usize>("_limit").or_else(|| req.query::<usize>("limit")).unwrap_or(0);
+    let paging = ListPaging::from_request(req, requested, max_row_limit);
     match _node_plugins(scx, node_id, message_type).await {
         Ok(plugins) => {
-            apply_list_headers(res, plugins.len(), false);
-            res.render(Json(plugins))
+            let (page, truncated) = paging.apply(plugins);
+            render_list(req, res, page, paging, truncated, None);
         }
         Err(e) => render_api_error(res, status_for_plugin_error(&e), e.to_string()),
     }
@@ -2406,6 +2493,7 @@ async fn _get_stats_sum(
     nodes.insert(
         this_id,
         json!({
+            "ok": true,
             "name": scx.node.name(scx,this_id).await,
             "running": scx.node.status(scx).await.is_running(),
         }),
@@ -2430,6 +2518,7 @@ async fn _get_stats_sum(
                         nodes.insert(
                             id,
                             json!({
+                                "ok": true,
                                 "name": scx.node.name(scx, id).await,
                                 "running": node_status.is_running(),
                             }),
@@ -2447,7 +2536,7 @@ async fn _get_stats_sum(
                 }
                 (id, Err(e)) => {
                     log::warn!("Get GrpcMessage::StateInfo from other node({id}), error: {e}");
-                    nodes.insert(id, serde_json::Value::String(e.to_string()));
+                    nodes.insert(id, cluster_node_failure(id, e));
                 }
             };
         }
@@ -2494,8 +2583,12 @@ async fn get_stats(
                             stat_infos
                                 .push(_build_stats(scx, id, node_status, state.to_json(scx).await).await);
                         }
-                        Err(e) => {
-                            stat_infos.push(serde_json::Value::String(e.to_string()));
+                        Err((id, e)) => {
+                            stat_infos.push(json!({
+                                "ok": false,
+                                "node": { "id": id },
+                                "error": e.to_string(),
+                            }));
                         }
                     }
                 }
@@ -2556,11 +2649,10 @@ pub(crate) async fn get_stats_one(
 pub(crate) async fn get_stats_all(
     scx: &ServerContext,
     message_type: MessageType,
-) -> Result<Vec<Result<(NodeId, NodeStatus, Box<Stats>)>>> {
+) -> Result<Vec<std::result::Result<(NodeId, NodeStatus, Box<Stats>), (NodeId, anyhow::Error)>>> {
     let id = scx.node.id();
     let node_status = scx.node.status(scx).await;
     let state = scx.stats.clone(scx).await;
-    //let mut stats = vec![_build_stats(id, node_status, state).await];
     let mut stats = vec![Ok((id, node_status, Box::new(state)))];
 
     let grpc_clients = scx.extends.shared().await.get_grpc_clients();
@@ -2580,16 +2672,16 @@ pub(crate) async fn get_stats_all(
                     MessageReply::StatsInfo(node_status, stats) => Ok((id, node_status, stats)),
                     _ => {
                         log::error!("unreachable!(), msg: {msg:?}");
-                        Err(anyhow!("unreachable!()"))
+                        return Err(anyhow!("unreachable!()"));
                     }
                 },
                 (id, Ok(reply)) => {
                     log::info!("Get GrpcMessage::StateInfo from other node({id}), reply: {reply:?}");
-                    continue;
+                    Err((id, anyhow!("Invalid Result")))
                 }
                 (id, Err(e)) => {
                     log::warn!("Get GrpcMessage::StateInfo from other node({id}), error: {e}");
-                    Err(e)
+                    Err((id, e))
                 }
             };
             stats.push(data);
@@ -2606,15 +2698,15 @@ async fn _build_stats(
     stats: serde_json::Value,
 ) -> serde_json::Value {
     let node_name = scx.node.name(scx, id).await;
-    let data = json!({
+    json!({
+        "ok": true,
         "node": {
             "id": id,
             "name": node_name,
             "running": node_status.is_running(),
         },
         "stats": stats
-    });
-    data
+    })
 }
 
 #[handler]
@@ -2648,8 +2740,12 @@ async fn get_sys_stats(
                             stat_infos
                                 .push(_build_stats(scx, id, node_status, state.to_sys_json(scx).await).await);
                         }
-                        Err(e) => {
-                            stat_infos.push(serde_json::Value::String(e.to_string()));
+                        Err((id, e)) => {
+                            stat_infos.push(json!({
+                                "ok": false,
+                                "node": { "id": id },
+                                "error": e.to_string(),
+                            }));
                         }
                     }
                 }
@@ -2705,8 +2801,12 @@ async fn get_metrics(
                         Ok((id, metrics)) => {
                             metrics_infos.push(_build_metrics(scx, id, metrics.to_json()).await);
                         }
-                        Err(e) => {
-                            metrics_infos.push(serde_json::Value::String(e.to_string()));
+                        Err((id, e)) => {
+                            metrics_infos.push(json!({
+                                "ok": false,
+                                "node": { "id": id },
+                                "error": e.to_string(),
+                            }));
                         }
                     }
                 }
@@ -2766,7 +2866,7 @@ pub(crate) async fn get_metrics_one(
 pub(crate) async fn get_metrics_all(
     scx: &ServerContext,
     message_type: MessageType,
-) -> Result<Vec<Result<(NodeId, Box<Metrics>)>>> {
+) -> Result<Vec<std::result::Result<(NodeId, Box<Metrics>), (NodeId, anyhow::Error)>>> {
     let id = scx.node.id();
     let mut metricses = vec![Ok((id, Box::new(scx.metrics.clone())))];
 
@@ -2787,16 +2887,16 @@ pub(crate) async fn get_metrics_all(
                     MessageReply::MetricsInfo(metrics) => Ok((id, metrics)),
                     _ => {
                         log::error!("unreachable!(), msg: {msg:?}");
-                        Err(anyhow!("unreachable!()"))
+                        return Err(anyhow!("unreachable!()"));
                     }
                 },
                 (id, Ok(reply)) => {
                     log::info!("Get GrpcMessage::MetricsInfo from other node({id}), reply: {reply:?}");
-                    continue;
+                    Err((id, anyhow!("Invalid Result")))
                 }
                 (id, Err(e)) => {
                     log::warn!("Get GrpcMessage::MetricsInfo from other node({id}), error: {e}");
-                    Err(e)
+                    Err((id, e))
                 }
             };
             metricses.push(data);
@@ -2855,14 +2955,14 @@ async fn _get_metrics_sum(scx: &ServerContext, message_type: MessageType) -> Res
 #[inline]
 async fn _build_metrics(scx: &ServerContext, id: NodeId, metrics: serde_json::Value) -> serde_json::Value {
     let node_name = scx.node.name(scx, id).await;
-    let data = json!({
+    json!({
+        "ok": true,
         "node": {
             "id": id,
             "name": node_name,
         },
         "metrics": metrics
-    });
-    data
+    })
 }
 
 #[handler]
@@ -3440,6 +3540,7 @@ mod tests {
         assert!(body.is_array(), "GET /plugins must remain a bare array");
         assert_eq!(body[0]["node"], 1);
         assert!(body[0]["plugins"].is_array());
+        assert_eq!(body[0]["ok"], true);
     }
 
     #[tokio::test]
@@ -3450,7 +3551,8 @@ mod tests {
         let body: serde_json::Value = resp.take_json().await.unwrap();
         assert_eq!(body["code"], 404);
         assert!(body["message"].as_str().unwrap().contains("plugin"));
-        assert!(body.get("name").is_none(), "error body is code+message only");
+        assert!(body["request_id"].is_string());
+        assert!(body.get("name").is_none(), "error body is code+message+request_id");
     }
 
     #[tokio::test]
@@ -3496,5 +3598,107 @@ mod tests {
         let body: serde_json::Value = resp.take_json().await.unwrap();
         assert_eq!(body["code"], 401);
         assert_eq!(body["message"], "unauthorized");
+        assert!(body["request_id"].is_string());
+    }
+
+    #[tokio::test]
+    async fn openapi_json_is_served_and_is_openapi3() {
+        let svc = test_service().await;
+        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/openapi.json").send(&svc).await;
+        assert_eq!(resp.status_code, Some(StatusCode::OK));
+        let ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("");
+        assert!(ct.contains("json"), "content-type={ct}");
+        let body: serde_json::Value = resp.take_json().await.unwrap();
+        assert!(body["openapi"].as_str().unwrap().starts_with("3."));
+        assert!(body["paths"]["/api/v1/clients"].is_object());
+        assert!(body["components"]["schemas"]["Error"]["properties"]["request_id"].is_object());
+        assert!(body["components"]["schemas"]["Page"]["properties"]["items"].is_object());
+    }
+
+    #[tokio::test]
+    async fn docs_page_is_html() {
+        let svc = test_service().await;
+        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/docs").send(&svc).await;
+        assert_eq!(resp.status_code, Some(StatusCode::OK));
+        let body = resp.take_string().await.unwrap();
+        assert!(body.contains("swagger") || body.contains("openapi.json"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn clients_format_page_wraps_array() {
+        let svc = test_service().await;
+        let mut resp =
+            TestClient::get("http://127.0.0.1:0/api/v1/clients?_limit=10&format=page").send(&svc).await;
+        assert_eq!(resp.status_code, Some(StatusCode::OK));
+        assert_eq!(resp.headers().get("X-Row-Count").map(|v| v.as_bytes()), Some(&b"0"[..]));
+        let body: serde_json::Value = resp.take_json().await.unwrap();
+        assert!(body.is_object(), "format=page must be an object");
+        assert_eq!(body["items"], json!([]));
+        assert_eq!(body["offset"], 0);
+        assert_eq!(body["limit"], 10);
+        assert_eq!(body["truncated"], false);
+        assert!(body.get("total").is_none());
+    }
+
+    #[tokio::test]
+    async fn clients_default_stays_bare_array() {
+        let svc = test_service().await;
+        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/clients?_limit=10").send(&svc).await;
+        let body: serde_json::Value = resp.take_json().await.unwrap();
+        assert!(body.is_array());
+    }
+
+    #[tokio::test]
+    async fn error_body_includes_request_id_header() {
+        let svc = test_service().await;
+        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/plugins/1/no-such-plugin")
+            .add_header("x-request-id", "req-p2-test", true)
+            .send(&svc)
+            .await;
+        assert_eq!(resp.status_code, Some(StatusCode::NOT_FOUND));
+        assert_eq!(resp.headers().get("X-Request-Id").map(|v| v.as_bytes()), Some(&b"req-p2-test"[..]));
+        let body: serde_json::Value = resp.take_json().await.unwrap();
+        assert_eq!(body["code"], 404);
+        assert_eq!(body["request_id"], "req-p2-test");
+        assert!(body["message"].is_string());
+    }
+
+    #[tokio::test]
+    async fn features_summary_has_enabled_and_structured_nodes() {
+        let svc = test_service().await;
+        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/features").send(&svc).await;
+        assert_eq!(resp.status_code, Some(StatusCode::OK));
+        let body: serde_json::Value = resp.take_json().await.unwrap();
+        assert!(body["consistent"].is_boolean());
+        assert_eq!(body["failed_count"], 0);
+        assert_eq!(body["partial"], false);
+        assert!(body["enabled"].is_object());
+        for key in [
+            "retain",
+            "message_storage",
+            "session_storage",
+            "delayed",
+            "shared_subscription",
+            "auto_subscription",
+        ] {
+            assert!(body["enabled"][key].is_boolean(), "missing enabled.{key}");
+        }
+        assert!(body["nodes"].is_array());
+        assert_eq!(body["nodes"][0]["ok"], true);
+        assert!(body["nodes"][0]["features"].is_object());
+        assert!(body["nodes"][0]["node_id"].is_number());
+    }
+
+    #[tokio::test]
+    async fn stats_cluster_items_are_objects_with_ok() {
+        let svc = test_service().await;
+        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/stats").send(&svc).await;
+        assert_eq!(resp.status_code, Some(StatusCode::OK));
+        let body: serde_json::Value = resp.take_json().await.unwrap();
+        assert!(body.is_array());
+        assert_eq!(body[0]["ok"], true);
+        assert!(body[0]["node"]["id"].is_number());
+        assert!(body[0]["stats"].is_object());
+        assert!(!body[0].is_string(), "partial failure must not be a bare string");
     }
 }

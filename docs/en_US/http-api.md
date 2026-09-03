@@ -125,28 +125,52 @@ The possible status codes are as follows:
 Failed API calls return **JSON** (not plain text / HTML):
 
 ```json
-{"code": 404, "message": "plugin not found: ferromq-web-hook"}
+{"code": 404, "message": "plugin not found: ferromq-web-hook", "request_id": "19c3e2a1b-5a5a"}
 ```
 
 | Field   | Type    | Description                                      |
 |---------|---------|--------------------------------------------------|
 | `code`  | Integer | Same value as the HTTP status code               |
 | `message` | String | Human-readable error description               |
+| `details` | Any   | Optional structured extras (omitted when unused) |
+| `request_id` | String | Correlation id (also sent as `X-Request-Id`)  |
 
-Successful `2xx` bodies are unchanged (including existing plain-text successes such as `ok`).
+Send `X-Request-Id` on the request to have it echoed; otherwise the server generates one. Successful `2xx` bodies are unchanged (including existing plain-text successes such as `ok`).
+
+Machine-readable contract: `GET /api/v1/openapi.json` (Swagger UI at `GET /api/v1/docs`).
 
 ## List pagination metadata
 
-List endpoints used by the dashboard (`GET /clients`, `/clients/offlines`, `/subscriptions`, `/routes`, `/retains`, `/plugins`, `/plugins/{node}`) keep their existing JSON schema.
+List endpoints used by the dashboard (`GET /clients`, `/clients/offlines`, `/subscriptions`, `/routes`, `/retains`, `/plugins`, `/plugins/{node}`) keep their existing JSON schema **by default**.
 
 - **Default body:** a bare JSON array (except `/retains`, which already returns `{ items, has_more }`).
+- **`?format=page` (optional, non-breaking):** wrap the same rows as `{ "items": [...], "offset": N, "limit": N, "truncated": bool, "total": N? }`. `total` is omitted when the backend does not know the full count. `/retains?format=page` keeps `has_more` and adds `offset` / `limit` / `truncated`.
 - **`_limit` / `limit`:** maximum rows returned. If omitted or `0`, the plugin `max_row_limit` is used (`10000` by default). `/retains` uses `limit` (no underscore).
 - **`_offset` / `offset`:** optional skip count applied after the backend fetch. `/retains` already documents `offset`.
 - **Response headers (non-breaking):**
-  - `X-Row-Count`: number of rows in this response (`items.length` for `/retains`).
+  - `X-Row-Count`: number of rows in this response (`items.length` for `/retains` and `format=page`).
   - `X-Truncated`: `true` when the result was cut off by `_limit` / `max_row_limit` (or `has_more` for `/retains`); otherwise `false`.
+  - `X-Request-Id`: correlation id.
 
-Old clients that ignore unknown headers continue to work.
+Old clients that ignore unknown headers and do not send `format=page` continue to work.
+
+## Cluster partial failure
+
+Cluster-aggregating endpoints (`/brokers`, `/nodes`, `/features`, `/plugins`, `/stats`, `/metrics`, and their `/sum` variants) return **HTTP 200** with a per-node success/failure object when some peers are unreachable. They do **not** collapse the cluster view into a single boolean.
+
+Success item (extra `ok: true` is additive):
+
+```json
+{ "ok": true, "node_id": 1, "...": "endpoint-specific fields" }
+```
+
+Failure item (replaces the old bare error string):
+
+```json
+{ "ok": false, "node_id": 2, "error": "connection refused" }
+```
+
+`/plugins` uses `{ ok, node, plugins, error? }` (`plugins` is `[]` on failure). `/stats` and `/metrics` use `{ ok, node: { id }, stats|metrics?, error? }`. `/features` uses `FeaturesNodeResult` (see below) plus `failed_count` / `partial` / `enabled`.
 
 ## API Endpoints
 
@@ -286,14 +310,25 @@ Returns the feature support state of every cluster node plus a cluster-wide cons
 | Name          | Type | Description |
 |---------------|------|-------------|
 | consistent    | Bool | Whether all reachable nodes have identical feature states; `false` indicates node configuration drift or plugin load failure |
-| node_count    | Integer | Number of nodes participating in the consistency comparison |
+| node_count    | Integer | Number of nodes that successfully reported features |
+| failed_count  | Integer | Number of nodes that failed to report |
+| partial       | Bool | `true` when `failed_count > 0` (HTTP 200 with a partial cluster view) |
+| enabled       | Object | OR of each flag across reachable nodes. Intended for dashboard **menu gating** (show a page when any node supports it) |
+| - enabled.retain | Bool | Retained messages (`ferromq-retainer`). Gates the Retains menu |
+| - enabled.message_storage | Bool | Persistent message storage |
+| - enabled.session_storage | Bool | Persistent session storage |
+| - enabled.delayed | Bool | Delayed publish (`$delayed/...`) |
+| - enabled.shared_subscription | Bool | Shared subscriptions `$share` |
+| - enabled.auto_subscription | Bool | Automatic subscriptions |
 | conflicts     | Array | Fields with inconsistent values (grouped by value with node ids); empty when `consistent` is `true` |
 | - conflicts[i].feature | String | Feature name, e.g. `retain` |
 | - conflicts[i].values  | Array | Value groups, each containing `value` (Bool) and `node_ids` (Integer Array) |
-| nodes         | Array | Per-node details; unreachable nodes appear as error strings and are excluded from the consistency comparison |
+| nodes         | Array | Per-node **structured** success/failure (`FeaturesNodeResult`) |
+| - nodes[i].ok         | Bool | `true` on success |
 | - nodes[i].node_id    | Integer | Node ID |
-| - nodes[i].node_name  | String | Node name |
-| - nodes[i].features   | Object | Six feature flags: `retain`, `message_storage`, `session_storage`, `delayed`, `shared_subscription`, `auto_subscription` |
+| - nodes[i].node_name  | String | Node name (success only) |
+| - nodes[i].features   | Object | Six feature flags (success only) |
+| - nodes[i].error      | String | Failure reason (failure only) |
 
 **Examples:**
 
@@ -305,6 +340,16 @@ $ curl -i -X GET "http://localhost:6060/api/v1/features"
 {
   "consistent": false,
   "node_count": 3,
+  "failed_count": 0,
+  "partial": false,
+  "enabled": {
+    "retain": true,
+    "message_storage": false,
+    "session_storage": false,
+    "delayed": true,
+    "shared_subscription": true,
+    "auto_subscription": false
+  },
   "conflicts": [
     {
       "feature": "retain",
@@ -316,6 +361,7 @@ $ curl -i -X GET "http://localhost:6060/api/v1/features"
   ],
   "nodes": [
     {
+      "ok": true,
       "node_id": 1,
       "node_name": "1@127.0.0.1",
       "features": {

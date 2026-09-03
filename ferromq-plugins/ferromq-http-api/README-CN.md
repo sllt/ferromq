@@ -78,6 +78,8 @@ prometheus_metrics_cache_interval = "5s"
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/` | 列出所有可用 API 端点 |
+| GET | `/openapi.json` | `/api/v1` 的 OpenAPI 3 文档 |
+| GET | `/docs` | OpenAPI 的 Swagger UI |
 | **Broker** | | |
 | GET | `/brokers` | 返回集群中所有节点的基本信息 |
 | GET | `/brokers/{id}` | 返回指定节点的基本信息 |
@@ -205,9 +207,13 @@ prometheus_metrics_cache_interval = "5s"
 ```
 
 - `consistent`：所有可达节点功能状态是否完全一致；`false` 时说明存在节点配置漂移或插件加载失败
+- `failed_count` / `partial`：不可达节点（HTTP 200，节点项为 `{ ok, error }`）
+- `enabled`：各标志在可达节点上的 OR 聚合，供仪表盘菜单门控
 - `conflicts`：取值不一致的字段（按值分组列出节点），`consistent` 为 `true` 时为空
-- `nodes`：逐节点明细，不可达节点为错误字符串且不参与一致性比较
+- `nodes`：逐节点 `{ ok, node_id, features? / error? }`（不再使用裸错误字符串）
 - 检测到不一致时后端会输出 `features inconsistent across cluster` 警告日志
+
+OpenAPI 3：`GET /api/v1/openapi.json`。可选列表信封：`?format=page` → `{ items, offset, limit, truncated, total? }`（默认仍为裸数组）。错误体：`{ code, message, details?, request_id }`。
 
 ### 认证
 

@@ -125,28 +125,52 @@ FerroMQ 接口在调用成功时总是返回 200 OK，响应内容主要以 JSON
 API 失败时返回 **JSON**（不再使用纯文本 / HTML）：
 
 ```json
-{"code": 404, "message": "plugin not found: ferromq-web-hook"}
+{"code": 404, "message": "plugin not found: ferromq-web-hook", "request_id": "19c3e2a1b-5a5a"}
 ```
 
 | Field   | Type    | Description |
 |---------|---------|-------------|
 | `code`  | Integer | 与 HTTP 状态码相同 |
 | `message` | String | 错误说明 |
+| `details` | Any   | 可选的结构化附加信息（未使用时省略） |
+| `request_id` | String | 关联 ID（同时出现在 `X-Request-Id` 响应头） |
 
-成功的 `2xx` 响应体保持不变（包括已有的纯文本成功响应，如 `ok`）。
+请求可携带 `X-Request-Id`，服务端会原样回写；未提供时由服务端生成。成功的 `2xx` 响应体保持不变（包括已有的纯文本成功响应，如 `ok`）。
+
+机器可读契约：`GET /api/v1/openapi.json`（Swagger UI：`GET /api/v1/docs`）。
 
 ## 列表分页元数据
 
-仪表盘使用的列表接口（`GET /clients`、`/clients/offlines`、`/subscriptions`、`/routes`、`/retains`、`/plugins`、`/plugins/{node}`）**不改变**原有 JSON 结构。
+仪表盘使用的列表接口（`GET /clients`、`/clients/offlines`、`/subscriptions`、`/routes`、`/retains`、`/plugins`、`/plugins/{node}`）**默认不改变**原有 JSON 结构。
 
 - **默认响应体：** 裸 JSON 数组（`/retains` 除外，它已返回 `{ items, has_more }`）。
+- **`?format=page`（可选，非破坏性）：** 将同一批行包装为 `{ "items": [...], "offset": N, "limit": N, "truncated": bool, "total": N? }`。后端不知道全集大小时省略 `total`。`/retains?format=page` 保留 `has_more`，并增加 `offset` / `limit` / `truncated`。
 - **`_limit` / `limit`：** 最多返回行数。省略或为 `0` 时使用插件配置 `max_row_limit`（默认 `10000`）。`/retains` 使用不带下划线的 `limit`。
 - **`_offset` / `offset`：** 可选跳过条数。`/retains` 已文档化 `offset`。
 - **响应头（非破坏性）：**
-  - `X-Row-Count`：本次返回的行数（`/retains` 为 `items` 长度）。
+  - `X-Row-Count`：本次返回的行数（`/retains` 与 `format=page` 为 `items` 长度）。
   - `X-Truncated`：因 `_limit` / `max_row_limit` 截断时为 `true`（`/retains` 与 `has_more` 一致），否则为 `false`。
+  - `X-Request-Id`：关联 ID。
 
-忽略未知响应头的旧客户端可继续工作。
+不发送 `format=page`、忽略未知响应头的旧客户端可继续工作。
+
+## 集群部分失败
+
+集群聚合接口（`/brokers`、`/nodes`、`/features`、`/plugins`、`/stats`、`/metrics` 及其 `/sum` 变体）在部分节点不可达时仍返回 **HTTP 200**，并用**按节点的成功/失败对象**表示，而不是一个布尔值概括整个集群。
+
+成功项（额外的 `ok: true` 向后兼容）：
+
+```json
+{ "ok": true, "node_id": 1, "...": "各接口原有字段" }
+```
+
+失败项（取代原先的裸错误字符串）：
+
+```json
+{ "ok": false, "node_id": 2, "error": "connection refused" }
+```
+
+`/plugins` 使用 `{ ok, node, plugins, error? }`（失败时 `plugins` 为 `[]`）。`/stats` 与 `/metrics` 使用 `{ ok, node: { id }, stats|metrics?, error? }`。`/features` 使用 `FeaturesNodeResult`，并增加 `failed_count` / `partial` / `enabled`。
 
 ## API Endpoints
 
@@ -287,14 +311,25 @@ $ curl -i -X GET "http://localhost:6060/api/v1/nodes/1"
 | Name          | Type | Description |
 |---------------|------|-------------|
 | consistent    | Bool | 所有可达节点功能状态是否完全一致；`false` 说明存在节点配置漂移或插件加载失败 |
-| node_count    | Integer | 参与一致性比较的节点数量 |
+| node_count    | Integer | 成功上报功能状态的节点数 |
+| failed_count  | Integer | 上报失败的节点数 |
+| partial       | Bool | `failed_count > 0` 时为 `true`（HTTP 200，部分集群视图） |
+| enabled       | Object | 各标志在可达节点上的 OR 聚合，供仪表盘**菜单门控**（任一节点支持即展示） |
+| - enabled.retain | Bool | 保留消息（`ferromq-retainer`），门控保留消息菜单 |
+| - enabled.message_storage | Bool | 持久消息存储 |
+| - enabled.session_storage | Bool | 持久会话存储 |
+| - enabled.delayed | Bool | 延迟发布（`$delayed/...`） |
+| - enabled.shared_subscription | Bool | 共享订阅 `$share` |
+| - enabled.auto_subscription | Bool | 自动订阅 |
 | conflicts     | Array | 取值不一致的字段（按值分组列出节点）；`consistent` 为 `true` 时为空数组 |
 | - conflicts[i].feature | String | 功能名称，如 `retain` |
 | - conflicts[i].values  | Array | 取值分组，每组包含 `value`（Bool）与 `node_ids`（Integer Array） |
-| nodes         | Array | 逐节点明细；不可达节点为错误字符串且不参与一致性比较 |
+| nodes         | Array | 逐节点**结构化**成功/失败（`FeaturesNodeResult`） |
+| - nodes[i].ok         | Bool | 成功为 `true` |
 | - nodes[i].node_id    | Integer | 节点ID |
-| - nodes[i].node_name  | String | 节点名称 |
-| - nodes[i].features   | Object | 六项功能支持状态：`retain`、`message_storage`、`session_storage`、`delayed`、`shared_subscription`、`auto_subscription` |
+| - nodes[i].node_name  | String | 节点名称（仅成功） |
+| - nodes[i].features   | Object | 六项功能支持状态（仅成功） |
+| - nodes[i].error      | String | 失败原因（仅失败） |
 
 **Examples:**
 
@@ -306,6 +341,16 @@ $ curl -i -X GET "http://localhost:6060/api/v1/features"
 {
   "consistent": false,
   "node_count": 3,
+  "failed_count": 0,
+  "partial": false,
+  "enabled": {
+    "retain": true,
+    "message_storage": false,
+    "session_storage": false,
+    "delayed": true,
+    "shared_subscription": true,
+    "auto_subscription": false
+  },
   "conflicts": [
     {
       "feature": "retain",
@@ -317,6 +362,7 @@ $ curl -i -X GET "http://localhost:6060/api/v1/features"
   ],
   "nodes": [
     {
+      "ok": true,
       "node_id": 1,
       "node_name": "1@127.0.0.1",
       "features": {

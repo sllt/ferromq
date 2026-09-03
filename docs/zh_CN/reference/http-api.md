@@ -23,6 +23,8 @@ prometheus_metrics_cache_interval = "5s"
 | 方法 | 路径 | 说明 |
 |--------|------|------|
 | `GET` | `/api/v1` | API 列表 |
+| `GET` | `/api/v1/openapi.json` | OpenAPI 3 契约 |
+| `GET` | `/api/v1/docs` | Swagger UI |
 | `GET` | `/api/v1/brokers` | 集群节点信息 |
 | `GET` | `/api/v1/features` | 功能支持状态（含集群一致性汇总） |
 | `GET` | `/api/v1/features/{id}` | 指定节点功能支持状态 |

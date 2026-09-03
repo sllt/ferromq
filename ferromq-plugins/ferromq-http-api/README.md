@@ -78,6 +78,8 @@ All endpoints are prefixed with `/api/v1`.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | List all available API endpoints |
+| GET | `/openapi.json` | OpenAPI 3 document for `/api/v1` |
+| GET | `/docs` | Swagger UI for the OpenAPI document |
 | **Brokers** | | |
 | GET | `/brokers` | Return basic information of all nodes in the cluster |
 | GET | `/brokers/{id}` | Return basic information of a specific node |
@@ -205,9 +207,13 @@ Response example:
 ```
 
 - `consistent`: whether all reachable nodes report identical feature flags; `false` indicates config drift or a partially-failed plugin on some node
+- `failed_count` / `partial`: unreachable nodes (HTTP 200 with structured `{ ok, error }` entries)
+- `enabled`: OR of each flag across reachable nodes — use this for dashboard menu gating
 - `conflicts`: feature fields whose values differ, grouped by value with node lists (empty when `consistent` is `true`)
-- `nodes`: per-node details; unreachable nodes appear as error strings and are excluded from the consistency check
+- `nodes`: per-node `{ ok, node_id, features? / error? }` (no bare error strings)
 - A `features inconsistent across cluster` warning log is emitted when an inconsistency is detected
+
+OpenAPI 3: `GET /api/v1/openapi.json`. Optional list envelope: `?format=page` → `{ items, offset, limit, truncated, total? }` (default remains a bare array). Errors: `{ code, message, details?, request_id }`.
 
 ### Authentication
 

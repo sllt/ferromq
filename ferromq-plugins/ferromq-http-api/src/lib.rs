@@ -27,6 +27,7 @@ mod config;
 mod embed;
 mod flusher;
 mod handler;
+mod openapi;
 mod plugin;
 mod prome;
 mod response;

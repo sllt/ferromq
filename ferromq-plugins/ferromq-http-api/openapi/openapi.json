@@ -1,0 +1,1471 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "FerroMQ HTTP API",
+    "description": "Management API for FerroMQ (`/api/v1`). Default list responses remain bare JSON arrays; pass `?format=page` for `{ items, offset, limit, truncated, total? }`. 4xx/5xx bodies are `{ code, message, details?, request_id }`. Cluster-aggregating endpoints return HTTP 200 with per-node `{ ok, error? }` instead of a single boolean when some nodes fail.",
+    "version": "0.24.0",
+    "license": { "name": "MIT OR Apache-2.0" }
+  },
+  "servers": [
+    { "url": "http://localhost:6060", "description": "Default plugin listener" }
+  ],
+  "tags": [
+    { "name": "Discovery" },
+    { "name": "Brokers" },
+    { "name": "Nodes" },
+    { "name": "Features" },
+    { "name": "Health" },
+    { "name": "Clients" },
+    { "name": "Subscriptions" },
+    { "name": "Routes" },
+    { "name": "Retains" },
+    { "name": "MQTT" },
+    { "name": "Plugins" },
+    { "name": "Stats" },
+    { "name": "Metrics" }
+  ],
+  "security": [],
+  "paths": {
+    "/api/v1": {
+      "get": {
+        "operationId": "listApis",
+        "tags": ["Discovery"],
+        "summary": "List documented HTTP endpoints",
+        "responses": {
+          "200": {
+            "description": "Endpoint catalog",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/ApiEndpoint" } }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/openapi.json": {
+      "get": {
+        "operationId": "getOpenApi",
+        "tags": ["Discovery"],
+        "summary": "OpenAPI 3 document for /api/v1",
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.0.3 JSON",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          }
+        }
+      }
+    },
+    "/api/v1/docs": {
+      "get": {
+        "operationId": "getDocs",
+        "tags": ["Discovery"],
+        "summary": "Swagger UI for the OpenAPI document",
+        "responses": {
+          "200": {
+            "description": "HTML docs page",
+            "content": { "text/html": { "schema": { "type": "string" } } }
+          }
+        }
+      }
+    },
+    "/api/v1/brokers": {
+      "get": {
+        "operationId": "getBrokers",
+        "tags": ["Brokers"],
+        "summary": "Basic information of every cluster node",
+        "responses": {
+          "200": {
+            "description": "Per-node broker objects; failed peers are ClusterNodeError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "oneOf": [
+                      { "$ref": "#/components/schemas/BrokerInfo" },
+                      { "$ref": "#/components/schemas/ClusterNodeError" }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/brokers/{id}": {
+      "get": {
+        "operationId": "getBroker",
+        "tags": ["Brokers"],
+        "summary": "Basic information of one node",
+        "parameters": [{ "$ref": "#/components/parameters/NodeId" }],
+        "responses": {
+          "200": {
+            "description": "Broker info",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BrokerInfo" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/nodes": {
+      "get": {
+        "operationId": "getNodes",
+        "tags": ["Nodes"],
+        "summary": "Status of every cluster node",
+        "responses": {
+          "200": {
+            "description": "Per-node status; failed peers are ClusterNodeError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "oneOf": [
+                      { "$ref": "#/components/schemas/NodeInfo" },
+                      { "$ref": "#/components/schemas/ClusterNodeError" }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/nodes/{id}": {
+      "get": {
+        "operationId": "getNode",
+        "tags": ["Nodes"],
+        "summary": "Status of one node",
+        "parameters": [{ "$ref": "#/components/parameters/NodeId" }],
+        "responses": {
+          "200": {
+            "description": "Node status",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NodeInfo" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/features": {
+      "get": {
+        "operationId": "getFeatures",
+        "tags": ["Features"],
+        "summary": "Cluster feature flags plus consistency summary (menu gating)",
+        "description": "`enabled` is the OR of each flag across reachable nodes and is intended for dashboard menu gating. `nodes[]` uses structured `{ ok, error? }` rather than a bare error string. Unreachable nodes increment `failed_count` and set `partial: true`.",
+        "responses": {
+          "200": {
+            "description": "Features summary",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FeaturesSummary" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/features/{id}": {
+      "get": {
+        "operationId": "getFeature",
+        "tags": ["Features"],
+        "summary": "Feature flags of one node",
+        "parameters": [{ "$ref": "#/components/parameters/NodeId" }],
+        "responses": {
+          "200": {
+            "description": "Single-node features",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FeaturesInfo" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/health/check": {
+      "get": {
+        "operationId": "checkHealth",
+        "tags": ["Health"],
+        "summary": "Cluster health check",
+        "responses": {
+          "200": {
+            "description": "Health status",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HealthStatus" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/health/check/{id}": {
+      "get": {
+        "operationId": "checkHealthNode",
+        "tags": ["Health"],
+        "summary": "Health check for one node",
+        "parameters": [{ "$ref": "#/components/parameters/NodeId" }],
+        "responses": {
+          "200": {
+            "description": "Health status",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HealthStatus" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/clients": {
+      "get": {
+        "operationId": "searchClients",
+        "tags": ["Clients"],
+        "summary": "Search clients in the cluster",
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/LimitAlias" },
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/OffsetAlias" },
+          { "$ref": "#/components/parameters/FormatPage" },
+          { "name": "clientid", "in": "query", "schema": { "type": "string" } },
+          { "name": "username", "in": "query", "schema": { "type": "string" } },
+          { "name": "ip_address", "in": "query", "schema": { "type": "string" } },
+          { "name": "connected", "in": "query", "schema": { "type": "boolean" } },
+          { "name": "clean_start", "in": "query", "schema": { "type": "boolean" } },
+          { "name": "session_present", "in": "query", "schema": { "type": "boolean" } },
+          { "name": "proto_ver", "in": "query", "schema": { "type": "integer" } },
+          { "name": "_like_clientid", "in": "query", "schema": { "type": "string" } },
+          { "name": "_like_username", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/ClientList" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/clients/offlines": {
+      "get": {
+        "operationId": "searchOfflines",
+        "tags": ["Clients"],
+        "summary": "Search offline clients",
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/LimitAlias" },
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/OffsetAlias" },
+          { "$ref": "#/components/parameters/FormatPage" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/ClientList" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "delete": {
+        "operationId": "kickOfflines",
+        "tags": ["Clients"],
+        "summary": "Kick matching offline clients",
+        "responses": {
+          "200": {
+            "description": "Kick count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["count"],
+                  "properties": { "count": { "type": "integer" } }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/clients/{clientid}": {
+      "get": {
+        "operationId": "getClient",
+        "tags": ["Clients"],
+        "summary": "Get one client",
+        "parameters": [{ "$ref": "#/components/parameters/ClientId" }],
+        "responses": {
+          "200": {
+            "description": "Client",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClientSearchResult" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "delete": {
+        "operationId": "kickClient",
+        "tags": ["Clients"],
+        "summary": "Kick a client",
+        "parameters": [{ "$ref": "#/components/parameters/ClientId" }],
+        "responses": {
+          "200": {
+            "description": "Kicked session id",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/clients/{clientid}/online": {
+      "get": {
+        "operationId": "checkOnline",
+        "tags": ["Clients"],
+        "summary": "Whether a client is online",
+        "parameters": [{ "$ref": "#/components/parameters/ClientId" }],
+        "responses": {
+          "200": {
+            "description": "Online flag",
+            "content": { "application/json": { "schema": { "type": "boolean" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/subscriptions": {
+      "get": {
+        "operationId": "querySubscriptions",
+        "tags": ["Subscriptions"],
+        "summary": "Query subscriptions",
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/LimitAlias" },
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/OffsetAlias" },
+          { "$ref": "#/components/parameters/FormatPage" },
+          { "name": "clientid", "in": "query", "schema": { "type": "string" } },
+          { "name": "topic", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/SubscriptionList" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/subscriptions/{clientid}": {
+      "get": {
+        "operationId": "getClientSubscriptions",
+        "tags": ["Subscriptions"],
+        "summary": "Subscriptions of one client",
+        "parameters": [
+          { "$ref": "#/components/parameters/ClientId" },
+          { "$ref": "#/components/parameters/FormatPage" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/SubscriptionList" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/routes": {
+      "get": {
+        "operationId": "getRoutes",
+        "tags": ["Routes"],
+        "summary": "Routing table snapshot",
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/LimitAlias" },
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/OffsetAlias" },
+          { "$ref": "#/components/parameters/FormatPage" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/RouteList" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/routes/{topic}": {
+      "get": {
+        "operationId": "getRoute",
+        "tags": ["Routes"],
+        "summary": "Routes for one topic filter",
+        "parameters": [
+          { "name": "topic", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "$ref": "#/components/parameters/FormatPage" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/RouteList" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/retains": {
+      "get": {
+        "operationId": "getRetains",
+        "tags": ["Retains"],
+        "summary": "Query retained messages",
+        "description": "Default body is `{ items, has_more }`. `?format=page` adds `offset`, `limit`, `truncated`, and optional `total`.",
+        "parameters": [
+          { "name": "topic_filter", "in": "query", "schema": { "type": "string", "default": "#" } },
+          { "name": "offset", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 0 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 0 } },
+          { "$ref": "#/components/parameters/FormatPage" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Retained page",
+            "headers": { "X-Row-Count": { "$ref": "#/components/headers/XRowCount" }, "X-Truncated": { "$ref": "#/components/headers/XTruncated" } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RetainPage" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "delete": {
+        "operationId": "deleteRetain",
+        "tags": ["Retains"],
+        "summary": "Delete a retained message by exact topic",
+        "parameters": [
+          { "name": "topic", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": { "text/plain": { "schema": { "type": "string", "example": "ok" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/mqtt/publish": {
+      "post": {
+        "operationId": "mqttPublish",
+        "tags": ["MQTT"],
+        "summary": "Publish an MQTT message",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublishParams" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Published",
+            "content": { "text/plain": { "schema": { "type": "string", "example": "ok" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/mqtt/subscribe": {
+      "post": {
+        "operationId": "mqttSubscribe",
+        "tags": ["MQTT"],
+        "summary": "Subscribe a session to topics",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SubscribeParams" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Per-topic results",
+            "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/mqtt/unsubscribe": {
+      "post": {
+        "operationId": "mqttUnsubscribe",
+        "tags": ["MQTT"],
+        "summary": "Unsubscribe a session from a topic",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UnsubscribeParams" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Unsubscribed",
+            "content": { "text/plain": { "schema": { "type": "string", "example": "ok" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/plugins": {
+      "get": {
+        "operationId": "allPlugins",
+        "tags": ["Plugins"],
+        "summary": "Plugins on every cluster node",
+        "description": "Default: array of `{ ok, node, plugins }` (or `{ ok: false, node, plugins: [], error }`). `?format=page` wraps the array.",
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/LimitAlias" },
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/OffsetAlias" },
+          { "$ref": "#/components/parameters/FormatPage" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-node plugin groups",
+            "headers": { "X-Row-Count": { "$ref": "#/components/headers/XRowCount" }, "X-Truncated": { "$ref": "#/components/headers/XTruncated" } },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    { "type": "array", "items": { "$ref": "#/components/schemas/PluginNodeGroup" } },
+                    { "$ref": "#/components/schemas/Page" }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/plugins/{node}": {
+      "get": {
+        "operationId": "nodePlugins",
+        "tags": ["Plugins"],
+        "summary": "Plugins on one node",
+        "parameters": [
+          { "$ref": "#/components/parameters/PluginNode" },
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/LimitAlias" },
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/OffsetAlias" },
+          { "$ref": "#/components/parameters/FormatPage" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/PluginList" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/plugins/{node}/{plugin}": {
+      "get": {
+        "operationId": "nodePluginInfo",
+        "tags": ["Plugins"],
+        "summary": "One plugin on one node",
+        "parameters": [
+          { "$ref": "#/components/parameters/PluginNode" },
+          { "$ref": "#/components/parameters/PluginName" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Plugin info",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PluginInfo" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/plugins/{node}/{plugin}/config": {
+      "get": {
+        "operationId": "nodePluginConfig",
+        "tags": ["Plugins"],
+        "summary": "Read a plugin config (GET only in this milestone)",
+        "parameters": [
+          { "$ref": "#/components/parameters/PluginNode" },
+          { "$ref": "#/components/parameters/PluginName" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Plugin config JSON or text",
+            "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/plugins/{node}/{plugin}/config/reload": {
+      "put": {
+        "operationId": "nodePluginConfigReload",
+        "tags": ["Plugins"],
+        "summary": "Reload a plugin config from disk",
+        "parameters": [
+          { "$ref": "#/components/parameters/PluginNode" },
+          { "$ref": "#/components/parameters/PluginName" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reloaded",
+            "content": { "text/plain": { "schema": { "type": "string", "example": "ok" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/plugins/{node}/{plugin}/load": {
+      "put": {
+        "operationId": "nodePluginLoad",
+        "tags": ["Plugins"],
+        "summary": "Load / start a plugin on a node",
+        "parameters": [
+          { "$ref": "#/components/parameters/PluginNode" },
+          { "$ref": "#/components/parameters/PluginName" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Loaded",
+            "content": { "text/plain": { "schema": { "type": "string", "example": "ok" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/plugins/{node}/{plugin}/unload": {
+      "put": {
+        "operationId": "nodePluginUnload",
+        "tags": ["Plugins"],
+        "summary": "Unload / stop a plugin on a node",
+        "parameters": [
+          { "$ref": "#/components/parameters/PluginNode" },
+          { "$ref": "#/components/parameters/PluginName" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Unloaded",
+            "content": { "application/json": { "schema": { "type": "boolean" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/stats": {
+      "get": {
+        "operationId": "getStats",
+        "tags": ["Stats"],
+        "summary": "Per-node stats for the cluster",
+        "description": "Array of `{ ok: true, node, stats }` or `{ ok: false, node, error }`.",
+        "responses": {
+          "200": {
+            "description": "Per-node stats",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/StatsNode" } }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/stats/sum": {
+      "get": {
+        "operationId": "getStatsSum",
+        "tags": ["Stats"],
+        "summary": "Aggregated cluster stats",
+        "responses": {
+          "200": {
+            "description": "Sum object (`nodes` map + `stats`)",
+            "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/stats/{id}": {
+      "get": {
+        "operationId": "getStatsNode",
+        "tags": ["Stats"],
+        "summary": "Stats for one node",
+        "parameters": [{ "$ref": "#/components/parameters/NodeId" }],
+        "responses": {
+          "200": {
+            "description": "Node stats",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StatsNode" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/stats/sys": {
+      "get": {
+        "operationId": "getSysStats",
+        "tags": ["Stats"],
+        "summary": "Per-node system stats",
+        "responses": {
+          "200": {
+            "description": "Per-node system stats",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/StatsNode" } }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/stats/sys/sum": {
+      "get": {
+        "operationId": "getSysStatsSum",
+        "tags": ["Stats"],
+        "summary": "Aggregated system stats",
+        "responses": {
+          "200": {
+            "description": "Sum object",
+            "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/stats/sys/{id}": {
+      "get": {
+        "operationId": "getSysStatsNode",
+        "tags": ["Stats"],
+        "summary": "System stats for one node",
+        "parameters": [{ "$ref": "#/components/parameters/NodeId" }],
+        "responses": {
+          "200": {
+            "description": "Node system stats",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StatsNode" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/stats/history": {
+      "get": {
+        "operationId": "getStatsHistory",
+        "tags": ["Stats"],
+        "summary": "Historical stats (all nodes)",
+        "parameters": [{ "$ref": "#/components/parameters/HistoryFrom" }, { "$ref": "#/components/parameters/HistoryTo" }, { "$ref": "#/components/parameters/HistoryLimit" }],
+        "responses": {
+          "200": {
+            "description": "History series",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/HistoryData" } } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/stats/history/sum": {
+      "get": {
+        "operationId": "getStatsHistorySum",
+        "tags": ["Stats"],
+        "summary": "Aggregated historical stats",
+        "parameters": [{ "$ref": "#/components/parameters/HistoryFrom" }, { "$ref": "#/components/parameters/HistoryTo" }, { "$ref": "#/components/parameters/HistoryLimit" }],
+        "responses": {
+          "200": {
+            "description": "Aggregated history",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HistoryData" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/stats/history/{id}": {
+      "get": {
+        "operationId": "getStatsHistoryNode",
+        "tags": ["Stats"],
+        "summary": "Historical stats for one node",
+        "parameters": [
+          { "$ref": "#/components/parameters/NodeId" },
+          { "$ref": "#/components/parameters/HistoryFrom" },
+          { "$ref": "#/components/parameters/HistoryTo" },
+          { "$ref": "#/components/parameters/HistoryLimit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "History",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HistoryData" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/metrics": {
+      "get": {
+        "operationId": "getMetrics",
+        "tags": ["Metrics"],
+        "summary": "Per-node metrics for the cluster",
+        "responses": {
+          "200": {
+            "description": "Per-node metrics; failed peers use `{ ok: false, node, error }`",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/MetricsNode" } }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/metrics/sum": {
+      "get": {
+        "operationId": "getMetricsSum",
+        "tags": ["Metrics"],
+        "summary": "Aggregated cluster metrics",
+        "responses": {
+          "200": {
+            "description": "Sum object",
+            "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/metrics/{id}": {
+      "get": {
+        "operationId": "getMetricsNode",
+        "tags": ["Metrics"],
+        "summary": "Metrics for one node",
+        "parameters": [{ "$ref": "#/components/parameters/NodeId" }],
+        "responses": {
+          "200": {
+            "description": "Node metrics",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MetricsNode" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/metrics/prometheus": {
+      "get": {
+        "operationId": "getPrometheusMetrics",
+        "tags": ["Metrics"],
+        "summary": "Prometheus text exposition (all nodes)",
+        "responses": {
+          "200": {
+            "description": "Prometheus text",
+            "content": { "text/plain": { "schema": { "type": "string" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/metrics/prometheus/sum": {
+      "get": {
+        "operationId": "getPrometheusMetricsSum",
+        "tags": ["Metrics"],
+        "summary": "Aggregated Prometheus text",
+        "responses": {
+          "200": {
+            "description": "Prometheus text",
+            "content": { "text/plain": { "schema": { "type": "string" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/metrics/prometheus/{id}": {
+      "get": {
+        "operationId": "getPrometheusMetricsNode",
+        "tags": ["Metrics"],
+        "summary": "Prometheus text for one node",
+        "parameters": [{ "$ref": "#/components/parameters/NodeId" }],
+        "responses": {
+          "200": {
+            "description": "Prometheus text",
+            "content": { "text/plain": { "schema": { "type": "string" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/metrics/history": {
+      "get": {
+        "operationId": "getMetricsHistory",
+        "tags": ["Metrics"],
+        "summary": "Historical metrics (all nodes)",
+        "parameters": [{ "$ref": "#/components/parameters/HistoryFrom" }, { "$ref": "#/components/parameters/HistoryTo" }, { "$ref": "#/components/parameters/HistoryLimit" }],
+        "responses": {
+          "200": {
+            "description": "History series",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/HistoryData" } } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/metrics/history/sum": {
+      "get": {
+        "operationId": "getMetricsHistorySum",
+        "tags": ["Metrics"],
+        "summary": "Aggregated historical metrics",
+        "parameters": [{ "$ref": "#/components/parameters/HistoryFrom" }, { "$ref": "#/components/parameters/HistoryTo" }, { "$ref": "#/components/parameters/HistoryLimit" }],
+        "responses": {
+          "200": {
+            "description": "Aggregated history",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HistoryData" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/metrics/history/{id}": {
+      "get": {
+        "operationId": "getMetricsHistoryNode",
+        "tags": ["Metrics"],
+        "summary": "Historical metrics for one node",
+        "parameters": [
+          { "$ref": "#/components/parameters/NodeId" },
+          { "$ref": "#/components/parameters/HistoryFrom" },
+          { "$ref": "#/components/parameters/HistoryTo" },
+          { "$ref": "#/components/parameters/HistoryLimit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "History",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HistoryData" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Required only when `http_bearer_token` is set in the plugin config."
+      }
+    },
+    "parameters": {
+      "NodeId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "integer", "format": "int64", "minimum": 0 }
+      },
+      "ClientId": {
+        "name": "clientid",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      },
+      "PluginNode": {
+        "name": "node",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "integer", "format": "int64", "minimum": 0 }
+      },
+      "PluginName": {
+        "name": "plugin",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      },
+      "Limit": {
+        "name": "_limit",
+        "in": "query",
+        "description": "Max rows. `0` or omitted uses plugin `max_row_limit` (default 10000).",
+        "schema": { "type": "integer", "minimum": 0 }
+      },
+      "LimitAlias": {
+        "name": "limit",
+        "in": "query",
+        "description": "Alias of `_limit` (used by `/retains` as the canonical name).",
+        "schema": { "type": "integer", "minimum": 0 }
+      },
+      "Offset": {
+        "name": "_offset",
+        "in": "query",
+        "description": "Rows to skip after the backend fetch.",
+        "schema": { "type": "integer", "minimum": 0, "default": 0 }
+      },
+      "OffsetAlias": {
+        "name": "offset",
+        "in": "query",
+        "description": "Alias of `_offset`.",
+        "schema": { "type": "integer", "minimum": 0, "default": 0 }
+      },
+      "FormatPage": {
+        "name": "format",
+        "in": "query",
+        "description": "Set to `page` to wrap a list as `{ items, offset, limit, truncated, total? }` instead of a bare array. Default is the historical array body.",
+        "schema": { "type": "string", "enum": ["page"] }
+      },
+      "HistoryFrom": {
+        "name": "from",
+        "in": "query",
+        "schema": { "type": "integer", "format": "int64" },
+        "description": "Start timestamp (milliseconds, inclusive)"
+      },
+      "HistoryTo": {
+        "name": "to",
+        "in": "query",
+        "schema": { "type": "integer", "format": "int64" },
+        "description": "End timestamp (milliseconds, inclusive)"
+      },
+      "HistoryLimit": {
+        "name": "limit",
+        "in": "query",
+        "schema": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "headers": {
+      "XRowCount": {
+        "description": "Number of rows in this response (`items.length` for page / retains).",
+        "schema": { "type": "integer", "minimum": 0 }
+      },
+      "XTruncated": {
+        "description": "`true` when the result was cut off by `_limit` / `max_row_limit`.",
+        "schema": { "type": "boolean" }
+      },
+      "XRequestId": {
+        "description": "Correlation id. Echoed from the request header when present.",
+        "schema": { "type": "string" }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Invalid request",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/XRequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "Unauthorized": {
+        "description": "Missing or invalid bearer token",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/XRequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "NotFound": {
+        "description": "Resource not found",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/XRequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "Unavailable": {
+        "description": "Backend / peer unavailable",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/XRequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "ClientList": {
+        "description": "Bare array by default; `{ items, ... }` when `format=page`.",
+        "headers": { "X-Row-Count": { "$ref": "#/components/headers/XRowCount" }, "X-Truncated": { "$ref": "#/components/headers/XTruncated" } },
+        "content": {
+          "application/json": {
+            "schema": {
+              "oneOf": [
+                { "type": "array", "items": { "$ref": "#/components/schemas/ClientSearchResult" } },
+                { "$ref": "#/components/schemas/Page" }
+              ]
+            }
+          }
+        }
+      },
+      "SubscriptionList": {
+        "description": "Bare array by default; page envelope when `format=page`.",
+        "headers": { "X-Row-Count": { "$ref": "#/components/headers/XRowCount" }, "X-Truncated": { "$ref": "#/components/headers/XTruncated" } },
+        "content": {
+          "application/json": {
+            "schema": {
+              "oneOf": [
+                { "type": "array", "items": { "$ref": "#/components/schemas/Subscription" } },
+                { "$ref": "#/components/schemas/Page" }
+              ]
+            }
+          }
+        }
+      },
+      "RouteList": {
+        "description": "Bare array by default; page envelope when `format=page`.",
+        "headers": { "X-Row-Count": { "$ref": "#/components/headers/XRowCount" }, "X-Truncated": { "$ref": "#/components/headers/XTruncated" } },
+        "content": {
+          "application/json": {
+            "schema": {
+              "oneOf": [
+                { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+                { "$ref": "#/components/schemas/Page" }
+              ]
+            }
+          }
+        }
+      },
+      "PluginList": {
+        "description": "Bare plugin array by default; page envelope when `format=page`.",
+        "headers": { "X-Row-Count": { "$ref": "#/components/headers/XRowCount" }, "X-Truncated": { "$ref": "#/components/headers/XTruncated" } },
+        "content": {
+          "application/json": {
+            "schema": {
+              "oneOf": [
+                { "type": "array", "items": { "$ref": "#/components/schemas/PluginInfo" } },
+                { "$ref": "#/components/schemas/Page" }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": ["code", "message"],
+        "properties": {
+          "code": { "type": "integer", "description": "Same value as the HTTP status code" },
+          "message": { "type": "string" },
+          "details": { "description": "Optional structured extras", "nullable": true },
+          "request_id": { "type": "string", "description": "Correlation id (also in X-Request-Id)" }
+        }
+      },
+      "Page": {
+        "type": "object",
+        "required": ["items", "offset", "limit", "truncated"],
+        "properties": {
+          "items": { "type": "array", "items": {} },
+          "offset": { "type": "integer", "minimum": 0 },
+          "limit": { "type": "integer", "minimum": 0 },
+          "truncated": { "type": "boolean" },
+          "total": { "type": "integer", "minimum": 0, "description": "Present only when the backend knows the full count" }
+        }
+      },
+      "ClusterNodeError": {
+        "type": "object",
+        "required": ["ok", "error"],
+        "properties": {
+          "ok": { "type": "boolean", "enum": [false] },
+          "node_id": { "type": "integer", "format": "int64" },
+          "node": { "description": "Present on stats/metrics (`{ id }`) and plugins (`integer`)" },
+          "error": { "type": "string" },
+          "plugins": { "type": "array", "items": {}, "description": "Empty array on plugin-group failures" }
+        }
+      },
+      "ApiEndpoint": {
+        "type": "object",
+        "required": ["name", "method", "path", "descr"],
+        "properties": {
+          "name": { "type": "string" },
+          "method": { "type": "string" },
+          "path": { "type": "string" },
+          "descr": { "type": "string" }
+        }
+      },
+      "BrokerInfo": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "node_id": { "type": "integer", "format": "int64" },
+          "node_name": { "type": "string" },
+          "datetime": { "type": "string" },
+          "running": { "type": "boolean" },
+          "version": { "type": "string" },
+          "rustc_version": { "type": "string" },
+          "uptime": { "type": "string" }
+        },
+        "additionalProperties": true
+      },
+      "NodeInfo": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "node_id": { "type": "integer", "format": "int64" },
+          "node_name": { "type": "string" },
+          "running": { "type": "boolean" },
+          "connections": { "type": "integer" },
+          "boottime": { "type": "string" },
+          "uptime": { "type": "string" },
+          "version": { "type": "string" },
+          "memory_used": { "type": "integer" },
+          "memory_total": { "type": "integer" },
+          "load1": { "type": "number" },
+          "load5": { "type": "number" },
+          "load15": { "type": "number" }
+        },
+        "additionalProperties": true
+      },
+      "Features": {
+        "type": "object",
+        "description": "Runtime capability flags. A flag is true when the backing implementation is loaded and enabled. Used by the dashboard for menu gating via FeaturesSummary.enabled.",
+        "required": ["retain", "message_storage", "session_storage", "delayed", "shared_subscription", "auto_subscription"],
+        "properties": {
+          "retain": { "type": "boolean", "description": "Retained messages (`ferromq-retainer`). Gates the Retains menu." },
+          "message_storage": { "type": "boolean", "description": "Persistent message storage (`ferromq-message-storage`)." },
+          "session_storage": { "type": "boolean", "description": "Persistent session storage (`ferromq-session-storage`)." },
+          "delayed": { "type": "boolean", "description": "Delayed publish (`$delayed/...`)." },
+          "shared_subscription": { "type": "boolean", "description": "Shared subscriptions `$share`." },
+          "auto_subscription": { "type": "boolean", "description": "Automatic subscriptions plugin." }
+        }
+      },
+      "FeaturesInfo": {
+        "type": "object",
+        "required": ["node_id", "node_name", "features"],
+        "properties": {
+          "node_id": { "type": "integer", "format": "int64" },
+          "node_name": { "type": "string" },
+          "features": { "$ref": "#/components/schemas/Features" }
+        }
+      },
+      "FeaturesNodeResult": {
+        "type": "object",
+        "required": ["node_id", "ok"],
+        "properties": {
+          "node_id": { "type": "integer", "format": "int64" },
+          "node_name": { "type": "string" },
+          "ok": { "type": "boolean" },
+          "features": { "$ref": "#/components/schemas/Features" },
+          "error": { "type": "string" }
+        }
+      },
+      "FeatureValueGroup": {
+        "type": "object",
+        "required": ["value", "node_ids"],
+        "properties": {
+          "value": { "type": "boolean" },
+          "node_ids": { "type": "array", "items": { "type": "integer", "format": "int64" } }
+        }
+      },
+      "FeatureConflict": {
+        "type": "object",
+        "required": ["feature", "values"],
+        "properties": {
+          "feature": { "type": "string" },
+          "values": { "type": "array", "items": { "$ref": "#/components/schemas/FeatureValueGroup" } }
+        }
+      },
+      "FeaturesSummary": {
+        "type": "object",
+        "required": ["consistent", "node_count", "failed_count", "partial", "enabled", "nodes"],
+        "properties": {
+          "consistent": { "type": "boolean" },
+          "node_count": { "type": "integer", "minimum": 0 },
+          "failed_count": { "type": "integer", "minimum": 0 },
+          "partial": { "type": "boolean" },
+          "enabled": { "$ref": "#/components/schemas/Features" },
+          "conflicts": { "type": "array", "items": { "$ref": "#/components/schemas/FeatureConflict" } },
+          "nodes": { "type": "array", "items": { "$ref": "#/components/schemas/FeaturesNodeResult" } }
+        }
+      },
+      "HealthStatus": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "ClientSearchResult": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "integer", "format": "int64" },
+          "clientid": { "type": "string" },
+          "username": { "type": "string" },
+          "superuser": { "type": "boolean" },
+          "proto_ver": { "type": "integer" },
+          "ip_address": { "type": "string", "nullable": true },
+          "port": { "type": "integer", "nullable": true },
+          "connected": { "type": "boolean" },
+          "connected_at": { "type": "string" },
+          "disconnected_at": { "type": "string" },
+          "disconnected_reason": { "type": "string" },
+          "keepalive": { "type": "integer" },
+          "clean_start": { "type": "boolean" },
+          "session_present": { "type": "boolean" },
+          "expiry_interval": { "type": "integer" },
+          "created_at": { "type": "string" },
+          "subscriptions_cnt": { "type": "integer" },
+          "max_subscriptions": { "type": "integer" },
+          "last_will": {},
+          "inflight": { "type": "integer" },
+          "max_inflight": { "type": "integer" },
+          "mqueue_len": { "type": "integer" },
+          "max_mqueue": { "type": "integer" }
+        },
+        "additionalProperties": true
+      },
+      "Subscription": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "integer", "format": "int64" },
+          "clientid": { "type": "string" },
+          "topic": { "type": "string" },
+          "qos": { "description": "Documented alias of opts.qos" },
+          "share": { "description": "Documented alias of opts.group" },
+          "opts": { "type": "object", "additionalProperties": true }
+        },
+        "additionalProperties": true
+      },
+      "RetainPublishInfo": {
+        "type": "object",
+        "properties": {
+          "topic": { "type": "string" },
+          "qos": { "type": "integer" },
+          "retain": { "type": "boolean" },
+          "dup": { "type": "boolean" },
+          "payload": { "type": "string", "description": "Base64 payload" },
+          "create_time": { "type": "integer", "nullable": true },
+          "properties": { "nullable": true }
+        }
+      },
+      "RetainInfo": {
+        "type": "object",
+        "properties": {
+          "topic": { "type": "string" },
+          "msg_id": { "nullable": true },
+          "from": {},
+          "publish": { "$ref": "#/components/schemas/RetainPublishInfo" },
+          "remaining_ttl": { "type": "integer", "nullable": true },
+          "client_id": { "type": "string", "nullable": true }
+        }
+      },
+      "RetainPage": {
+        "type": "object",
+        "required": ["items", "has_more"],
+        "properties": {
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/RetainInfo" } },
+          "has_more": { "type": "boolean" },
+          "offset": { "type": "integer" },
+          "limit": { "type": "integer" },
+          "truncated": { "type": "boolean" },
+          "total": { "type": "integer" }
+        }
+      },
+      "PublishParams": {
+        "type": "object",
+        "required": ["payload"],
+        "properties": {
+          "topic": { "type": "string" },
+          "topics": { "type": "string", "description": "Comma-separated topics" },
+          "clientid": { "type": "string", "default": "system" },
+          "payload": { "type": "string" },
+          "encoding": { "type": "string", "enum": ["plain", "base64"], "default": "plain" },
+          "qos": { "type": "integer", "minimum": 0, "maximum": 2, "default": 0 },
+          "retain": { "type": "boolean", "default": false },
+          "properties": { "type": "object", "additionalProperties": true }
+        }
+      },
+      "SubscribeParams": {
+        "type": "object",
+        "required": ["clientid"],
+        "properties": {
+          "topic": { "type": "string" },
+          "topics": { "type": "string" },
+          "clientid": { "type": "string" },
+          "qos": { "type": "integer", "minimum": 0, "maximum": 2, "default": 0 }
+        }
+      },
+      "UnsubscribeParams": {
+        "type": "object",
+        "required": ["topic", "clientid"],
+        "properties": {
+          "topic": { "type": "string" },
+          "clientid": { "type": "string" }
+        }
+      },
+      "PluginInfo": {
+        "type": "object",
+        "required": ["name", "inited", "active", "immutable"],
+        "properties": {
+          "name": { "type": "string" },
+          "version": { "type": "string", "nullable": true },
+          "descr": { "type": "string", "nullable": true },
+          "inited": { "type": "boolean" },
+          "active": { "type": "boolean", "description": "Canonical running flag (not `running`)" },
+          "immutable": { "type": "boolean" },
+          "attrs": { "nullable": true }
+        },
+        "additionalProperties": true
+      },
+      "PluginNodeGroup": {
+        "type": "object",
+        "required": ["node", "plugins", "ok"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "node": { "type": "integer", "format": "int64" },
+          "plugins": { "type": "array", "items": { "$ref": "#/components/schemas/PluginInfo" } },
+          "error": { "type": "string" }
+        }
+      },
+      "StatsNode": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "node": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "integer", "format": "int64" },
+              "name": { "type": "string" },
+              "running": { "type": "boolean" }
+            }
+          },
+          "stats": { "type": "object", "additionalProperties": true },
+          "error": { "type": "string" }
+        }
+      },
+      "MetricsNode": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "node": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "integer", "format": "int64" },
+              "name": { "type": "string" }
+            }
+          },
+          "metrics": { "type": "object", "additionalProperties": true },
+          "error": { "type": "string" }
+        }
+      },
+      "HistoryData": {
+        "type": "object",
+        "properties": {
+          "node": { "type": "integer", "format": "int64" },
+          "from": { "type": "integer", "format": "int64" },
+          "to": { "type": "integer", "format": "int64" },
+          "count": { "type": "integer" },
+          "data": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+        }
+      }
+    }
+  }
+}

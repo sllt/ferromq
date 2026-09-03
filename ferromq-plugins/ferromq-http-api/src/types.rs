@@ -417,20 +417,28 @@ pub struct Features {
 /// Aggregated feature support state across all cluster nodes.
 ///
 /// `consistent` is `false` when at least one feature field differs between
-/// nodes; the differing fields are reported in `conflicts` so operators can
-/// locate mis-configured / partially-failed nodes.
+/// reachable nodes; the differing fields are reported in `conflicts` so
+/// operators can locate mis-configured / partially-failed nodes.
+///
+/// `enabled` is the OR of each flag across reachable nodes and is intended
+/// for dashboard menu gating (show a page when any node supports it).
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct FeaturesSummary {
     /// Whether all successfully-reached nodes report identical feature flags.
     pub consistent: bool,
     /// Number of nodes that successfully reported their features.
     pub node_count: usize,
+    /// Number of nodes that failed to report (gRPC timeout / decode error).
+    pub failed_count: usize,
+    /// `true` when `failed_count > 0` (HTTP 200 with a partial cluster view).
+    pub partial: bool,
+    /// Cluster-wide "any node enabled" flags for dashboard menu gating.
+    pub enabled: Features,
     /// Feature fields whose values differ across nodes (empty when `consistent`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<FeatureConflict>,
-    /// Per-node feature details. Unreachable nodes are represented as an
-    /// error string and do not participate in the consistency check.
-    pub nodes: Vec<FeaturesInfoOrError>,
+    /// Per-node success/failure. Failed nodes have `ok: false` and `error`.
+    pub nodes: Vec<FeaturesNodeResult>,
 }
 
 /// A feature field whose reported value differs across cluster nodes.
@@ -448,13 +456,38 @@ pub struct FeatureValueGroup {
     pub node_ids: Vec<NodeId>,
 }
 
-/// Per-node entry of the features summary: either the feature state of a
-/// reachable node, or an error string for an unreachable one.
+/// Per-node entry of the features summary: structured success or failure.
+///
+/// Success: `{ node_id, node_name, ok: true, features }`.
+/// Failure: `{ node_id, ok: false, error }` (no `features` key).
 #[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(untagged)]
-pub enum FeaturesInfoOrError {
-    Info(FeaturesInfo),
-    Error(String),
+pub struct FeaturesNodeResult {
+    pub node_id: NodeId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_name: Option<String>,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub features: Option<Features>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl FeaturesNodeResult {
+    /// Wrap a successful per-node feature report.
+    pub fn ok(info: FeaturesInfo) -> Self {
+        Self {
+            node_id: info.node_id,
+            node_name: Some(info.node_name),
+            ok: true,
+            features: Some(info.features),
+            error: None,
+        }
+    }
+
+    /// Wrap a per-node failure (gRPC timeout, decode error, ...).
+    pub fn err(node_id: NodeId, error: impl Into<String>) -> Self {
+        Self { node_id, node_name: None, ok: false, features: None, error: Some(error.into()) }
+    }
 }
 
 /// Query parameters for listing retained messages.

@@ -49,7 +49,11 @@ List all available endpoints.
 
 ```
 GET /api/v1
+GET /api/v1/openapi.json
+GET /api/v1/docs
 ```
+
+`GET /api/v1/openapi.json` is the OpenAPI 3 contract (valid for `openapi-typescript` / orval). `GET /api/v1/docs` is a Swagger UI shell.
 
 ---
 
@@ -92,8 +96,12 @@ GET /api/v1/features/{id}
 Returns the supported feature state of every cluster node (`retain`, `message_storage`, `session_storage`, `delayed`, `shared_subscription`, `auto_subscription`), plus a cluster-wide consistency summary:
 
 - `consistent`: whether all reachable nodes agree on every feature flag
+- `failed_count` / `partial`: unreachable nodes (HTTP 200, structured per-node `{ ok, error }`)
+- `enabled`: OR of each flag across reachable nodes (dashboard menu gating)
 - `conflicts`: fields with inconsistent values, grouped by value with the affected node ids
-- `nodes`: per-node details; unreachable nodes appear as error strings and are excluded from the comparison
+- `nodes`: per-node `{ ok, node_id, features? / error? }`
+
+Machine-readable contract: `GET /api/v1/openapi.json` (UI: `GET /api/v1/docs`).
 
 A `features inconsistent across cluster` warning log is emitted when an inconsistency is detected.
 

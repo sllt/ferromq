@@ -1,18 +1,25 @@
 //! Shared HTTP response helpers for the management API.
 //!
-//! Error bodies are JSON `{ "code": <http status>, "message": "..." }`.
-//! List endpoints keep their existing JSON schema and attach pagination
-//! metadata via `X-Row-Count` / `X-Truncated` headers.
+//! Error bodies are JSON `{ "code", "message", "details?", "request_id?" }`.
+//! List endpoints keep their existing JSON schema by default and attach
+//! pagination metadata via `X-Row-Count` / `X-Truncated` headers. Pass
+//! `?format=page` to wrap a list as `{ items, offset, limit, truncated, total? }`.
 
 use salvo::http::header::{HeaderValue, CONTENT_TYPE};
 use salvo::http::StatusCode;
 use salvo::prelude::*;
+use serde::Serialize;
 use serde_json::json;
 
 /// Header: number of rows in the successful JSON list body (or `items` length).
 pub(crate) const HEADER_ROW_COUNT: &str = "X-Row-Count";
 /// Header: `true` when the result was cut off by `_limit` / `max_row_limit`.
 pub(crate) const HEADER_TRUNCATED: &str = "X-Truncated";
+/// Header / error-body correlation id (echoed from the request when present).
+pub(crate) const HEADER_REQUEST_ID: &str = "X-Request-Id";
+
+/// Depot key for the per-request correlation id.
+pub(crate) const DEPOT_REQUEST_ID: &str = "REQUEST_ID";
 
 /// Pagination derived from query params without changing the JSON schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,14 +87,98 @@ pub(crate) fn apply_list_headers(res: &mut Response, row_count: usize, truncated
     res.add_header(HEADER_TRUNCATED, flag, true).ok();
 }
 
-/// Render a JSON error body `{ code, message }` and set the HTTP status.
+/// Cheap correlation id: hex timestamp plus a mixed-in uniqueness token.
+pub(crate) fn new_request_id() -> String {
+    let nanos =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    format!("{nanos:x}-{:04x}", ((nanos >> 17) as u16) ^ 0xa5a5)
+}
+
+/// `true` when the client asked for the optional page envelope (`?format=page`).
+pub(crate) fn wants_page_format(req: &Request) -> bool {
+    req.query::<String>("format").as_deref().is_some_and(|v| v.eq_ignore_ascii_case("page"))
+}
+
+/// Render a list: default is a bare JSON array; `?format=page` wraps it.
+pub(crate) fn render_list<T: Serialize + Send>(
+    req: &Request,
+    res: &mut Response,
+    items: Vec<T>,
+    paging: ListPaging,
+    truncated: bool,
+    total: Option<usize>,
+) {
+    apply_list_headers(res, items.len(), truncated);
+    if wants_page_format(req) {
+        let mut page = json!({
+            "items": items,
+            "offset": paging.offset,
+            "limit": paging.page_size,
+            "truncated": truncated,
+        });
+        if let Some(t) = total {
+            page["total"] = json!(t);
+        }
+        res.render(Json(page));
+    } else {
+        res.render(Json(items));
+    }
+}
+
+/// Structured per-node failure used by cluster-aggregating endpoints.
+///
+/// Shape: `{ "ok": false, "node_id": <id>, "error": "<msg>" }`.
+pub(crate) fn cluster_node_failure(node_id: u64, error: impl std::fmt::Display) -> serde_json::Value {
+    json!({
+        "ok": false,
+        "node_id": node_id,
+        "error": error.to_string(),
+    })
+}
+
+/// Mark a successful per-node object with `"ok": true` without replacing keys.
+pub(crate) fn cluster_node_success(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = value.as_object_mut() {
+        obj.entry("ok".to_string()).or_insert(json!(true));
+    }
+    value
+}
+
+/// Render a JSON error body `{ code, message, request_id, details? }`.
 pub(crate) fn render_api_error(res: &mut Response, status: StatusCode, message: impl Into<String>) {
+    render_api_error_with(res, status, message, None);
+}
+
+/// Render a JSON error body with optional `details`.
+pub(crate) fn render_api_error_with(
+    res: &mut Response,
+    status: StatusCode,
+    message: impl Into<String>,
+    details: Option<serde_json::Value>,
+) {
+    let request_id = res
+        .headers()
+        .get(HEADER_REQUEST_ID)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(new_request_id);
+    if res.headers().get(HEADER_REQUEST_ID).is_none() {
+        if let Ok(v) = HeaderValue::from_str(&request_id) {
+            res.add_header(HEADER_REQUEST_ID, v, true).ok();
+        }
+    }
     res.status_code(status);
     res.add_header(CONTENT_TYPE, "application/json; charset=utf-8", true).ok();
-    res.render(Json(json!({
+    let mut body = json!({
         "code": status.as_u16(),
         "message": message.into(),
-    })));
+        "request_id": request_id,
+    });
+    if let Some(d) = details {
+        body["details"] = d;
+    }
+    res.render(Json(body));
 }
 
 /// Convenience 404 JSON error.
@@ -233,8 +324,38 @@ mod tests {
 
     #[test]
     fn api_error_json_shape() {
-        let body = json!({"code": 404, "message": "plugin not found"});
+        let body = json!({
+            "code": 404,
+            "message": "plugin not found",
+            "request_id": "abc",
+        });
         assert_eq!(body["code"], 404);
         assert!(body["message"].as_str().unwrap().contains("plugin"));
+        assert!(body["request_id"].is_string());
+        assert!(body.get("details").is_none());
+    }
+
+    #[test]
+    fn cluster_node_success_sets_ok_without_clobber() {
+        let v = cluster_node_success(json!({"node": 1, "plugins": []}));
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["node"], 1);
+        assert!(v["plugins"].is_array());
+    }
+
+    #[test]
+    fn cluster_node_failure_is_structured() {
+        let v = cluster_node_failure(2, "connection refused");
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["node_id"], 2);
+        assert_eq!(v["error"], "connection refused");
+        assert!(v.get("plugins").is_none());
+    }
+
+    #[test]
+    fn new_request_id_is_nonempty_hex() {
+        let id = new_request_id();
+        assert!(id.contains('-'));
+        assert!(id.len() > 8);
     }
 }
