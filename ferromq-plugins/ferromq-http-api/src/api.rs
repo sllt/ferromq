@@ -69,6 +69,9 @@ use super::{clients, plugin, prome, subs, PluginConfigType};
 /// Depot key for the history caches + storage handle.
 const HISTORY_CACHES: &str = "HISTORY_CACHES";
 
+/// Test helper: build the API router with a fresh [`AuthState`] from an optional bearer.
+/// Production uses [`route_with_auth`] so the same `AuthState` can be shared with startup checks.
+#[cfg(test)]
 pub(crate) fn route(
     scx: ServerContext,
     cfg: PluginConfigType,
