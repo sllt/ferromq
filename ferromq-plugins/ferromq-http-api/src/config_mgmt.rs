@@ -125,7 +125,7 @@ pub(crate) fn wants_reveal(req: &Request) -> bool {
 }
 
 /// Query `?apply=none|reload`. Default `reload`.
-fn parse_apply(req: &Request) -> Result<bool> {
+pub(crate) fn parse_apply(req: &Request) -> Result<bool> {
     match req.query::<String>("apply").as_deref().map(str::trim).unwrap_or("reload") {
         "" | "reload" | "1" | "true" | "yes" => Ok(true),
         "none" | "0" | "false" | "no" => Ok(false),
@@ -260,7 +260,7 @@ fn strip_nulls(value: Value) -> Value {
     }
 }
 
-fn json_to_toml(value: &Value) -> Result<String> {
+pub(crate) fn json_to_toml(value: &Value) -> Result<String> {
     let cleaned = strip_nulls(value.clone());
     if !cleaned.is_object() {
         return Err(anyhow!("config body must be a JSON object or a TOML table"));
@@ -268,7 +268,7 @@ fn json_to_toml(value: &Value) -> Result<String> {
     toml::to_string_pretty(&cleaned).map_err(|e| anyhow!("serialize TOML: {e}"))
 }
 
-fn toml_to_json(text: &str) -> Result<Value> {
+pub(crate) fn toml_to_json(text: &str) -> Result<Value> {
     let val: toml::Value = toml::from_str(text).map_err(|e| anyhow!("invalid TOML: {e}"))?;
     serde_json::to_value(val).map_err(|e| anyhow!("TOML to JSON: {e}"))
 }
@@ -1078,7 +1078,7 @@ pub(crate) async fn node_plugin_config_rollback(
     Ok(())
 }
 
-fn deny_reveal_if_needed(req: &Request, depot: &Depot, res: &mut Response) -> bool {
+pub(crate) fn deny_reveal_if_needed(req: &Request, depot: &Depot, res: &mut Response) -> bool {
     if !wants_reveal(req) {
         return false;
     }
@@ -1460,6 +1460,62 @@ pub(crate) async fn grpc_rollback_plugin(
 ) -> Result<String> {
     let r = local_rollback_plugin(scx, name, version, apply, DEFAULT_HISTORY_KEEP).await?;
     Ok(serde_json::to_string(&r)?)
+}
+
+/// Read a plugin TOML file as JSON. `None` if the file is missing.
+pub(crate) fn read_local_plugin_file_json(scx: &ServerContext, name: &str) -> Result<Option<Value>> {
+    sanitize_name(name)?;
+    let dir = plugin_config_dir(scx)?;
+    read_file_json(&plugin_toml_path(dir, name))
+}
+
+/// Raw plugin TOML text (used by gRPC file reads).
+pub(crate) fn grpc_read_plugin_file(scx: &ServerContext, name: &str) -> Result<String> {
+    sanitize_name(name)?;
+    let dir = plugin_config_dir(scx)?;
+    let path = plugin_toml_path(dir, name);
+    if !path.is_file() {
+        return Err(anyhow!(format!("config file not found: {name}")));
+    }
+    Ok(fs::read_to_string(path)?)
+}
+
+/// Write a plugin config even when the plugin is not registered (file only).
+pub(crate) async fn local_write_plugin_lenient(
+    scx: &ServerContext,
+    name: &str,
+    json: &Value,
+    toml_text: &str,
+    apply: bool,
+    keep: usize,
+) -> Result<WriteResult> {
+    match plugin_reloadable(scx, name) {
+        Ok(_) => local_write_plugin(scx, name, json, toml_text, apply, keep).await,
+        Err(_) => {
+            sanitize_name(name)?;
+            let dir = plugin_config_dir(scx)?;
+            let path = plugin_toml_path(dir, name);
+            let hist = history_dir(dir, name);
+            let old = read_file_json(&path)?.unwrap_or(Value::Object(Default::default()));
+            let backup = backup_current(&path, &hist, keep)?;
+            atomic_write(&path, toml_text)?;
+            Ok(WriteResult {
+                ok: true,
+                written: true,
+                applied: false,
+                effective: EffectiveMode::RestartRequired,
+                diff: diff_json(&old, json),
+                backup,
+                apply_error: None,
+                plugin: Some(name.into()),
+                node: Some(scx.node.id()),
+                section: None,
+                note: Some(
+                    "Plugin is not loaded in this process. File written; start/restart to apply.".into(),
+                ),
+            })
+        }
+    }
 }
 
 #[cfg(test)]

@@ -406,6 +406,21 @@ impl Handler for HookHandler {
                                     ))),
                                 }
                             }
+                            Ok(Message::GetPluginConfigFile { name }) => {
+                                match config_mgmt::grpc_read_plugin_file(&self.scx, name) {
+                                    Ok(s) => match MessageReply::GetPluginConfigFile(s).encode() {
+                                        Ok(ress) => {
+                                            HookResult::GrpcMessageReply(Ok(GrpcMessageReply::Data(ress)))
+                                        }
+                                        Err(e) => HookResult::GrpcMessageReply(Ok(GrpcMessageReply::Error(
+                                            e.to_string(),
+                                        ))),
+                                    },
+                                    Err(e) => HookResult::GrpcMessageReply(Ok(GrpcMessageReply::Error(
+                                        e.to_string(),
+                                    ))),
+                                }
+                            }
                         };
                         return (false, Some(new_acc));
                     }

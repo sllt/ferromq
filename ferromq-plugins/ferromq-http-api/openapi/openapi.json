@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "FerroMQ HTTP API",
-    "description": "Management API for FerroMQ (`/api/v1`). Default list responses remain bare JSON arrays; pass `?format=page` for `{ items, offset, limit, truncated, total? }`. 4xx/5xx bodies are `{ code, message, details?, request_id }`. Cluster-aggregating endpoints return HTTP 200 with per-node `{ ok, error? }` instead of a single boolean when some nodes fail. Authentication: `Authorization: Bearer <http_bearer_token>` remains a static superuser (username `operator`, role `admin`). Dashboard login is `POST /api/v1/auth/login` (HttpOnly cookie `ferromq_session`). Created API keys also authenticate as `Authorization: Bearer <secret>` with a bound role. Roles: `admin` (users / keys / audit / broker config write / `?reveal=1` + writes), `operator` (kick / publish / plugin config write+reload), `viewer` (read-only, secrets redacted). When neither a bearer token, API key, nor dashboard password is configured, the API stays open (anonymous admin). P4 config `effective` is `hot` (already applied via plugin load_config; not a ferromqd restart), `reload` (file written; call PUT .../config/reload), or `restart_required` (file written; process restart needed). ferromqd is never claimed to hot-restart.",
+    "description": "Management API for FerroMQ (`/api/v1`). Default list responses remain bare JSON arrays; pass `?format=page` for `{ items, offset, limit, truncated, total? }`. 4xx/5xx bodies are `{ code, message, details?, request_id }`. Cluster-aggregating endpoints return HTTP 200 with per-node `{ ok, error? }` instead of a single boolean when some nodes fail. Authentication: `Authorization: Bearer <http_bearer_token>` remains a static superuser (username `operator`, role `admin`). Dashboard login is `POST /api/v1/auth/login` (HttpOnly cookie `ferromq_session`). Created API keys also authenticate as `Authorization: Bearer <secret>` with a bound role. Roles: `admin` (users / keys / audit / broker config write / `?reveal=1` + writes), `operator` (kick / publish / plugin config write+reload / P5 integrations write), `viewer` (read-only, secrets redacted). When neither a bearer token, API key, nor dashboard password is configured, the API stays open (anonymous admin). P4 config `effective` is `hot` (already applied via plugin load_config; not a ferromqd restart), `reload` (file written; call PUT .../config/reload), or `restart_required` (file written; process restart needed). ferromqd is never claimed to hot-restart. P5 adds structured ACL / auth-provider / auto-subscription / topic-rewrite / webhook / bridge APIs on top of P4 plugin-config write. There is no blacklist plugin; GET /api/v1/blacklist documents the gap.",
     "version": "0.24.0",
     "license": { "name": "MIT OR Apache-2.0" }
   },
@@ -26,6 +26,13 @@
     { "name": "MQTT" },
     { "name": "Plugins" },
     { "name": "Config", "description": "P4 online configuration: plugin config write/validate/versions and read-first broker mqtt/listener/log." },
+    { "name": "ACL", "description": "P5 structured ferromq-acl rules (hot-applied via load_config)." },
+    { "name": "Auth providers", "description": "P5 MQTT client auth plugins (http / jwt), not dashboard login." },
+    { "name": "Blacklist", "description": "Honest gap: FerroMQ has no blacklist plugin." },
+    { "name": "Auto-subscriptions", "description": "P5 ferromq-auto-subscription config." },
+    { "name": "Topic rewrites", "description": "P5 ferromq-topic-rewrite rules." },
+    { "name": "Webhooks", "description": "P5 ferromq-web-hook urls/rules; test is a TCP stub with SSRF checks." },
+    { "name": "Bridges", "description": "P5 bridge plugins: status/attrs + P4 config write + load/unload." },
     { "name": "Stats" },
     { "name": "Metrics" }
   ],
@@ -1520,6 +1527,269 @@
           "503": { "$ref": "#/components/responses/Unavailable" }
         }
       }
+    },
+    "/api/v1/acl": {
+      "get": {
+        "operationId": "getAcl",
+        "tags": ["ACL"],
+        "summary": "ACL settings and structured rules",
+        "description": "Reads ferromq-acl.toml. Passwords in who objects are `***` unless `?reveal=1` and admin.",
+        "parameters": [{ "$ref": "#/components/parameters/Reveal" }, { "$ref": "#/components/parameters/NodeQuery" }],
+        "responses": {
+          "200": { "description": "ACL overview", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AclOverview" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "put": {
+        "operationId": "putAcl",
+        "tags": ["ACL"],
+        "summary": "Update ACL settings and/or replace rules",
+        "description": "Writes ferromq-acl.toml and applies via plugin load_config when possible (`effective=hot`).",
+        "parameters": [{ "$ref": "#/components/parameters/Apply" }, { "$ref": "#/components/parameters/NodeQuery" }],
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AclWriteBody" } } } },
+        "responses": {
+          "200": { "description": "Write result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } } },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/v1/acl/rules": {
+      "get": {
+        "operationId": "listAclRules",
+        "tags": ["ACL"],
+        "summary": "List ACL rules",
+        "parameters": [{ "$ref": "#/components/parameters/Reveal" }, { "$ref": "#/components/parameters/NodeQuery" }, { "$ref": "#/components/parameters/Format" }],
+        "responses": {
+          "200": { "description": "Rules", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/AclRule" } } } } }
+        }
+      },
+      "post": {
+        "operationId": "addAclRule",
+        "tags": ["ACL"],
+        "summary": "Add an ACL rule",
+        "parameters": [{ "$ref": "#/components/parameters/Apply" }, { "$ref": "#/components/parameters/NodeQuery" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AclRuleInput" } } } },
+        "responses": {
+          "200": { "description": "Added", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/v1/acl/rules/{index}": {
+      "put": {
+        "operationId": "updateAclRule",
+        "tags": ["ACL"],
+        "summary": "Replace an ACL rule by index",
+        "parameters": [{ "$ref": "#/components/parameters/Index" }, { "$ref": "#/components/parameters/Apply" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AclRuleInput" } } } },
+        "responses": {
+          "200": { "description": "Updated", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "delete": {
+        "operationId": "deleteAclRule",
+        "tags": ["ACL"],
+        "summary": "Delete an ACL rule by index",
+        "parameters": [{ "$ref": "#/components/parameters/Index" }, { "$ref": "#/components/parameters/Apply" }],
+        "responses": {
+          "200": { "description": "Deleted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/auth-providers": {
+      "get": {
+        "operationId": "listAuthProviders",
+        "tags": ["Auth providers"],
+        "summary": "List MQTT client auth plugins",
+        "description": "ferromq-auth-http and ferromq-auth-jwt only. Not dashboard login.",
+        "responses": {
+          "200": { "description": "Providers", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuthProviderList" } } } }
+        }
+      }
+    },
+    "/api/v1/auth-providers/{name}": {
+      "get": {
+        "operationId": "getAuthProvider",
+        "tags": ["Auth providers"],
+        "summary": "Get auth-http or auth-jwt config",
+        "parameters": [{ "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/Reveal" }],
+        "responses": {
+          "200": { "description": "Config (secrets redacted)", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "put": {
+        "operationId": "putAuthProvider",
+        "tags": ["Auth providers"],
+        "summary": "Write auth provider config via P4",
+        "parameters": [{ "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/Apply" }],
+        "responses": {
+          "200": { "description": "Write result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } } }
+        }
+      }
+    },
+    "/api/v1/auth-providers/{name}/test": {
+      "post": {
+        "operationId": "testAuthProvider",
+        "tags": ["Auth providers"],
+        "summary": "Connectivity / config test stub",
+        "description": "http: TCP connect after SSRF checks (no HTTP request). jwt: local hmac_secret / public_key file check. Not a live IdP probe.",
+        "parameters": [{ "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/AllowPrivate" }],
+        "responses": {
+          "200": { "description": "Test result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConnectivityTest" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/api/v1/blacklist": {
+      "get": {
+        "operationId": "getBlacklist",
+        "tags": ["Blacklist"],
+        "summary": "Blacklist availability (gap)",
+        "description": "FerroMQ does not ship a blacklist plugin. Returns available=false and ACL connect-rule alternatives.",
+        "responses": {
+          "200": { "description": "Gap document", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BlacklistGap" } } } }
+        }
+      },
+      "post": {
+        "operationId": "addBlacklist",
+        "tags": ["Blacklist"],
+        "summary": "Not implemented (no plugin)",
+        "responses": { "501": { "description": "No blacklist plugin" } }
+      }
+    },
+    "/api/v1/auto-subscriptions": {
+      "get": {
+        "operationId": "listAutoSubscriptions",
+        "tags": ["Auto-subscriptions"],
+        "summary": "List auto-subscription topic filters",
+        "responses": { "200": { "description": "Items", "content": { "application/json": { "schema": { "type": "object" } } } } }
+      },
+      "post": {
+        "operationId": "addAutoSubscription",
+        "tags": ["Auto-subscriptions"],
+        "summary": "Add an auto-subscription",
+        "responses": { "200": { "description": "Write result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } } } }
+      }
+    },
+    "/api/v1/auto-subscriptions/{index}": {
+      "put": {
+        "operationId": "updateAutoSubscription",
+        "tags": ["Auto-subscriptions"],
+        "parameters": [{ "$ref": "#/components/parameters/Index" }],
+        "responses": { "200": { "description": "Updated" } }
+      },
+      "delete": {
+        "operationId": "deleteAutoSubscription",
+        "tags": ["Auto-subscriptions"],
+        "parameters": [{ "$ref": "#/components/parameters/Index" }],
+        "responses": { "200": { "description": "Deleted" } }
+      }
+    },
+    "/api/v1/topic-rewrites": {
+      "get": {
+        "operationId": "listTopicRewrites",
+        "tags": ["Topic rewrites"],
+        "summary": "List topic-rewrite rules",
+        "responses": { "200": { "description": "Items" } }
+      },
+      "post": {
+        "operationId": "addTopicRewrite",
+        "tags": ["Topic rewrites"],
+        "summary": "Add a rewrite rule",
+        "responses": { "200": { "description": "Write result" } }
+      }
+    },
+    "/api/v1/topic-rewrites/{index}": {
+      "put": { "operationId": "updateTopicRewrite", "tags": ["Topic rewrites"], "parameters": [{ "$ref": "#/components/parameters/Index" }], "responses": { "200": { "description": "Updated" } } },
+      "delete": { "operationId": "deleteTopicRewrite", "tags": ["Topic rewrites"], "parameters": [{ "$ref": "#/components/parameters/Index" }], "responses": { "200": { "description": "Deleted" } } }
+    },
+    "/api/v1/webhooks": {
+      "get": {
+        "operationId": "getWebhooks",
+        "tags": ["Webhooks"],
+        "summary": "Webhook urls, rules, and plugin attrs",
+        "description": "URL userinfo is redacted unless reveal=1 and admin. queue_capacity / concurrency_limit need a plugin restart (plugin docs).",
+        "parameters": [{ "$ref": "#/components/parameters/Reveal" }],
+        "responses": { "200": { "description": "Webhook config" } }
+      },
+      "put": {
+        "operationId": "putWebhooks",
+        "tags": ["Webhooks"],
+        "summary": "Update webhook settings / default urls",
+        "responses": { "200": { "description": "Write result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } } } }
+      }
+    },
+    "/api/v1/webhooks/urls": {
+      "post": {
+        "operationId": "addWebhookUrl",
+        "tags": ["Webhooks"],
+        "summary": "Append a default webhook URL",
+        "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] } } } },
+        "responses": { "200": { "description": "Added" } }
+      }
+    },
+    "/api/v1/webhooks/urls/{index}": {
+      "delete": { "operationId": "deleteWebhookUrl", "tags": ["Webhooks"], "parameters": [{ "$ref": "#/components/parameters/Index" }], "responses": { "200": { "description": "Deleted" } } }
+    },
+    "/api/v1/webhooks/rules": {
+      "post": {
+        "operationId": "addWebhookRule",
+        "tags": ["Webhooks"],
+        "summary": "Add a hook rule",
+        "responses": { "200": { "description": "Added" } }
+      }
+    },
+    "/api/v1/webhooks/rules/{hook}/{index}": {
+      "put": { "operationId": "updateWebhookRule", "tags": ["Webhooks"], "responses": { "200": { "description": "Updated" } } },
+      "delete": { "operationId": "deleteWebhookRule", "tags": ["Webhooks"], "responses": { "200": { "description": "Deleted" } } }
+    },
+    "/api/v1/webhooks/test": {
+      "post": {
+        "operationId": "testWebhook",
+        "tags": ["Webhooks"],
+        "summary": "TCP connectivity stub (no HTTP POST)",
+        "description": "SSRF: only http/https; blocks loopback/private/metadata unless allow_private=1 and admin.",
+        "parameters": [{ "$ref": "#/components/parameters/AllowPrivate" }],
+        "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "url": { "type": "string" } } } } } },
+        "responses": {
+          "200": { "description": "Probe result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConnectivityTest" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/api/v1/bridges": {
+      "get": {
+        "operationId": "listBridges",
+        "tags": ["Bridges"],
+        "summary": "List bridge plugins and attrs",
+        "responses": { "200": { "description": "Bridge list" } }
+      }
+    },
+    "/api/v1/bridges/{plugin}": {
+      "get": {
+        "operationId": "getBridge",
+        "tags": ["Bridges"],
+        "summary": "Bridge config + plugin attrs",
+        "parameters": [{ "name": "plugin", "in": "path", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/Reveal" }],
+        "responses": { "200": { "description": "Bridge" }, "404": { "$ref": "#/components/responses/NotFound" } }
+      },
+      "put": {
+        "operationId": "putBridge",
+        "tags": ["Bridges"],
+        "summary": "Write bridge config via P4",
+        "parameters": [{ "name": "plugin", "in": "path", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/Apply" }],
+        "responses": { "200": { "description": "Write result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } } } }
+      }
+    },
+    "/api/v1/bridges/{plugin}/load": {
+      "put": { "operationId": "loadBridge", "tags": ["Bridges"], "summary": "Start/load a bridge plugin", "responses": { "200": { "description": "Loaded" } } }
+    },
+    "/api/v1/bridges/{plugin}/unload": {
+      "put": { "operationId": "unloadBridge", "tags": ["Bridges"], "summary": "Stop/unload a bridge plugin", "responses": { "200": { "description": "Unloaded" } } }
     }
   },
   "components": {
@@ -1627,6 +1897,46 @@
         "name": "limit",
         "in": "query",
         "schema": { "type": "integer", "minimum": 0 }
+      },
+      "Reveal": {
+        "name": "reveal",
+        "in": "query",
+        "required": false,
+        "description": "If `1`/`true`, return unredacted secrets. Admin only; others get 403.",
+        "schema": { "type": "string", "enum": ["1", "true", "yes", "on"] }
+      },
+      "Apply": {
+        "name": "apply",
+        "in": "query",
+        "required": false,
+        "description": "`reload` (default) calls plugin `load_config` after write. `none` writes the file only.",
+        "schema": { "type": "string", "enum": ["reload", "none"], "default": "reload" }
+      },
+      "Format": {
+        "name": "format",
+        "in": "query",
+        "description": "Set to `page` to wrap a list.",
+        "schema": { "type": "string", "enum": ["page"] }
+      },
+      "NodeQuery": {
+        "name": "node",
+        "in": "query",
+        "required": false,
+        "description": "Target node id. Defaults to the HTTP API local node.",
+        "schema": { "type": "integer", "format": "int64" }
+      },
+      "Index": {
+        "name": "index",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "integer", "minimum": 0 }
+      },
+      "AllowPrivate": {
+        "name": "allow_private",
+        "in": "query",
+        "required": false,
+        "description": "Allow loopback/private IPs on connectivity tests. Admin only.",
+        "schema": { "type": "string", "enum": ["1", "true", "yes", "on"] }
       }
     },
     "headers": {
@@ -2067,6 +2377,83 @@
           "version": { "type": "string" },
           "ts": { "type": "integer", "format": "int64" },
           "size": { "type": "integer", "format": "int64" }
+        }
+      },
+      "AclRule": {
+        "type": "object",
+        "properties": {
+          "index": { "type": "integer" },
+          "access": { "type": "string", "enum": ["allow", "deny"] },
+          "who": {},
+          "control": { "type": "string", "enum": ["all", "connect", "publish", "subscribe", "pubsub"] },
+          "topics": { "type": "array" },
+          "raw": { "type": "array" }
+        }
+      },
+      "AclRuleInput": {
+        "type": "object",
+        "description": "Structured rule or `{ \"raw\": [\"allow\", \"all\"] }` / a raw array.",
+        "properties": {
+          "access": { "type": "string", "enum": ["allow", "deny"] },
+          "who": {},
+          "control": { "type": "string" },
+          "topics": { "type": "array" },
+          "raw": { "type": "array" },
+          "index": { "type": "integer", "description": "Optional insert index on POST" }
+        }
+      },
+      "AclWriteBody": {
+        "type": "object",
+        "properties": {
+          "disconnect_if_pub_rejected": { "type": "boolean" },
+          "priority": { "type": "integer" },
+          "rules": { "type": "array", "items": { "$ref": "#/components/schemas/AclRuleInput" } }
+        }
+      },
+      "AclOverview": {
+        "type": "object",
+        "properties": {
+          "plugin": { "type": "string" },
+          "node": { "type": "integer" },
+          "available": { "type": "boolean" },
+          "active": { "type": "boolean" },
+          "inited": { "type": "boolean" },
+          "reloadable": { "type": "boolean" },
+          "disconnect_if_pub_rejected": { "type": "boolean" },
+          "priority": { "type": "integer" },
+          "rules": { "type": "array", "items": { "$ref": "#/components/schemas/AclRule" } },
+          "note": { "type": "string" }
+        }
+      },
+      "AuthProviderList": {
+        "type": "object",
+        "properties": {
+          "node": { "type": "integer" },
+          "providers": { "type": "array", "items": { "type": "object" } },
+          "note": { "type": "string" }
+        }
+      },
+      "ConnectivityTest": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "kind": { "type": "string", "enum": ["tcp_connect", "jwt_config"] },
+          "plugin": { "type": "string" },
+          "url": { "type": "string" },
+          "latency_ms": { "type": "integer" },
+          "error": { "type": "string", "nullable": true },
+          "note": { "type": "string" }
+        }
+      },
+      "BlacklistGap": {
+        "type": "object",
+        "required": ["available", "items", "gap"],
+        "properties": {
+          "available": { "type": "boolean" },
+          "plugin": { "nullable": true },
+          "items": { "type": "array" },
+          "gap": { "type": "string" },
+          "alternatives": { "type": "array" }
         }
       },
       "BrokerConfigOverview": {

@@ -91,6 +91,17 @@ mod tests {
             "/api/v1/plugins/{node}/{plugin}/config/rollback/{version}",
             "/api/v1/broker/config",
             "/api/v1/broker/config/{section}",
+            "/api/v1/acl",
+            "/api/v1/acl/rules",
+            "/api/v1/auth-providers",
+            "/api/v1/auth-providers/{name}/test",
+            "/api/v1/blacklist",
+            "/api/v1/auto-subscriptions",
+            "/api/v1/topic-rewrites",
+            "/api/v1/webhooks",
+            "/api/v1/webhooks/test",
+            "/api/v1/bridges",
+            "/api/v1/bridges/{plugin}",
             "/api/v1/stats",
             "/api/v1/metrics",
             "/api/v1/metrics/prometheus",
@@ -114,6 +125,10 @@ mod tests {
             "ConfigValidateResult",
             "EffectiveMode",
             "BrokerConfigOverview",
+            "AclRule",
+            "AclOverview",
+            "BlacklistGap",
+            "ConnectivityTest",
         ] {
             assert!(schemas.contains_key(s), "missing schema {s}");
         }

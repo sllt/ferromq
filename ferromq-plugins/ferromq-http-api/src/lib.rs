@@ -31,6 +31,7 @@ mod config_mgmt;
 mod embed;
 mod flusher;
 mod handler;
+mod integrations;
 mod openapi;
 mod plugin;
 mod prome;

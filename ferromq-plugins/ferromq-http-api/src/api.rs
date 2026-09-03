@@ -52,6 +52,7 @@ use super::auth::{
 use super::config_mgmt;
 use super::embed::DashboardAssets;
 use super::flusher::{HistoryCache, HistoryCaches};
+use super::integrations;
 use super::openapi::{get_docs, get_openapi};
 use super::prome::{Monitor, PROME_MONITOR};
 use super::response::{
@@ -231,6 +232,104 @@ fn route_with_auth(
                 .push(
                     Router::with_path("{node}/{plugin}/unload").hoop(require_write).put(node_plugin_unload),
                 ),
+        )
+        .push(
+            Router::with_path("acl")
+                .get(integrations::acl_get)
+                .push(Router::new().hoop(require_write).put(integrations::acl_put))
+                .push(
+                    Router::with_path("rules")
+                        .get(integrations::acl_rules_list)
+                        .push(Router::new().hoop(require_write).post(integrations::acl_rules_add))
+                        .push(
+                            Router::with_path("{index}")
+                                .hoop(require_write)
+                                .put(integrations::acl_rules_update)
+                                .delete(integrations::acl_rules_delete),
+                        ),
+                ),
+        )
+        .push(
+            Router::with_path("auth-providers").get(integrations::auth_providers_list).push(
+                Router::with_path("{name}")
+                    .get(integrations::auth_provider_get)
+                    .push(Router::new().hoop(require_write).put(integrations::auth_provider_put))
+                    .push(
+                        Router::with_path("test").hoop(require_write).post(integrations::auth_provider_test),
+                    ),
+            ),
+        )
+        .push(
+            Router::with_path("blacklist")
+                .get(integrations::blacklist_get)
+                .push(
+                    Router::new()
+                        .hoop(require_write)
+                        .post(integrations::blacklist_write)
+                        .delete(integrations::blacklist_write),
+                )
+                .push(
+                    Router::with_path("{id}")
+                        .hoop(require_write)
+                        .put(integrations::blacklist_write)
+                        .delete(integrations::blacklist_write),
+                ),
+        )
+        .push(
+            Router::with_path("auto-subscriptions")
+                .get(integrations::auto_sub_get)
+                .push(Router::new().hoop(require_write).post(integrations::auto_sub_add))
+                .push(
+                    Router::with_path("{index}")
+                        .hoop(require_write)
+                        .put(integrations::auto_sub_update)
+                        .delete(integrations::auto_sub_delete),
+                ),
+        )
+        .push(
+            Router::with_path("topic-rewrites")
+                .get(integrations::topic_rewrite_get)
+                .push(Router::new().hoop(require_write).post(integrations::topic_rewrite_add))
+                .push(
+                    Router::with_path("{index}")
+                        .hoop(require_write)
+                        .put(integrations::topic_rewrite_update)
+                        .delete(integrations::topic_rewrite_delete),
+                ),
+        )
+        .push(
+            Router::with_path("webhooks")
+                .get(integrations::webhooks_get)
+                .push(Router::new().hoop(require_write).put(integrations::webhooks_put))
+                .push(
+                    Router::with_path("urls")
+                        .push(Router::new().hoop(require_write).post(integrations::webhook_urls_add))
+                        .push(
+                            Router::with_path("{index}")
+                                .hoop(require_write)
+                                .delete(integrations::webhook_urls_delete),
+                        ),
+                )
+                .push(
+                    Router::with_path("rules")
+                        .push(Router::new().hoop(require_write).post(integrations::webhook_rules_add))
+                        .push(
+                            Router::with_path("{hook}/{index}")
+                                .hoop(require_write)
+                                .put(integrations::webhook_rules_update)
+                                .delete(integrations::webhook_rules_delete),
+                        ),
+                )
+                .push(Router::with_path("test").hoop(require_write).post(integrations::webhook_test)),
+        )
+        .push(
+            Router::with_path("bridges").get(integrations::bridges_list).push(
+                Router::with_path("{plugin}")
+                    .get(integrations::bridge_get)
+                    .push(Router::new().hoop(require_write).put(integrations::bridge_put))
+                    .push(Router::with_path("load").hoop(require_write).put(integrations::bridge_load))
+                    .push(Router::with_path("unload").hoop(require_write).put(integrations::bridge_unload)),
+            ),
         )
         .push(
             Router::with_path("stats")
@@ -666,6 +765,78 @@ async fn list_apis(res: &mut Response) {
             "method": "PUT",
             "path": "/api/v1/plugins/{node}/{plugin}/unload",
             "descr": "Unload the specified plugin under the specified node."
+        },
+        {
+            "name": "acl_get",
+            "method": "GET",
+            "path": "/api/v1/acl",
+            "descr": "Structured ferromq-acl settings + rules (secrets redacted unless reveal=1)"
+        },
+        {
+            "name": "acl_rules_list",
+            "method": "GET",
+            "path": "/api/v1/acl/rules",
+            "descr": "List ACL rules without hand-editing TOML"
+        },
+        {
+            "name": "acl_rules_add",
+            "method": "POST",
+            "path": "/api/v1/acl/rules",
+            "descr": "Append an ACL rule and hot-apply via plugin load_config"
+        },
+        {
+            "name": "auth_providers_list",
+            "method": "GET",
+            "path": "/api/v1/auth-providers",
+            "descr": "MQTT client auth plugins (ferromq-auth-http / ferromq-auth-jwt)"
+        },
+        {
+            "name": "auth_provider_test",
+            "method": "POST",
+            "path": "/api/v1/auth-providers/{name}/test",
+            "descr": "HTTP TCP-connect stub or JWT local config check (SSRF-safe)"
+        },
+        {
+            "name": "blacklist_get",
+            "method": "GET",
+            "path": "/api/v1/blacklist",
+            "descr": "Honest gap: no blacklist plugin; ACL connect rules are the alternative"
+        },
+        {
+            "name": "auto_subscriptions",
+            "method": "GET",
+            "path": "/api/v1/auto-subscriptions",
+            "descr": "List ferromq-auto-subscription topic filters"
+        },
+        {
+            "name": "topic_rewrites",
+            "method": "GET",
+            "path": "/api/v1/topic-rewrites",
+            "descr": "List ferromq-topic-rewrite rules"
+        },
+        {
+            "name": "webhooks_get",
+            "method": "GET",
+            "path": "/api/v1/webhooks",
+            "descr": "ferromq-web-hook urls + rules (URL userinfo redacted)"
+        },
+        {
+            "name": "webhook_test",
+            "method": "POST",
+            "path": "/api/v1/webhooks/test",
+            "descr": "TCP connectivity stub for a webhook URL (no HTTP POST; SSRF checks)"
+        },
+        {
+            "name": "bridges_list",
+            "method": "GET",
+            "path": "/api/v1/bridges",
+            "descr": "Bridge plugins + attrs/status from plugin attrs()"
+        },
+        {
+            "name": "bridge_config",
+            "method": "PUT",
+            "path": "/api/v1/bridges/{plugin}",
+            "descr": "Write a bridge plugin config via the P4 plugin-config path"
         },
 
         {
@@ -4758,5 +4929,282 @@ listener.tcp.external.addr = "0.0.0.0:1883"
         assert!(modes.iter().any(|v| v == "hot"));
         assert!(modes.iter().any(|v| v == "reload"));
         assert!(modes.iter().any(|v| v == "restart_required"));
+    }
+
+    struct P5Env {
+        svc: Service,
+        dir: std::path::PathBuf,
+        state: Arc<crate::auth::AuthState>,
+    }
+
+    impl Drop for P5Env {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    async fn p5_env(cfg: PluginConfig) -> P5Env {
+        let dir = std::env::temp_dir().join(format!(
+            "ferromq-p5-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("ferromq-acl.toml"),
+            r##"
+disconnect_if_pub_rejected = true
+priority = 10
+rules = [
+    ["allow", { user = "dashboard", password = "s3cret" }, "subscribe", ["$SYS/#"]],
+    ["allow", "all"]
+]
+"##,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("ferromq-auth-http.toml"),
+            "http_timeout = \"5s\"\nhttp_auth_req = { url = \"http://127.0.0.1:9090/mqtt/auth\", method = \"post\", params = { username = \"%u\" } }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("ferromq-auth-jwt.toml"),
+            "from = \"password\"\nencrypt = \"hmac-based\"\nhmac_secret = \"jwt-secret-value\"\nhmac_base64 = false\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("ferromq-auto-subscription.toml"),
+            "subscribes = [{ topic_filter = \"x/+/#\", qos = 1, no_local = false, retain_as_published = false, retain_handling = 0 }]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("ferromq-topic-rewrite.toml"),
+            "rules = [{ action = \"all\", source_topic_filter = \"a/b\", dest_topic = \"c/d\" }]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("ferromq-web-hook.toml"),
+            r##"
+urls = ["https://user:hook-secret@hooks.example.com/mqtt"]
+http_timeout = "8s"
+[[rule.message_publish]]
+action = "message_publish"
+topics = ["#"]
+"##,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("ferromq-bridge-egress-mqtt.toml"),
+            "[[bridges]]\nenable = true\nname = \"b1\"\nserver = \"tcp://127.0.0.1:2883\"\nusername = \"ferromq_u\"\npassword = \"bridge-pass\"\n",
+        )
+        .unwrap();
+
+        let scx = ServerContext::new()
+            .node_id(1)
+            .plugins_config_dir(dir.to_string_lossy().into_owned())
+            .busy_check_enable(false)
+            .build()
+            .await;
+        for name in [
+            "ferromq-acl",
+            "ferromq-auth-http",
+            "ferromq-auth-jwt",
+            "ferromq-auto-subscription",
+            "ferromq-topic-rewrite",
+            "ferromq-web-hook",
+            "ferromq-bridge-egress-mqtt",
+        ] {
+            let n = name.to_string();
+            scx.plugins
+                .register(name, true, false, move || {
+                    let n = n.clone();
+                    Box::pin(async move {
+                        Ok(Box::new(P4DemoPlugin { name: n, cfg: json!({}) }) as ferromq::plugin::DynPlugin)
+                    })
+                })
+                .await
+                .expect("register p5 plugin");
+        }
+
+        let mut cfg = cfg;
+        cfg.broker_config_file = Some(dir.join("ferromq.toml").display().to_string());
+        cfg.config_history_keep = 5;
+        let state = Arc::new(crate::auth::AuthState::new(None));
+        let cfg = Arc::new(RwLock::new(cfg));
+        let router = route_with_auth(scx, cfg, state.clone(), prome::Monitor::new(), None);
+        P5Env { svc: Service::new(router), dir, state }
+    }
+
+    #[tokio::test]
+    async fn p5_acl_crud_redacts_password_and_hot_applies() {
+        let env = p5_env(dashboard_cfg()).await;
+        let (resp, body) = login(&env.svc, "admin", "admin-secret").await;
+        assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
+        let admin = session_cookie(&resp);
+
+        let mut listed = TestClient::get("http://127.0.0.1:0/api/v1/acl/rules")
+            .add_header("cookie", &admin, true)
+            .send(&env.svc)
+            .await;
+        assert_eq!(listed.status_code, Some(StatusCode::OK));
+        let rules: serde_json::Value = listed.take_json().await.unwrap();
+        assert!(rules.as_array().unwrap().len() >= 2);
+        assert_eq!(rules[0]["who"]["password"], "***");
+        assert_ne!(rules[0]["who"]["password"], "s3cret");
+
+        let mut added = TestClient::post("http://127.0.0.1:0/api/v1/acl/rules")
+            .add_header("cookie", &admin, true)
+            .json(&json!({"access":"deny","who":{"ipaddr":"10.1.2.3"},"control":"connect"}))
+            .send(&env.svc)
+            .await;
+        assert_eq!(added.status_code, Some(StatusCode::OK));
+        let added_body: serde_json::Value = added.take_json().await.unwrap();
+        assert_eq!(added_body["written"], true);
+        assert_eq!(added_body["effective"], "hot");
+        assert_eq!(added_body["applied"], true);
+        let idx = added_body["rule"]["index"].as_u64().unwrap();
+
+        let updated = TestClient::put(format!("http://127.0.0.1:0/api/v1/acl/rules/{idx}"))
+            .add_header("cookie", &admin, true)
+            .json(&json!({"access":"deny","who":{"clientid":"bad"},"control":"connect"}))
+            .send(&env.svc)
+            .await;
+        assert_eq!(updated.status_code, Some(StatusCode::OK));
+
+        let deleted = TestClient::delete(format!("http://127.0.0.1:0/api/v1/acl/rules/{idx}"))
+            .add_header("cookie", &admin, true)
+            .send(&env.svc)
+            .await;
+        assert_eq!(deleted.status_code, Some(StatusCode::OK));
+
+        let disk = std::fs::read_to_string(env.dir.join("ferromq-acl.toml")).unwrap();
+        assert!(!disk.contains("10.1.2.3"));
+    }
+
+    #[tokio::test]
+    async fn p5_webhook_bridge_blacklist_and_rbac() {
+        let env = p5_env(dashboard_cfg()).await;
+        let (admin_resp, admin_body) = login(&env.svc, "admin", "admin-secret").await;
+        assert_eq!(admin_resp.status_code, Some(StatusCode::OK), "{admin_body}");
+        let admin = session_cookie(&admin_resp);
+        env.state.insert_user("ops", "ops-secret-1", crate::auth::Role::Operator).await.unwrap();
+        env.state.insert_user("viewer", "viewer-secret", crate::auth::Role::Viewer).await.unwrap();
+        let (ops_resp, _) = login(&env.svc, "ops", "ops-secret-1").await;
+        let ops = session_cookie(&ops_resp);
+        let (viewer_resp, _) = login(&env.svc, "viewer", "viewer-secret").await;
+        let viewer = session_cookie(&viewer_resp);
+
+        let mut hooks = TestClient::get("http://127.0.0.1:0/api/v1/webhooks")
+            .add_header("cookie", &viewer, true)
+            .send(&env.svc)
+            .await;
+        assert_eq!(hooks.status_code, Some(StatusCode::OK));
+        let hooks_body: serde_json::Value = hooks.take_json().await.unwrap();
+        let url = hooks_body["urls"][0].as_str().unwrap();
+        assert!(!url.contains("hook-secret"));
+        assert!(url.contains("***"));
+
+        let denied = TestClient::post("http://127.0.0.1:0/api/v1/webhooks/urls")
+            .add_header("cookie", &viewer, true)
+            .json(&json!({"url":"https://hooks.example.com/other"}))
+            .send(&env.svc)
+            .await;
+        assert_eq!(denied.status_code, Some(StatusCode::FORBIDDEN));
+
+        let mut add = TestClient::post("http://127.0.0.1:0/api/v1/webhooks/urls")
+            .add_header("cookie", &ops, true)
+            .json(&json!({"url":"https://hooks.example.com/other"}))
+            .send(&env.svc)
+            .await;
+        assert_eq!(add.status_code, Some(StatusCode::OK));
+        let add_body: serde_json::Value = add.take_json().await.unwrap();
+        assert_eq!(add_body["written"], true);
+
+        let ssrf = TestClient::post("http://127.0.0.1:0/api/v1/webhooks/test")
+            .add_header("cookie", &ops, true)
+            .json(&json!({"url":"http://127.0.0.1:1/x"}))
+            .send(&env.svc)
+            .await;
+        assert_eq!(ssrf.status_code, Some(StatusCode::BAD_REQUEST));
+
+        let mut bl = TestClient::get("http://127.0.0.1:0/api/v1/blacklist")
+            .add_header("cookie", &ops, true)
+            .send(&env.svc)
+            .await;
+        let bl_body: serde_json::Value = bl.take_json().await.unwrap();
+        assert_eq!(bl_body["available"], false);
+        assert!(bl_body["gap"].as_str().unwrap().contains("blacklist"));
+
+        let write_bl = TestClient::post("http://127.0.0.1:0/api/v1/blacklist")
+            .add_header("cookie", &ops, true)
+            .json(&json!({"ip":"1.2.3.4"}))
+            .send(&env.svc)
+            .await;
+        assert_eq!(write_bl.status_code, Some(StatusCode::NOT_IMPLEMENTED));
+
+        let mut bridges = TestClient::get("http://127.0.0.1:0/api/v1/bridges")
+            .add_header("cookie", &ops, true)
+            .send(&env.svc)
+            .await;
+        assert_eq!(bridges.status_code, Some(StatusCode::OK));
+        let bridges_body: serde_json::Value = bridges.take_json().await.unwrap();
+        assert!(bridges_body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["name"] == "ferromq-bridge-egress-mqtt"));
+
+        let mut bridge = TestClient::get("http://127.0.0.1:0/api/v1/bridges/ferromq-bridge-egress-mqtt")
+            .add_header("cookie", &viewer, true)
+            .send(&env.svc)
+            .await;
+        let bridge_body: serde_json::Value = bridge.take_json().await.unwrap();
+        assert_eq!(bridge_body["config"]["bridges"][0]["password"], "***");
+
+        let mut providers = TestClient::get("http://127.0.0.1:0/api/v1/auth-providers")
+            .add_header("cookie", &ops, true)
+            .send(&env.svc)
+            .await;
+        let providers_body: serde_json::Value = providers.take_json().await.unwrap();
+        assert_eq!(providers_body["providers"].as_array().unwrap().len(), 2);
+
+        let mut jwt = TestClient::post("http://127.0.0.1:0/api/v1/auth-providers/jwt/test")
+            .add_header("cookie", &ops, true)
+            .json(&json!({}))
+            .send(&env.svc)
+            .await;
+        let jwt_body: serde_json::Value = jwt.take_json().await.unwrap();
+        assert_eq!(jwt_body["ok"], true);
+        assert_eq!(jwt_body["kind"], "jwt_config");
+
+        let auto = TestClient::post("http://127.0.0.1:0/api/v1/auto-subscriptions")
+            .add_header("cookie", &ops, true)
+            .json(&json!({"topic_filter":"iot/${clientid}/#","qos":1}))
+            .send(&env.svc)
+            .await;
+        assert_eq!(auto.status_code, Some(StatusCode::OK));
+
+        let rw = TestClient::post("http://127.0.0.1:0/api/v1/topic-rewrites")
+            .add_header("cookie", &ops, true)
+            .json(&json!({"action":"publish","source_topic_filter":"in/#","dest_topic":"out/${clientid}"}))
+            .send(&env.svc)
+            .await;
+        assert_eq!(rw.status_code, Some(StatusCode::OK));
+
+        let mut audit = TestClient::get("http://127.0.0.1:0/api/v1/audit?action=webhook_url_add")
+            .add_header("cookie", &admin, true)
+            .send(&env.svc)
+            .await;
+        let events: serde_json::Value = audit.take_json().await.unwrap();
+        assert!(events.as_array().unwrap().iter().any(|e| e["action"] == "webhook_url_add"));
+
+        let mut spec = TestClient::get("http://127.0.0.1:0/api/v1/openapi.json").send(&env.svc).await;
+        let spec_body: serde_json::Value = spec.take_json().await.unwrap();
+        assert!(spec_body["paths"]["/api/v1/acl/rules"].is_object());
+        assert!(spec_body["paths"]["/api/v1/webhooks"].is_object());
+        assert!(spec_body["paths"]["/api/v1/bridges"].is_object());
     }
 }

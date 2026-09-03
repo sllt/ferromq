@@ -88,6 +88,10 @@ pub enum Message<'a> {
         version: &'a str,
         apply: bool,
     },
+    /// Read the on-disk plugin TOML on a remote node (P5 mutations).
+    GetPluginConfigFile {
+        name: &'a str,
+    },
 }
 
 impl Message<'_> {
@@ -142,6 +146,8 @@ pub enum MessageReply {
     ListPluginConfigVersions(String),
     /// JSON-encoded plugin config rollback result.
     RollbackPluginConfig(String),
+    /// Raw plugin TOML file contents.
+    GetPluginConfigFile(String),
 }
 
 impl MessageReply {
