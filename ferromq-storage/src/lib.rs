@@ -143,6 +143,48 @@ pub struct Config {
     pub redb: RedbConfig,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            typ: default_storage_type(),
+            #[cfg(feature = "sled")]
+            sled: SledConfig::default(),
+            #[cfg(feature = "redis")]
+            redis: RedisConfig::default(),
+            #[cfg(feature = "redis-cluster")]
+            redis_cluster: RedisClusterConfig::default(),
+            #[cfg(feature = "redb")]
+            redb: RedbConfig::default(),
+        }
+    }
+}
+
+#[cfg(feature = "redb")]
+fn default_storage_type() -> StorageType {
+    StorageType::Redb
+}
+#[cfg(all(feature = "sled", not(feature = "redb")))]
+fn default_storage_type() -> StorageType {
+    StorageType::Sled
+}
+#[cfg(all(
+    feature = "redis-cluster",
+    not(feature = "redb"),
+    not(feature = "sled")
+))]
+fn default_storage_type() -> StorageType {
+    StorageType::RedisCluster
+}
+#[cfg(all(
+    feature = "redis",
+    not(feature = "redis-cluster"),
+    not(feature = "redb"),
+    not(feature = "sled")
+))]
+fn default_storage_type() -> StorageType {
+    StorageType::Redis
+}
+
 /// Enum representing available storage backend types
 ///
 /// Variants are conditionally included based on enabled features
@@ -370,6 +412,7 @@ mod tests {
                 .into(),
                 prefix: "sled_cleanup".to_owned(),
             },
+            ..Default::default()
         };
 
         let db = SledStorageDB::new(cfg.sled.clone()).await.unwrap();
@@ -1853,6 +1896,7 @@ mod tests {
                 .into(),
                 prefix: "map_expire_list".to_owned(),
             },
+            ..Default::default()
         };
 
         let mut db = SledStorageDB::new(cfg.sled.clone()).await.unwrap();

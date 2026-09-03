@@ -79,6 +79,7 @@ async fn init_database() -> DefaultStorageDB {
                     path: temp_dir.to_string_lossy().to_string(),
                     ..Default::default()
                 },
+                ..Default::default()
             };
             ferromq_storage::init_db(&cfg)
                 .await
@@ -92,6 +93,7 @@ async fn init_database() -> DefaultStorageDB {
                     path: format!("{}.redb", temp_dir.to_string_lossy()),
                     ..Default::default()
                 },
+                ..Default::default()
             };
             ferromq_storage::init_db(&cfg)
                 .await
