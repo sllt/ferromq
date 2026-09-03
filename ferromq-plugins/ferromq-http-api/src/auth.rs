@@ -1026,7 +1026,8 @@ pub(crate) async fn list_users(req: &mut Request, depot: &mut Depot, res: &mut R
     let max_row_limit = plugin_cfg(depot).map(|c| c.max_row_limit).unwrap_or(10_000);
     let users: Vec<_> = state.list_users().await.iter().map(user_to_json).collect();
     let total = users.len();
-    let paging = ListPaging::from_request(req, 0, max_row_limit);
+    let requested = req.query::<usize>("_limit").unwrap_or(0);
+    let paging = ListPaging::from_request(req, requested, max_row_limit);
     let (page, truncated) = paging.apply(users);
     render_list(req, res, page, paging, truncated, Some(total));
 }
@@ -1134,7 +1135,8 @@ pub(crate) async fn list_api_keys(req: &mut Request, depot: &mut Depot, res: &mu
     let max_row_limit = plugin_cfg(depot).map(|c| c.max_row_limit).unwrap_or(10_000);
     let keys: Vec<_> = state.list_api_keys().await.iter().map(|k| api_key_to_json(k, None)).collect();
     let total = keys.len();
-    let paging = ListPaging::from_request(req, 0, max_row_limit);
+    let requested = req.query::<usize>("_limit").unwrap_or(0);
+    let paging = ListPaging::from_request(req, requested, max_row_limit);
     let (page, truncated) = paging.apply(keys);
     render_list(req, res, page, paging, truncated, Some(total));
 }

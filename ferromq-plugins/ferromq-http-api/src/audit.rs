@@ -222,7 +222,8 @@ pub(crate) async fn list_audit(req: &mut Request, depot: &mut Depot, res: &mut R
     });
     let all = log.query(action.as_deref(), username.as_deref(), success).await;
     let total = all.len();
-    let paging = ListPaging::from_request(req, 0, max_row_limit);
+    let requested = req.query::<usize>("_limit").unwrap_or(0);
+    let paging = ListPaging::from_request(req, requested, max_row_limit);
     let (page, truncated) = paging.apply(all);
     render_list(req, res, page, paging, truncated, Some(total));
 }
