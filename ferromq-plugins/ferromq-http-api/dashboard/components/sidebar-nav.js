@@ -96,9 +96,9 @@
       group: 'nav.group_system',
       icon: '&#9878;',
       children: [
-        { disabled: true, label: 'nav.users',     icon: '&#128100;' },
-        { disabled: true, label: 'nav.audit_log', icon: '&#128196;' },
-        { disabled: true, label: 'nav.api_keys',  icon: '&#128273;' },
+        { hash: '#/users',    label: 'nav.users',     icon: '&#128100;' },
+        { hash: '#/audit',    label: 'nav.audit_log', icon: '&#128196;' },
+        { hash: '#/api-keys', label: 'nav.api_keys',  icon: '&#128273;' },
       ],
     },
   ];

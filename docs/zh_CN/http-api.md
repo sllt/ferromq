@@ -49,8 +49,10 @@ http_laddr = "0.0.0.0:6060"
 # dashboard_session_max_age = "12h"
 # dashboard_login_rate_limit = 10
 # dashboard_login_rate_window = "1m"
-## 用户与会话仅存于本节点内存。重启后按配置重新引导。
-## 集群需粘性会话；API Key 与审计日志留给 P3b。
+# audit_max_events = 10000
+# audit_file = "/var/log/ferromq/http-api-audit.jsonl"
+## 用户 / 会话 / API Key 仅存于本节点内存。重启后按配置重新引导。
+## 集群需粘性会话。
 
 ## Enable TCP SO_REUSEADDR on the HTTP listener.
 ## Default: true
@@ -135,7 +137,7 @@ FerroMQ 接口在调用成功时总是返回 200 OK，响应内容主要以 JSON
 | 200  | 成功，如果需要返回更多数据，将以 JSON 数据格式返回              |
 | 400  | 客户端请求无效，例如请求体或参数错误                        |
 | 401  | 客户端未通过服务端认证，使用无效的身份验证凭据可能会发生              |
-| 403  | 已认证但角色无权执行写操作（`viewer` 不能踢人 / 发布 / 加载插件） |
+| 403  | 已认证但角色无权（`viewer` / `operator` / `admin`） |
 | 404  | 找不到请求的路径或者请求的对象不存在                        |
 | 409  | Dashboard 用户已初始化（`POST /auth/init`） |
 | 429  | 登录尝试过于频繁 |
@@ -158,21 +160,28 @@ API 失败时返回 **JSON**（不再使用纯文本 / HTML）：
 
 机器可读契约：`GET /api/v1/openapi.json`（Swagger UI：`GET /api/v1/docs`）。
 
-## 认证（P3a 会话 + Bearer）
+## 认证（P3a 会话 + P3b API Key）
 
-HTTP API 接受两种凭证。**MQTT 客户端认证插件不受影响。**
+HTTP API 接受以下凭证。**MQTT 客户端认证插件不受影响。**
 
 | 机制 | 用法 | 角色 |
 |------|------|------|
-| 会话 Cookie | `POST /api/v1/auth/login` 提交 `{ "username", "password" }`，设置 `ferromq_session`（`HttpOnly`、`SameSite=Lax`，`dashboard_cookie_secure` 时带 `Secure`） | 用户记录上的 `admin` 或 `viewer` |
-| Bearer 令牌 | `Authorization: Bearer <http_bearer_token>` | 始终为 `admin`（用户名 `operator`），供自动化使用 |
-| 开放访问 | 未配置 `http_bearer_token` 与 `dashboard_admin_password`，且尚无用户 | 匿名 `admin`（向后兼容） |
+| 会话 Cookie | `POST /api/v1/auth/login` 提交 `{ "username", "password" }`，设置 `ferromq_session` | 用户记录上的 `admin` / `operator` / `viewer` |
+| 静态 Bearer | `Authorization: Bearer <http_bearer_token>` | 始终为 `admin`（用户名 `operator`） |
+| API Key Bearer | `Authorization: Bearer <fmqk_…>`（`POST /api/v1/api-keys` 创建） | 绑定的角色 |
+| 开放访问 | 未配置 bearer / API Key / `dashboard_admin_password`，且尚无用户 | 匿名 `admin` |
 
 无需会话/Bearer 即可访问：`POST /auth/login`、`POST /auth/logout`、`POST /auth/init`、`GET /health/check`、`GET /openapi.json`、`GET /docs`。
 
-`viewer` 只读。`viewer` **不能**踢客户端、经 HTTP 发布/订阅、删除保留消息、加载/卸载/重载插件（`403`，`details.required_role = admin`）。
+### 角色
 
-密码以 **bcrypt** 哈希保存在进程内存中（从不存明文）。重启会清空用户与会话，下次 login/init 按配置重新创建 admin。集群中每个节点各自一份存储——需要粘性会话。
+| 角色 | 只读 | 踢人 / 发布 / 插件 | 用户 / API Key / 审计 |
+|------|------|-------------------|----------------------|
+| `admin` | 是 | 是 | 是 |
+| `operator` | 是 | 是 | 否（`403`，`required_role: admin`） |
+| `viewer` | 是 | 否（`403`，`required_role: operator`） | 否 |
+
+密码以 **bcrypt** 哈希保存；API Key 密钥以 **SHA-256** 哈希保存。均在进程内存中。重启会清空用户 / 会话 / Key。集群需粘性会话。
 
 ### 如何测试
 
@@ -185,27 +194,32 @@ curl -sS -c cookie.txt -X POST http://127.0.0.1:6060/api/v1/auth/login \
 
 curl -sS -b cookie.txt http://127.0.0.1:6060/api/v1/auth/me
 
-curl -sS -b cookie.txt -X POST http://127.0.0.1:6060/api/v1/auth/change-password \
+curl -sS -b cookie.txt -X POST http://127.0.0.1:6060/api/v1/users \
   -H 'Content-Type: application/json' \
-  -d '{"old_password":"change-me","new_password":"change-me-2"}'
+  -d '{"username":"ops","password":"ops-secret-1","role":"operator"}'
+
+curl -sS -b cookie.txt -X POST http://127.0.0.1:6060/api/v1/api-keys \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"ci","role":"operator"}'
+# secret 只返回一次
+
+curl -sS -H 'Authorization: Bearer fmqk_…' \
+  -X DELETE http://127.0.0.1:6060/api/v1/clients/demo
+
+curl -sS -b cookie.txt 'http://127.0.0.1:6060/api/v1/audit?format=page&_limit=20'
 
 curl -sS -H 'Authorization: Bearer public' http://127.0.0.1:6060/api/v1/brokers
 
 curl -sS -b cookie.txt -c cookie.txt -X POST http://127.0.0.1:6060/api/v1/auth/logout
 ```
 
-### Dashboard 前端迁移
+### Dashboard 前端
 
-内嵌 SPA 不再以粘贴 Bearer Token 为主要登录方式。
-
-1. 优先 `POST /api/v1/auth/login`，所有 `/api/v1` 的 `fetch` 带 `credentials: 'include'`，以便携带 HttpOnly Cookie。
-2. 启动时调用 `GET /api/v1/auth/me`。`200` 表示已进入（会话、残留 Bearer，或未开启认证时的匿名）。`401` 则显示登录页。
-3. 保留 `Authorization: Bearer <token>` 作为可选的 operator 回退（localStorage）。
-4. `POST /api/v1/auth/logout` 后清除本地 token 标记。
-5. 踢人 / 发布 / 加载插件的 UI 按 `role !== 'viewer'` 门控。
-6. 不要存储密码。会话 ID 只存在于 HttpOnly Cookie。
-
-P3b 将增加 API Key 与审计日志；请求身份已在 depot 中提供 `username` / `role` / `auth`。
+1. 优先 `POST /api/v1/auth/login`，所有 `/api/v1` 的 `fetch` 带 `credentials: 'include'`。
+2. 启动时调用 `GET /api/v1/auth/me`。`200` 已登录，`401` 显示登录页。
+3. 保留 `Authorization: Bearer <token>` 作为可选回退（静态令牌或 API Key）。
+4. 踢人 / 发布 / 插件按 `role !== 'viewer'` 门控；用户 / Key / 审计按 `role === 'admin'`。
+5. 不要存储密码。API Key 明文只在创建时展示一次。
 
 ## 列表分页元数据
 

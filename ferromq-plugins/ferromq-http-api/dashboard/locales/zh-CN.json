@@ -358,5 +358,43 @@
     "delete": "删除",
     "delete_confirm": "确定删除主题 {topic} 的保留消息吗？",
     "delete_fail": "删除失败：{msg}"
+  },
+  "users": {
+    "username": "用户名",
+    "password": "密码",
+    "role": "角色",
+    "enabled": "启用",
+    "action": "操作",
+    "create": "创建用户",
+    "disable": "禁用",
+    "enable": "启用",
+    "yes": "是",
+    "no": "否",
+    "empty": "暂无 Dashboard 用户",
+    "admin_only": "仅管理员可以管理用户。"
+  },
+  "api_keys": {
+    "name": "名称",
+    "role": "角色",
+    "created_by": "创建者",
+    "action": "操作",
+    "create": "创建密钥",
+    "revoke": "吊销",
+    "empty": "暂无 API 密钥",
+    "admin_only": "仅管理员可以管理 API 密钥。",
+    "secret_once": "请立即复制此密钥，之后不会再显示。"
+  },
+  "audit": {
+    "action": "操作",
+    "username": "用户名",
+    "role": "角色",
+    "resource": "资源",
+    "success": "结果",
+    "time": "时间",
+    "search": "查询",
+    "ok": "成功",
+    "fail": "失败",
+    "empty": "暂无审计事件",
+    "admin_only": "仅管理员可以查看审计日志。"
   }
 }

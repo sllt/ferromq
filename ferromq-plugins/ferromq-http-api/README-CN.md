@@ -53,6 +53,8 @@ ferromq_http_api::register_named(&scx, "ferromq-http-api", true, false).await?;
 | `dashboard_session_max_age` | `string` | `"12h"` | 会话绝对寿命 |
 | `dashboard_login_rate_limit` | `u32` | `10` | 每个 IP 在窗口内的最大登录次数 |
 | `dashboard_login_rate_window` | `string` | `"1m"` | 登录限流窗口 |
+| `audit_max_events` | `usize` | `10000` | 内存审计环形缓冲区大小 |
+| `audit_file` | `string` | — | 可选的 JSONL 审计文件 |
 | `message_type` | `u8` | `99` | 插件间 gRPC 通信的消息类型标识符 |
 | `message_expiry_interval` | `string` | `"5m"` | 发布操作消息的默认过期时间 |
 | `metrics_sample_interval` | `string` | `"5s"` | 指标采样间隔 |
@@ -233,13 +235,12 @@ OpenAPI 3：`GET /api/v1/openapi.json`。可选列表信封：`?format=page` →
 
 HTTP API 接受两种凭证（**不影响 MQTT 客户端认证插件**）：
 
-- **会话 Cookie** — `POST /api/v1/auth/login` 提交 `{ username, password }`。Cookie `ferromq_session` 为 `HttpOnly`、`SameSite=Lax`，`dashboard_cookie_secure` 为 true 时带 `Secure`。角色：`admin`（可写）与 `viewer`（只读，不能踢人 / 发布 / 加载插件）。
-- **Bearer 令牌** — `Authorization: Bearer <http_bearer_token>` 仍是自动化用的超级用户/operator 凭证。
-- **开放访问** — 未配置 bearer 与 `dashboard_admin_password`（且尚无用户）时保持开放（匿名 admin）。
+- **会话 Cookie** — `POST /api/v1/auth/login` 提交 `{ username, password }`。Cookie `ferromq_session` 为 `HttpOnly`、`SameSite=Lax`，`dashboard_cookie_secure` 为 true 时带 `Secure`。角色：`admin`（用户 / Key / 审计 + 写操作）、`operator`（踢人 / 发布 / 插件）、`viewer`（只读）。
+- **Bearer 令牌** — `Authorization: Bearer <http_bearer_token>` 仍是自动化用的超级用户 admin 凭证（用户名 `operator`）。
+- **API Key** — `POST /api/v1/api-keys`（admin）。密钥以 SHA-256 哈希保存，明文只返回一次；用 `Authorization: Bearer <secret>` 认证，角色随 Key 绑定。
+- **开放访问** — 未配置 bearer 与 `dashboard_admin_password`（且尚无用户/Key）时保持开放（匿名 admin）。
 
-引导：尚无用户时，首次匹配的登录或 `POST /api/v1/auth/init` 会创建配置中的 admin（及可选 viewer）。密码以 bcrypt 哈希保存在**进程内存**（重启丢失；集群节点不共享会话，需粘性会话）。健康检查、OpenAPI、login/logout/init 保持公开。
-
-P3b 将增加 API Key 与审计日志。
+引导：尚无用户时，首次匹配的登录或 `POST /api/v1/auth/init` 会创建配置中的 admin（及可选 viewer）。密码以 bcrypt 哈希保存在**进程内存**（重启丢失；集群节点不共享会话，需粘性会话）。健康检查、OpenAPI、login/logout/init 保持公开。仅 admin：`GET/POST /users`、`GET/POST/DELETE /api-keys`、`GET /audit`。
 
 ## 依赖
 

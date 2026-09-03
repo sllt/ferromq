@@ -13,7 +13,7 @@ The Dashboard assets are embedded into the binary at compile time via `rust-embe
 ```
 http://<host>:6060/dashboard/
 
-Sign in with a dashboard username/password (`POST /api/v1/auth/login`) when `dashboard_admin_password` is set in `ferromq-http-api.toml`. An operator Bearer token is still accepted as a fallback. See [HTTP API — Authentication](http-api.md#authentication-p3a-session--bearer).
+Sign in with a dashboard username/password (`POST /api/v1/auth/login`) when `dashboard_admin_password` is set in `ferromq-http-api.toml`. A static Bearer token or API key is still accepted as a fallback. See [HTTP API — Authentication](http-api.md#authentication-p3a-session--p3b-api-keys).
 ```
 
 Frontend changes require recompiling (`cargo build`) to take effect.
@@ -40,6 +40,9 @@ dashboard_static_dir = "/path/to/ferromq-plugins/ferromq-http-api/dashboard"
 | `#/clients` | Clients | Client search with advanced filters (incl. datetime picker), list, online/offline kick |
 | `#/clients/detail` | Client Detail | Connection info + session info, current subscriptions (can unsubscribe) |
 | `#/retains` | Retained Messages | `topic_filter` query, pagination (prev/next), payload preview and detail dialog |
+| `#/users` | Users | List / create / disable dashboard users (admin) |
+| `#/api-keys` | API Keys | Create hashed keys; secret shown once (admin) |
+| `#/audit` | Audit Log | Write-operation audit events (admin) |
 
 ## Internationalization
 

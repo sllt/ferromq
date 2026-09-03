@@ -49,8 +49,11 @@ http_laddr = "0.0.0.0:6060"
 # dashboard_session_max_age = "12h"
 # dashboard_login_rate_limit = 10
 # dashboard_login_rate_window = "1m"
-## Users/sessions are in-memory (single node). Restart re-bootstraps from config.
-## Cluster: use sticky sessions; P3b will add API keys + audit log.
+## In-memory audit ring buffer (newest first). Optional JSONL file:
+# audit_max_events = 10000
+# audit_file = "/var/log/ferromq/http-api-audit.jsonl"
+## Users/sessions/API keys are in-memory (single node). Restart re-bootstraps from config.
+## Cluster: use sticky sessions.
 
 ## Enable TCP SO_REUSEADDR on the HTTP listener.
 ## Default: true
@@ -135,7 +138,7 @@ The possible status codes are as follows:
 | 200  | Succeed, and the returned JSON data will provide more information |
 | 400  | Invalid client request, such as wrong request body or parameters |
 | 401  | Client authentication failed, maybe because of invalid authentication credentials |
-| 403  | Authenticated but the role cannot perform this write action (`viewer` vs `admin`) |
+| 403  | Authenticated but the role cannot perform this action (`viewer` / `operator` / `admin`) |
 | 404  | The requested path cannot be found or the requested object does not exist |
 | 409  | Dashboard users already initialized (`POST /auth/init`) |
 | 429  | Login rate limit exceeded |
@@ -158,21 +161,28 @@ Send `X-Request-Id` on the request to have it echoed; otherwise the server gener
 
 Machine-readable contract: `GET /api/v1/openapi.json` (Swagger UI at `GET /api/v1/docs`).
 
-## Authentication (P3a session + Bearer)
+## Authentication (P3a session + P3b API keys)
 
-Two credentials are accepted on the HTTP API. **MQTT client auth plugins are unchanged.**
+Credentials accepted on the HTTP API. **MQTT client auth plugins are unchanged.**
 
 | Mechanism | How | Role |
 |-----------|-----|------|
-| Session cookie | `POST /api/v1/auth/login` with `{ "username", "password" }` sets `ferromq_session` (`HttpOnly`, `SameSite=Lax`, `Secure` when `dashboard_cookie_secure`) | `admin` or `viewer` from the user record |
-| Bearer token | `Authorization: Bearer <http_bearer_token>` | Always `admin` (username `operator`) for automation |
-| Open access | Neither `http_bearer_token` nor `dashboard_admin_password` is set, and no users exist yet | Anonymous `admin` (backward compatible) |
+| Session cookie | `POST /api/v1/auth/login` with `{ "username", "password" }` sets `ferromq_session` (`HttpOnly`, `SameSite=Lax`, `Secure` when `dashboard_cookie_secure`) | `admin`, `operator`, or `viewer` from the user record |
+| Static Bearer | `Authorization: Bearer <http_bearer_token>` | Always `admin` (username `operator`) for automation |
+| API key Bearer | `Authorization: Bearer <fmqk_…>` created via `POST /api/v1/api-keys` | Bound role (`admin` / `operator` / `viewer`) |
+| Open access | Neither bearer, API keys, nor `dashboard_admin_password` is set, and no users exist yet | Anonymous `admin` (backward compatible) |
 
 Public without a session/bearer: `POST /auth/login`, `POST /auth/logout`, `POST /auth/init`, `GET /health/check`, `GET /openapi.json`, `GET /docs`.
 
-`viewer` may read. `viewer` **cannot** kick clients, publish/subscribe via HTTP, delete retains, or load/unload/reload plugins (`403` + `{ "details": { "required_role": "admin" } }`).
+### Roles
 
-Passwords are stored as **bcrypt** hashes in process memory (never plaintext). Restart drops users/sessions; the next login/init re-creates the configured admin. In a cluster, each node has its own store — use sticky sessions.
+| Role | Read | Kick / publish / plugins | Users / API keys / audit |
+|------|------|--------------------------|--------------------------|
+| `admin` | yes | yes | yes |
+| `operator` | yes | yes | no (`403`, `required_role: admin`) |
+| `viewer` | yes | no (`403`, `required_role: operator`) | no |
+
+Passwords are **bcrypt** hashes; API key secrets are **SHA-256** hashes. Both stay in process memory (never plaintext). Restart drops users/sessions/keys; the next login/init re-creates the configured admin. In a cluster, each node has its own store — use sticky sessions.
 
 ### How to test
 
@@ -188,34 +198,38 @@ curl -sS -c cookie.txt -X POST http://127.0.0.1:6060/api/v1/auth/login \
 # Current user
 curl -sS -b cookie.txt http://127.0.0.1:6060/api/v1/auth/me
 
-# Change password
-curl -sS -b cookie.txt -X POST http://127.0.0.1:6060/api/v1/auth/change-password \
+# Create an operator user
+curl -sS -b cookie.txt -X POST http://127.0.0.1:6060/api/v1/users \
   -H 'Content-Type: application/json' \
-  -d '{"old_password":"change-me","new_password":"change-me-2"}'
+  -d '{"username":"ops","password":"ops-secret-1","role":"operator"}'
 
-# Viewer is denied kick/publish/plugin load
-curl -sS -b cookie.txt -X DELETE http://127.0.0.1:6060/api/v1/clients/demo
-# 403 if the session user is role=viewer
+# Create an API key (secret is shown once)
+curl -sS -b cookie.txt -X POST http://127.0.0.1:6060/api/v1/api-keys \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"ci","role":"operator"}'
+# {"id":"…","name":"ci","role":"operator","secret":"fmqk_…",…}
 
-# Bearer token still works as operator (no cookie)
+# Use the API key as Bearer (operator can kick, cannot list users)
+curl -sS -H 'Authorization: Bearer fmqk_…' \
+  -X DELETE http://127.0.0.1:6060/api/v1/clients/demo
+
+# Audit log (admin)
+curl -sS -b cookie.txt 'http://127.0.0.1:6060/api/v1/audit?format=page&_limit=20'
+
+# Static Bearer token still works as superuser admin
 curl -sS -H 'Authorization: Bearer public' http://127.0.0.1:6060/api/v1/brokers
 
 # Logout
 curl -sS -b cookie.txt -c cookie.txt -X POST http://127.0.0.1:6060/api/v1/auth/logout
 ```
 
-### Dashboard frontend migration
+### Dashboard frontend
 
-The embedded SPA no longer requires pasting a Bearer token as the primary login.
-
-1. Prefer `POST /api/v1/auth/login` and send `credentials: 'include'` on every `/api/v1` `fetch` so the HttpOnly cookie is used.
-2. On boot, call `GET /api/v1/auth/me`. `200` means the user is in (session, leftover Bearer, or anonymous when auth is off). `401` → show the login page.
-3. Keep `Authorization: Bearer <token>` as an **optional** operator fallback (localStorage) for automation / existing bookmarks.
-4. `POST /api/v1/auth/logout` then clear any local token flag.
-5. Gate kick / publish / plugin-load UI on `role !== 'viewer'` (`GET /me`).
-6. Do not store the password. The session id lives only in the HttpOnly cookie.
-
-P3b will add API keys and an audit log; identity is already available on the depot as `username` / `role` / `auth`.
+1. Prefer `POST /api/v1/auth/login` and send `credentials: 'include'` on every `/api/v1` `fetch`.
+2. On boot, call `GET /api/v1/auth/me`. `200` means the user is in. `401` → login page.
+3. Keep `Authorization: Bearer <token>` as an optional fallback (static token or API key).
+4. Gate kick / publish / plugin-load UI on `role !== 'viewer'`. Gate users / API keys / audit on `role === 'admin'`.
+5. Do not store the password. The session id lives only in the HttpOnly cookie. Show an API-key secret only once after create.
 
 ## List pagination metadata
 

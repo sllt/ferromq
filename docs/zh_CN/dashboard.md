@@ -13,7 +13,7 @@ Dashboard 静态资源通过 `rust-embed` 在编译时嵌入二进制，无需�
 ```
 http://<host>:6060/dashboard/
 
-在 `ferromq-http-api.toml` 中配置了 `dashboard_admin_password` 时，使用用户名/密码登录（`POST /api/v1/auth/login`）。仍可用 operator Bearer Token 作为回退。详见 [HTTP API — 认证](http-api.md#认证p3a-会话--bearer)。
+在 `ferromq-http-api.toml` 中配置了 `dashboard_admin_password` 时，使用用户名/密码登录（`POST /api/v1/auth/login`）。仍可用静态 Bearer Token 或 API Key 作为回退。详见 [HTTP API — 认证](http-api.md#认证p3a-会话--p3b-api-key)。
 ```
 
 修改前端代码需要重新编译（`cargo build`）才能生效。
@@ -40,6 +40,9 @@ dashboard_static_dir = "/path/to/ferromq-plugins/ferromq-http-api/dashboard"
 | `#/clients` | 客户端 | 客户端搜索与高级筛选（含日期时间选择器）、列表、在线/离线踢出 |
 | `#/clients/detail` | 客户端详情 | 连接信息 + 会话信息两栏、当前订阅列表（可取消订阅） |
 | `#/retains` | 保留消息 | `topic_filter` 查询、分页（上一页/下一页）、payload 预览与详情弹窗 |
+| `#/users` | 用户 | 列出 / 创建 / 禁用 Dashboard 用户（admin） |
+| `#/api-keys` | API 密钥 | 创建哈希 API Key，密钥只显示一次（admin） |
+| `#/audit` | 审计日志 | 写操作审计（admin） |
 
 ## 国际化
 

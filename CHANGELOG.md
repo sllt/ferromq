@@ -8,7 +8,8 @@ FerroMQ is based on [RMQTT](https://github.com/rmqtt/rmqtt) at upstream commit `
 
 ### New Features
 
-- **Dashboard session login (P3a)**: `ferromq-http-api` adds `POST /api/v1/auth/login|logout|init`, `GET /auth/me`, and `POST /auth/change-password`. Passwords are bcrypt-hashed in memory; the session cookie is HttpOnly / SameSite=Lax (optional Secure). `Authorization: Bearer <http_bearer_token>` remains an operator/admin credential. Minimal roles: `admin` vs `viewer` (viewer cannot kick / publish / plugin load). MQTT client auth plugins are unchanged.
+- **Dashboard session login (P3a)**: `ferromq-http-api` adds `POST /api/v1/auth/login|logout|init`, `GET /auth/me`, and `POST /auth/change-password`. Passwords are bcrypt-hashed in memory; the session cookie is HttpOnly / SameSite=Lax (optional Secure). `Authorization: Bearer <http_bearer_token>` remains an operator/admin credential. MQTT client auth plugins are unchanged.
+- **API keys, audit log, and RBAC (P3b)**: hashed API keys (`POST /api/v1/api-keys`, secret shown once; Bearer with bound `admin`/`operator`/`viewer` role), admin user list/create/disable (`/api/v1/users`), and `GET /api/v1/audit` (in-memory ring buffer, optional JSONL file). `operator` can kick / publish / manage plugins but cannot manage users or keys; `viewer` is read-only. Static `http_bearer_token` is unchanged (username `operator`, role `admin`).
 
 ### Changed
 

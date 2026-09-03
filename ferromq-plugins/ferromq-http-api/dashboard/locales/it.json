@@ -358,5 +358,43 @@
     "delete": "Elimina",
     "delete_confirm": "Eliminare il messaggio conservato per l'argomento {topic}?",
     "delete_fail": "Eliminazione non riuscita: {msg}"
+  },
+  "users": {
+    "username": "Username",
+    "password": "Password",
+    "role": "Role",
+    "enabled": "Enabled",
+    "action": "Action",
+    "create": "Create user",
+    "disable": "Disable",
+    "enable": "Enable",
+    "yes": "yes",
+    "no": "no",
+    "empty": "No dashboard users",
+    "admin_only": "Only admins can manage users."
+  },
+  "api_keys": {
+    "name": "Name",
+    "role": "Role",
+    "created_by": "Created by",
+    "action": "Action",
+    "create": "Create key",
+    "revoke": "Revoke",
+    "empty": "No API keys",
+    "admin_only": "Only admins can manage API keys.",
+    "secret_once": "Copy this secret now. It will not be shown again."
+  },
+  "audit": {
+    "action": "Action",
+    "username": "Username",
+    "role": "Role",
+    "resource": "Resource",
+    "success": "Result",
+    "time": "Time",
+    "search": "Search",
+    "ok": "ok",
+    "fail": "failed",
+    "empty": "No audit events",
+    "admin_only": "Only admins can read the audit log."
   }
 }

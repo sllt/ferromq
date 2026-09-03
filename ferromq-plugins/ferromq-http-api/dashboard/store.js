@@ -36,7 +36,11 @@ window.store = {
     return (s && s.role) || (this.getToken() ? 'admin' : '');
   },
   canWrite() {
-    return this.getRole() !== 'viewer';
+    var role = this.getRole();
+    return role === 'admin' || role === 'operator';
+  },
+  isAdmin() {
+    return this.getRole() === 'admin';
   },
 
   /** 语言偏好 */

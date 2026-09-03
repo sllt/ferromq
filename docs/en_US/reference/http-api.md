@@ -29,18 +29,20 @@ prometheus_metrics_cache_interval = "5s"
 # http_bearer_token = "your-secret-token"
 
 # Dashboard session login (P3a). First login or POST /api/v1/auth/init
-# bootstraps the admin (bcrypt, in-memory). Viewer is read-only.
+# bootstraps the admin (bcrypt, in-memory).
 # dashboard_admin_username = "admin"
 # dashboard_admin_password = "change-me"
+# audit_max_events = 10000
+# audit_file = "/var/log/ferromq/http-api-audit.jsonl"
 ```
 
 ### Authentication
 
 - **Session:** `POST /api/v1/auth/login` `{ username, password }` → `ferromq_session` cookie (`HttpOnly`, `SameSite=Lax`). Also `POST /logout`, `GET /me`, `POST /change-password`, `POST /init`.
-- **Bearer:** `Authorization: Bearer <http_bearer_token>` is still a superuser/operator credential.
-- **Open access:** if neither token nor `dashboard_admin_password` is set, the API stays open.
-- **Roles:** `admin` can kick / publish / plugin load; `viewer` cannot (`403`).
-- **Scope:** http-api only. MQTT client auth plugins are unchanged. Users/sessions are in-memory (sticky sessions in a cluster).
+- **Bearer:** `Authorization: Bearer <http_bearer_token>` is still a superuser admin credential (username `operator`). Created API keys also use Bearer with a bound role.
+- **Open access:** if neither token nor `dashboard_admin_password` is set (and no users/keys), the API stays open.
+- **Roles:** `admin` manages users / keys / audit and can write; `operator` can kick / publish / plugins; `viewer` is read-only (`403`).
+- **Scope:** http-api only. MQTT client auth plugins are unchanged. Users/sessions/keys are in-memory (sticky sessions in a cluster).
 
 ## Base URL
 
@@ -111,6 +113,22 @@ Machine-readable contract: `GET /api/v1/openapi.json` (UI: `GET /api/v1/docs`).
 A `features inconsistent across cluster` warning log is emitted when an inconsistency is detected.
 
 ---
+
+## 2b. Users, API keys, audit (admin)
+
+```
+GET    /api/v1/users
+POST   /api/v1/users
+POST   /api/v1/users/{username}/disable
+POST   /api/v1/users/{username}/enable
+GET    /api/v1/api-keys
+POST   /api/v1/api-keys          # secret returned once
+GET    /api/v1/api-keys/{id}
+DELETE /api/v1/api-keys/{id}
+GET    /api/v1/audit             # ?action=&username=&success=&_limit=&_offset=&format=page
+```
+
+See the full [HTTP API](../http-api.md) document for curl examples.
 
 ## 3. Client Management
 

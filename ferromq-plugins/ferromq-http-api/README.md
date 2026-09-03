@@ -53,6 +53,8 @@ File: `ferromq-http-api.toml` (in the plugin config directory). Loaded via `scx.
 | `dashboard_session_max_age` | `string` | `"12h"` | Absolute session lifetime |
 | `dashboard_login_rate_limit` | `u32` | `10` | Max login attempts per IP per window |
 | `dashboard_login_rate_window` | `string` | `"1m"` | Login rate-limit window |
+| `audit_max_events` | `usize` | `10000` | In-memory audit ring-buffer size |
+| `audit_file` | `string` | — | Optional JSONL file for durable audit events |
 | `message_type` | `u8` | `99` | gRPC message type identifier for plugin communication |
 | `message_expiry_interval` | `string` | `"5m"` | Default message expiration interval for publish operations |
 | `metrics_sample_interval` | `string` | `"5s"` | Metrics sampling interval |
@@ -233,13 +235,12 @@ OpenAPI 3: `GET /api/v1/openapi.json`. Optional list envelope: `?format=page` �
 
 Two credentials are accepted (MQTT client auth plugins are not involved):
 
-- **Session cookie** — `POST /api/v1/auth/login` with `{ username, password }`. Cookie `ferromq_session` is `HttpOnly`, `SameSite=Lax`, and `Secure` when `dashboard_cookie_secure` is true. Roles: `admin` (write) and `viewer` (read-only; cannot kick / publish / plugin load).
-- **Bearer token** — `Authorization: Bearer <http_bearer_token>` remains a superuser/operator credential for automation.
-- **Open access** — if neither a bearer token nor `dashboard_admin_password` is set (and no users exist yet), the API stays open (anonymous admin).
+- **Session cookie** — `POST /api/v1/auth/login` with `{ username, password }`. Cookie `ferromq_session` is `HttpOnly`, `SameSite=Lax`, and `Secure` when `dashboard_cookie_secure` is true. Roles: `admin` (users / keys / audit + writes), `operator` (kick / publish / plugins), `viewer` (read-only).
+- **Bearer token** — `Authorization: Bearer <http_bearer_token>` remains a superuser admin credential for automation (username `operator`).
+- **API keys** — `POST /api/v1/api-keys` (admin). Secret is SHA-256 hashed and shown once; authenticate as `Authorization: Bearer <secret>` with the bound role.
+- **Open access** — if neither a bearer token nor `dashboard_admin_password` is set (and no users/keys exist yet), the API stays open (anonymous admin).
 
-Bootstrap: when no dashboard users exist, the first matching login or `POST /api/v1/auth/init` creates the configured admin (and optional viewer). Passwords are stored as bcrypt hashes in **process memory** (lost on restart; cluster nodes do not share sessions — use sticky sessions). Health, OpenAPI, login, logout, and init stay public.
-
-P3b will add API keys and an audit log.
+Bootstrap: when no dashboard users exist, the first matching login or `POST /api/v1/auth/init` creates the configured admin (and optional viewer). Passwords are bcrypt hashes in **process memory** (lost on restart; cluster nodes do not share sessions — use sticky sessions). Health, OpenAPI, login, logout, and init stay public. Admin-only: `GET/POST /users`, `GET/POST/DELETE /api-keys`, `GET /audit`.
 
 ## Dependencies
 

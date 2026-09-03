@@ -30,6 +30,13 @@ prometheus_metrics_cache_interval = "5s"
 | `GET` | `/api/v1/auth/me` | 当前用户 |
 | `POST` | `/api/v1/auth/change-password` | 修改密码 |
 | `POST` | `/api/v1/auth/init` | 按配置一次性引导管理员 |
+| `GET` | `/api/v1/users` | 列出 Dashboard 用户（admin） |
+| `POST` | `/api/v1/users` | 创建用户（admin） |
+| `POST` | `/api/v1/users/{username}/disable` | 禁用用户（admin） |
+| `GET` | `/api/v1/api-keys` | 列出 API Key（admin，不含密钥） |
+| `POST` | `/api/v1/api-keys` | 创建 API Key，密钥只返回一次（admin） |
+| `DELETE` | `/api/v1/api-keys/{id}` | 吊销 API Key（admin） |
+| `GET` | `/api/v1/audit` | 审计日志（admin，可分页） |
 | `GET` | `/api/v1/openapi.json` | OpenAPI 3 契约 |
 | `GET` | `/api/v1/docs` | Swagger UI |
 | `GET` | `/api/v1/brokers` | 集群节点信息 |
@@ -51,7 +58,7 @@ prometheus_metrics_cache_interval = "5s"
 | `GET` | `/api/v1/metrics` | 指标（JSON） |
 | `GET` | `/api/v1/metrics/prometheus` | 指标（Prometheus 格式） |
 
-完整端点列表含 `stats/history`、`metrics/history` 与 P3a 会话认证等。`viewer` 不能踢人 / 发布 / 加载插件。详情见英文版文档。
+完整端点列表含 `stats/history`、`metrics/history`、会话认证、API Key 与审计日志。`operator` 可踢人 / 发布 / 管理插件，但不能管理用户与 Key；`viewer` 只读。详情见英文版文档。
 
 ## 许可证
 

@@ -15,6 +15,9 @@ const pageRegistry = {
   '#/retains':   { component: 'RetainsPage',      titleKey: 'nav.retained',    isLogin: false },
   '#/publish':  { component: 'PublishPage',      titleKey: 'nav.publish',     isLogin: false },
   '#/plugins':  { component: 'PluginsPage',      titleKey: 'nav.plugins',     isLogin: false },
+  '#/users':    { component: 'UsersPage',        titleKey: 'nav.users',       isLogin: false },
+  '#/api-keys': { component: 'ApiKeysPage',      titleKey: 'nav.api_keys',    isLogin: false },
+  '#/audit':    { component: 'AuditLogPage',     titleKey: 'nav.audit_log',   isLogin: false },
 };
 
 const App = Vue.defineComponent({
@@ -31,6 +34,9 @@ const App = Vue.defineComponent({
     RetainsPage: window.RetainsPage,
     PublishPage,
     PluginsPage,
+    UsersPage: window.UsersPage,
+    ApiKeysPage: window.ApiKeysPage,
+    AuditLogPage: window.AuditLogPage,
   },
   data() {
     return {
