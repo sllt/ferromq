@@ -635,11 +635,6 @@ impl Manager {
         }
     }
 
-    /// Directory that holds `{name}.toml` plugin config files, if configured.
-    pub fn config_dir(&self) -> Option<&str> {
-        self.config.path.as_deref()
-    }
-
     /// Get a reference to a plugin entry by name.
     pub fn get(&self, name: &str) -> Option<EntryRef<'_>> {
         self.plugins.get(name)

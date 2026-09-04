@@ -59,7 +59,7 @@ prometheus_metrics_cache_interval = "5s"
 ## If set, the http-api plugin loads the Dashboard SPA from this
 ## external directory at the `/dashboard/` path instead, which allows
 ## swapping the frontend build without recompiling the binary.
-# dashboard_static_dir = "/path/to/ferromq-dashboard/dist"
+# dashboard_static_dir = "/path/to/dashboard/dist"
 
 ##--------------------------------------------------------------------
 ## Stats/Metrics History Persistence (optional)

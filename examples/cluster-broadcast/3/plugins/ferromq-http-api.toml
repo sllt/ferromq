@@ -54,13 +54,18 @@ message_expiry_interval = "5m"
 ## Default: "5s"
 prometheus_metrics_cache_interval = "5s"
 
-## Dashboard static directory (optional).
+## Dashboard static directory.
 ##
-## Default: React console embedded from crate-local `dashboard-dist/`
-## (vite build of https://github.com/sllt/ferromq-dashboard).
-## Uncomment to serve a local Vite `dist/` instead of the binary assets.
-## Path is resolved against the process cwd (this node directory).
-# dashboard_static_dir = "../../../ferromq-plugins/ferromq-http-api/dashboard-dist"
+## When set, the Dashboard SPA is served from this external directory at
+## `/dashboard/` (and `/`) instead of the assets embedded in the binary,
+## which allows swapping the frontend build without recompiling.
+##
+## The path is resolved against the process working directory, which for
+## these examples is the node directory (e.g. `examples/cluster-broadcast/1`).
+## `../../../ferromq-plugins/ferromq-http-api/dashboard` therefore points to the
+## dashboard copy shipped inside the http-api crate:
+## examples/<cluster>/<node>/ -> <repo root>/ferromq-plugins/ferromq-http-api/dashboard
+dashboard_static_dir = "../../../ferromq-plugins/ferromq-http-api/dashboard"
 
 ##--------------------------------------------------------------------
 ## Stats/Metrics History Persistence (optional)

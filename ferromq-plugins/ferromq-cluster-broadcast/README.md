@@ -31,10 +31,6 @@ File: `ferromq-cluster-broadcast.toml`
 | `task_exec_queue_workers` | integer | `500` | Task execution queue workers |
 | `task_exec_queue_max` | integer | `100_000` | Task execution queue max capacity |
 
-## Membership
-
-There is no runtime join/leave. Peers come from `node_grpc_addrs` at startup. `Plugin::send({"op":"status"})` returns gRPC client stats; `join` / `leave` are rejected.
-
 ## Dependencies
 
 `ferromq` (features: `plugin`, `grpc`, `stats`)

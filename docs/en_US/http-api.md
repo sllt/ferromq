@@ -36,32 +36,6 @@ http_laddr = "0.0.0.0:6060"
 ## When not set (default), no authentication is required.
 #http_bearer_token = "public"
 
-## Dashboard session login (P3a). When `dashboard_admin_password` is set,
-## the first `POST /api/v1/auth/login` (or `POST /api/v1/auth/init`) creates
-## an admin user and stores a durable bcrypt hash. The raw `http_bearer_token`
-## remains a superuser/operator credential for automation.
-# dashboard_admin_username = "admin"
-# dashboard_admin_password = "change-me"
-# dashboard_viewer_username = "viewer"
-# dashboard_viewer_password = "change-me-too"
-# dashboard_auth_file = "/var/lib/ferromq/dashboard-auth.json"
-# dashboard_allow_anonymous_admin = false  ## unsafe legacy opt-in
-# dashboard_cookie_secure = false          ## set true when serving HTTPS
-# dashboard_session_idle_timeout = "30m"
-# dashboard_session_max_age = "12h"
-# dashboard_login_rate_limit = 10
-# dashboard_login_rate_window = "1m"
-## Cookie CSRF compares Origin/Referer to Host. Reverse proxies must
-## preserve the original public Host. X-Forwarded-Host is not trusted.
-## If Host is rewritten, use Bearer / API key for non-browser clients.
-## In-memory audit ring buffer (newest first). Optional JSONL file:
-# audit_max_events = 10000
-# audit_file = "/var/log/ferromq/http-api-audit.jsonl"
-# config_history_keep = 10
-# broker_config_file = "ferromq.toml"
-## Users/API-key hashes are persisted; sessions remain process-local.
-## Cluster: each node has its own auth store and needs sticky sessions.
-
 ## Enable TCP SO_REUSEADDR on the HTTP listener.
 ## Default: true
 # http_reuseaddr = true
@@ -70,9 +44,7 @@ http_laddr = "0.0.0.0:6060"
 ## Default: false
 # http_reuseport = false
 
-## Print HTTP request method/path. Bodies on /auth/* are omitted; other
-## JSON/TOML bodies have secret fields and URL userinfo redacted.
-## Authorization / Cookie headers are never logged.
+## Indicates whether to print HTTP request logs
 http_request_log = false
 
 ## Metrics sample interval for collecting and caching internal metrics.
@@ -91,11 +63,13 @@ message_expiry_interval = "5m"
 prometheus_metrics_cache_interval = "5s"
 
 ## Dashboard static directory (optional).
-## By default the React console is rust-embedded from crate-local
-## dashboard-dist/ (https://github.com/sllt/ferromq-dashboard).
-## If set AND the path exists, that directory is served at `/dashboard/`
-## instead (typically a local Vite dist/). Missing path → embed.
-# dashboard_static_dir = "/path/to/ferromq-dashboard/dist"
+## By default (when unset), the Dashboard SPA is served from assets embedded
+## directly into the binary via rust-embed at compile time, so no external
+## files are needed.
+## If set, the plugin loads the Dashboard SPA from this external directory
+## at the `/dashboard/` path instead, allowing swapping the frontend build
+## without recompiling the binary.
+# dashboard_static_dir = "/path/to/dashboard/dist"
 
 ##─── Stats/Metrics History Persistence (optional) ───────────────────────
 ## When `storage` is configured, the plugin periodically snapshots Stats
@@ -145,133 +119,8 @@ The possible status codes are as follows:
 | 200  | Succeed, and the returned JSON data will provide more information |
 | 400  | Invalid client request, such as wrong request body or parameters |
 | 401  | Client authentication failed, maybe because of invalid authentication credentials |
-| 403  | Authenticated but the role cannot perform this action (`viewer` / `operator` / `admin`) |
 | 404  | The requested path cannot be found or the requested object does not exist |
-| 409  | Dashboard users already initialized (`POST /auth/init`) |
-| 429  | Login rate limit exceeded |
 | 500  | An internal error occurred while the server was processing the request |
-
-Failed API calls return **JSON** (not plain text / HTML):
-
-```json
-{"code": 404, "message": "plugin not found: ferromq-web-hook", "request_id": "19c3e2a1b-5a5a"}
-```
-
-| Field   | Type    | Description                                      |
-|---------|---------|--------------------------------------------------|
-| `code`  | Integer | Same value as the HTTP status code               |
-| `message` | String | Human-readable error description               |
-| `details` | Any   | Optional structured extras (omitted when unused) |
-| `request_id` | String | Correlation id (also sent as `X-Request-Id`)  |
-
-Send `X-Request-Id` on the request to have it echoed; otherwise the server generates one. Successful `2xx` bodies are unchanged (including existing plain-text successes such as `ok`).
-
-Machine-readable contract: `GET /api/v1/openapi.json` (Swagger UI at `GET /api/v1/docs`).
-
-## Authentication (P3a session + P3b API keys)
-
-Credentials accepted on the HTTP API. **MQTT client auth plugins are unchanged.**
-
-| Mechanism | How | Role |
-|-----------|-----|------|
-| Session cookie | `POST /api/v1/auth/login` with `{ "username", "password" }` sets `ferromq_session` (`HttpOnly`, `SameSite=Lax`, `Secure` when `dashboard_cookie_secure`). Each request uses the **live** user role (and `enabled`); a deleted user invalidates the session. Cookie-authenticated `POST`/`PUT`/`PATCH`/`DELETE` require `Origin`/`Referer` to match `Host` when those headers are present (missing Origin is allowed for non-browser clients). Bearer / API keys skip this check. Reverse proxies must **preserve the original public `Host`**; FerroMQ does **not** trust `X-Forwarded-Host`. If the proxy rewrites `Host`, use Bearer / API key for non-browser clients. | `admin`, `operator`, or `viewer` from the **current** user record |
-| Static Bearer | `Authorization: Bearer <http_bearer_token>` | Always `admin` (username `operator`) for automation |
-| API key Bearer | `Authorization: Bearer <fmqk_…>` created via `POST /api/v1/api-keys` | Bound role (`admin` / `operator` / `viewer`) |
-| Open access | Neither bearer, API keys, nor `dashboard_admin_password` is set, and no persisted users exist | Anonymous `viewer` (read-only). Anonymous admin requires the unsafe compatibility option |
-
-Public without a session/bearer: `POST /auth/login`, `POST /auth/logout`, `POST /auth/init`, `GET /health/check`, `GET /openapi.json`, `GET /docs`.
-
-### Roles
-
-| Role | Read | Kick / publish / plugin config / P5 integrations / P6 alarm ack + cluster writes | Users / API keys / audit / broker write / `?reveal=1` / **`ferromq-http-api` config** |
-|------|------|--------------------------------|------------------------------------------------------|
-| `admin` | yes | yes | yes |
-| `operator` | yes | yes (except `ferromq-http-api` write/validate/rollback/reload) | no (`403`, `required_role: admin`) |
-| `viewer` | yes (secrets redacted) | no (`403`, `required_role: operator`) | no |
-
-`PUT`/`POST` of plugin `ferromq-http-api` (including validate / rollback / reload) is **admin-only**: that file can set `http_bearer_token`, which authenticates as admin. Generic plugin PUTs **deep-merge** into the existing TOML so omitted or `***` secrets (`hmac_secret`, `password`, …) are preserved and never written as the literal `***`.
-
-Passwords are **bcrypt** hashes; API key secrets are **SHA-256** hashes. User/key hashes are stored in `dashboard_auth_file`, or `.ferromq-dashboard-auth.json` under the plugin config directory when unset. Sessions remain process-local. Each cluster node has its own auth store, so use sticky sessions for browser traffic.
-
-### How to test
-
-```bash
-# One-time bootstrap from ferromq-http-api.toml (optional; first login also bootstraps)
-curl -sS -X POST http://127.0.0.1:6060/api/v1/auth/init
-
-# Login — save the session cookie
-curl -sS -c cookie.txt -X POST http://127.0.0.1:6060/api/v1/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"change-me"}'
-
-# Current user
-curl -sS -b cookie.txt http://127.0.0.1:6060/api/v1/auth/me
-
-# Create an operator user
-curl -sS -b cookie.txt -X POST http://127.0.0.1:6060/api/v1/users \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"ops","password":"ops-secret-1","role":"operator"}'
-
-# Create an API key (secret is shown once)
-curl -sS -b cookie.txt -X POST http://127.0.0.1:6060/api/v1/api-keys \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"ci","role":"operator"}'
-# {"id":"…","name":"ci","role":"operator","secret":"fmqk_…",…}
-
-# Use the API key as Bearer (operator can kick, cannot list users)
-curl -sS -H 'Authorization: Bearer fmqk_…' \
-  -X DELETE http://127.0.0.1:6060/api/v1/clients/demo
-
-# Audit log (admin)
-curl -sS -b cookie.txt 'http://127.0.0.1:6060/api/v1/audit?format=page&_limit=20'
-
-# Static Bearer token still works as superuser admin
-curl -sS -H 'Authorization: Bearer public' http://127.0.0.1:6060/api/v1/brokers
-
-# Logout
-curl -sS -b cookie.txt -c cookie.txt -X POST http://127.0.0.1:6060/api/v1/auth/logout
-```
-
-### Dashboard frontend
-
-1. Prefer `POST /api/v1/auth/login` and send `credentials: 'include'` on every `/api/v1` `fetch`.
-2. On boot, call `GET /api/v1/auth/me`. `200` means the user is in. `401` → login page.
-3. Keep `Authorization: Bearer <token>` as an optional fallback (static token or API key).
-4. Gate kick / publish / plugin-load UI on `role !== 'viewer'`. Gate users / API keys / audit on `role === 'admin'`.
-5. Do not store the password. The session id lives only in the HttpOnly cookie. Show an API-key secret only once after create.
-
-## List pagination metadata
-
-List endpoints used by the dashboard (`GET /clients`, `/clients/offlines`, `/subscriptions`, `/routes`, `/retains`, `/plugins`, `/plugins/{node}`) keep their existing JSON schema **by default**.
-
-- **Default body:** a bare JSON array (except `/retains`, which already returns `{ items, has_more }`).
-- **`?format=page` (optional, non-breaking):** wrap the same rows as `{ "items": [...], "offset": N, "limit": N, "truncated": bool, "total": N? }`. `total` is omitted when the backend does not know the full count. `/retains?format=page` keeps `has_more` and adds `offset` / `limit` / `truncated`.
-- **`_limit` / `limit`:** maximum rows returned. If omitted or `0`, the plugin `max_row_limit` is used (`10000` by default). `/retains` uses `limit` (no underscore).
-- **`_offset` / `offset`:** optional skip count applied after the backend fetch. `/retains` already documents `offset`.
-- **Response headers (non-breaking):**
-  - `X-Row-Count`: number of rows in this response (`items.length` for `/retains` and `format=page`).
-  - `X-Truncated`: `true` when the result was cut off by `_limit` / `max_row_limit` (or `has_more` for `/retains`); otherwise `false`.
-  - `X-Request-Id`: correlation id.
-
-Old clients that ignore unknown headers and do not send `format=page` continue to work.
-
-## Cluster partial failure
-
-Cluster-aggregating endpoints (`/brokers`, `/nodes`, `/features`, `/plugins`, `/stats`, `/metrics`, and their `/sum` variants) return **HTTP 200** with a per-node success/failure object when some peers are unreachable. They do **not** collapse the cluster view into a single boolean.
-
-Success item (extra `ok: true` is additive):
-
-```json
-{ "ok": true, "node_id": 1, "...": "endpoint-specific fields" }
-```
-
-Failure item (replaces the old bare error string):
-
-```json
-{ "ok": false, "node_id": 2, "error": "connection refused" }
-```
-
-`/plugins` uses `{ ok, node, plugins, error? }` (`plugins` is `[]` on failure). `/stats` and `/metrics` use `{ ok, node: { id }, stats|metrics?, error? }`. `/features` uses `FeaturesNodeResult` (see below) plus `failed_count` / `partial` / `enabled`.
 
 ## API Endpoints
 
@@ -327,7 +176,6 @@ Return basic information of all nodes in the cluster.
 | .uptime        | String    | FerroMQ Broker runtime, in the format of "D days, H hours, m minutes, s seconds"     |
 | .version       | String    | FerroMQ Broker version                                                 |
 | .rustc_version | String    | RUSTC version                                         |
-| .cluster       | Object    | Additive P6 topology (`mode`, `plugin`, `leader_id`, `role`, `peers`). Absent on failed peer objects. |
 
 **Examples:**
 
@@ -380,7 +228,6 @@ Return the status of the node.
 | .uptime        | String                  | FerroMQ Broker runtime, in the format of "D days, H hours, m minutes, s seconds"                                                                                                          |
 | .version       | String                  | FerroMQ Broker version                                                                                                            |
 | .rustc_version | String                  | RUSTC version                                         |
-| .cluster       | Object                  | Additive P6 topology (`mode`, `plugin`, `leader_id`, `role`, `peers`) |
 
 **Examples:**
 
@@ -413,25 +260,14 @@ Returns the feature support state of every cluster node plus a cluster-wide cons
 | Name          | Type | Description |
 |---------------|------|-------------|
 | consistent    | Bool | Whether all reachable nodes have identical feature states; `false` indicates node configuration drift or plugin load failure |
-| node_count    | Integer | Number of nodes that successfully reported features |
-| failed_count  | Integer | Number of nodes that failed to report |
-| partial       | Bool | `true` when `failed_count > 0` (HTTP 200 with a partial cluster view) |
-| enabled       | Object | OR of each flag across reachable nodes. Intended for dashboard **menu gating** (show a page when any node supports it) |
-| - enabled.retain | Bool | Retained messages (`ferromq-retainer`). Gates the Retains menu |
-| - enabled.message_storage | Bool | Persistent message storage |
-| - enabled.session_storage | Bool | Persistent session storage |
-| - enabled.delayed | Bool | Delayed publish (`$delayed/...`) |
-| - enabled.shared_subscription | Bool | Shared subscriptions `$share` |
-| - enabled.auto_subscription | Bool | Automatic subscriptions |
+| node_count    | Integer | Number of nodes participating in the consistency comparison |
 | conflicts     | Array | Fields with inconsistent values (grouped by value with node ids); empty when `consistent` is `true` |
 | - conflicts[i].feature | String | Feature name, e.g. `retain` |
 | - conflicts[i].values  | Array | Value groups, each containing `value` (Bool) and `node_ids` (Integer Array) |
-| nodes         | Array | Per-node **structured** success/failure (`FeaturesNodeResult`) |
-| - nodes[i].ok         | Bool | `true` on success |
+| nodes         | Array | Per-node details; unreachable nodes appear as error strings and are excluded from the consistency comparison |
 | - nodes[i].node_id    | Integer | Node ID |
-| - nodes[i].node_name  | String | Node name (success only) |
-| - nodes[i].features   | Object | Six feature flags (success only) |
-| - nodes[i].error      | String | Failure reason (failure only) |
+| - nodes[i].node_name  | String | Node name |
+| - nodes[i].features   | Object | Six feature flags: `retain`, `message_storage`, `session_storage`, `delayed`, `shared_subscription`, `auto_subscription` |
 
 **Examples:**
 
@@ -443,16 +279,6 @@ $ curl -i -X GET "http://localhost:6060/api/v1/features"
 {
   "consistent": false,
   "node_count": 3,
-  "failed_count": 0,
-  "partial": false,
-  "enabled": {
-    "retain": true,
-    "message_storage": false,
-    "session_storage": false,
-    "delayed": true,
-    "shared_subscription": true,
-    "auto_subscription": false
-  },
   "conflicts": [
     {
       "feature": "retain",
@@ -464,7 +290,6 @@ $ curl -i -X GET "http://localhost:6060/api/v1/features"
   ],
   "nodes": [
     {
-      "ok": true,
       "node_id": 1,
       "node_name": "1@127.0.0.1",
       "features": {
@@ -577,8 +402,7 @@ Returns the information of all clients under the cluster.
 
 | Name   | Type | Required | Default | Description                                                                                                                                                             |
 | ------ | --------- | -------- | ------- |-------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| _limit | Integer   | False | 10000   | The maximum number of data items returned at one time. Alias: `limit`. If omitted or `0`, uses `max_row_limit` from `ferromq-http-api.toml` |
-| _offset | Integer  | False | 0       | Number of matching rows to skip. Alias: `offset`. Applied after the backend fetch (capped by `max_row_limit`) |
+| _limit | Integer   | False | 10000   | The maximum number of data items returned at one time. If not specified, it is determined by the configuration item `max_row_limit` of the `ferromq-http-api.toml` plugin |
 
 | Name            | Type   | Required | Description                     |
 | --------------- | ------ | -------- |---------------------------------|
@@ -755,8 +579,7 @@ Returns all subscription information under the cluster.
 
 | Name   | Type | Required | Default | Description                                                                                                  |
 | ------ | --------- | -------- | ------- |--------------------------------------------------------------------------------------------------------------|
-| _limit | Integer   | False | 10000   | The maximum number of data items returned at one time. Alias: `limit`. If omitted or `0`, uses `max_row_limit` from `ferromq-http-api.toml` |
-| _offset | Integer  | False | 0       | Number of matching rows to skip. Alias: `offset`. Applied after the backend fetch (capped by `max_row_limit`) |
+| _limit | Integer   | False | 10000   | The maximum number of data items returned at one time, if not specified, it is determined by the configuration item `max_row_limit` of the `ferromq-http-api.toml` plugin |
 
 | Name         | Type    | Description |
 | ------------ | ------- | ----------- |
@@ -775,9 +598,8 @@ Returns all subscription information under the cluster.
 | [0].clientid    | String           | Client identifier      |
 | [0].client_addr | String           | Client IP address and port  |
 | [0].topic       | String           | Subscribe to topic        |
-| [0].qos         | Integer          | QoS level (alias of `opts.qos`, added for dashboard compatibility) |
-| [0].share       | String           | Shared subscription group name (alias of `opts.group`) |
-| [0].opts        | Object           | Subscription options; the embedded dashboard reads `opts.qos` / `opts.group` |
+| [0].qos         | Integer          | QoS level      |
+| [0].share       | String           | Shared subscription group name    |
 
 **Examples:**
 
@@ -827,8 +649,7 @@ List all routes
 
 | Name   | Type | Required | Default | Description |
 | ------ | --------- | -------- | ------- |  ---- |
-| _limit | Integer   | False | 10000   | The maximum number of data items returned at one time. Alias: `limit`. If omitted or `0`, uses `max_row_limit` from `ferromq-http-api.toml` |
-| _offset | Integer  | False | 0       | Number of matching rows to skip. Alias: `offset`. Applied after the backend fetch (capped by `max_row_limit`) |
+| _limit | Integer   | False | 10000   | The maximum number of data items returned at one time, if not specified, it is determined by the configuration item `max_row_limit` of the `ferromq-http-api.toml` plugin |
 
 **Success Response Body (JSON):**
 
@@ -931,35 +752,6 @@ $ curl -i -X GET "http://localhost:6060/api/v1/retains?topic_filter=%2Fiot%2Fb%2
 ```
 
 > Note: the `topic_filter=#` (full) path is paginated at the storage layer and includes `remaining_ttl` (remaining seconds); the filter path is paginated in memory and `remaining_ttl` is `null`. Requires the `ferromq-retainer` plugin to be enabled.
-
-Also returns `X-Row-Count` (length of `items`) and `X-Truncated` (same as `has_more`).
-
-### DELETE /api/v1/retains
-
-Delete a retained message by **exact topic**. Wildcards `#` / `+` are not allowed. Deletion follows MQTT semantics (empty-payload retain) and is broadcast to cluster peers.
-
-**Query String Parameters:**
-
-| Name  | Type   | Required | Description |
-|-------|--------|----------|-------------|
-| topic | String | True     | Concrete topic name, e.g. `/iot/b/x` |
-
-**Responses:**
-
-| Status | Body | Description |
-|--------|------|-------------|
-| 200 | `ok` (plain text) | Deleted successfully |
-| 400 | `{ "code": 400, "message": "..." }` | Missing `topic`, or topic contains wildcards |
-| 404 | `{ "code": 404, "message": "..." }` | No retained message for the topic |
-| 503 | `{ "code": 503, "message": "..." }` | Retain storage is not enabled or unavailable |
-
-**Examples:**
-
-```bash
-$ curl -i -X DELETE "http://localhost:6060/api/v1/retains?topic=%2Fiot%2Fb%2Fx"
-
-ok
-```
 
 ## Publish message
 
@@ -1083,7 +875,7 @@ Returns information of all plugins in the cluster.
 | [0].plugins.homepage  | String           | Plugin homepage                                                                                                     |
 | [0].plugins.license   | String           | Plugin license                                                                                                      |
 | [0].plugins.repository| String           | Plugin repository                                                                                                   |
-| [0].plugins.active    | Boolean          | Whether the plugin is active (started). **There is no `running` field** — use `active`. |
+| [0].plugins.active    | Boolean          | Whether the plugin is active                                                                                        |
 | [0].plugins.inited    | Boolean          | Whether the plugin is initialized                                                                                   |
 | [0].plugins.immutable | Boolean          | Whether the plugin is immutable, Immutable plugins will not be able to be stopped, config modified, restarted, etc. |
 | [0].plugins.attrs     | Json             | Other additional properties of the plugin              |
@@ -1163,250 +955,30 @@ $ curl -i -X GET "http://localhost:6060/api/v1/plugins/1/ferromq-web-hook"
 {"active":false,"attrs":null,"descr":null,"immutable":false,"inited":false,"name":"ferromq-web-hook","version":null}
 ```
 
-A missing plugin returns HTTP 404 with `{"code":404,"message":"plugin not found: ..."}` (not JSON `null`).
-
 ### GET /api/v1/plugins/{node}/{plugin}/config
 
-Returns the plugin configuration of the specified plugin on the specified node.
+Returns the plugin configuration information of the specified plugin name under the specified node.
 
-Secret keys (`password`, `token`, `private_key`, `secret`, `jwt` and names that contain them) are replaced with `"***"` unless `?reveal=1` **and** the caller is `admin`. GET remains a bare JSON object (backward compatible).
+**Path Parameters:**
 
-**Query:** `reveal=1` — admin only (`403` otherwise).
+| Name | Type | Required | Description |
+| ---- | --------- | ------------|-------------|
+| node | Integer    | True       | Node ID, Such as: 1    |
+| plugin | String    | True       | Plugin name        |
+
+**Success Response Body (JSON):**
+
+| Name           | Type     | Description |
+|----------------|----------|-------------|
+| {}             | Object   | Plugin configuration information      |
 
 **Examples:**
 
 ```bash
-$ curl -sS "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config"
-# {"http_laddr":"0.0.0.0:6060","http_bearer_token":"***",...}
+$ curl -i -X GET "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config"
 
-$ curl -sS -b cookie.txt "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config?reveal=1"
-# admin only; file contents when `{plugins.dir}/{plugin}.toml` exists
+{"http_laddr":"0.0.0.0:6060","max_row_limit":10000,"workers":1}
 ```
-
-### PUT /api/v1/plugins/{node}/{plugin}/config
-
-Write a plugin config file (operator+). Body is a JSON object, `{ "toml": "..." }`, or raw TOML (`Content-Type: application/toml`). The file `{plugins.dir}/{plugin}.toml` is written atomically; the previous file is copied to `{plugins.dir}/.config-history/{plugin}/{version}.toml` (last `config_history_keep`, default 10).
-
-**Query:** `apply=reload` (default) calls the plugin `load_config` hook after the write. `apply=none` writes the file only.
-
-**Success body:**
-
-| Name | Type | Description |
-|------|------|-------------|
-| ok / written / applied | Bool | Write outcome |
-| effective | String | `hot` \| `reload` \| `restart_required` (see below) |
-| diff | Object | `{ added, removed, changed }` dotted keys |
-| backup | String | Version id of the file replaced, if any |
-| note | String | Human-readable effective-mode hint |
-
-**`effective` semantics (honest — ferromqd is never hot-restarted):**
-
-| Mode | Meaning |
-|------|---------|
-| `hot` | Already applied in this process via the plugin `load_config` hook. **Not** a `ferromqd` process restart. |
-| `reload` | File is on disk. Call `PUT .../config/reload` (or re-PUT with `apply=reload`) so the plugin picks it up. |
-| `restart_required` | File is on disk. The running process will not use it until `ferromqd` (or an immutable plugin on next start) is restarted. |
-
-```bash
-# Dry-run
-curl -sS -X POST "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config/validate" \
-  -H 'Content-Type: application/json' \
-  -d '{"max_row_limit":5000,"http_laddr":"0.0.0.0:6060"}'
-
-# Write + apply via plugin reload
-curl -sS -X PUT "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config?apply=reload" \
-  -H 'Content-Type: application/json' \
-  -d '{"max_row_limit":5000,"http_laddr":"0.0.0.0:6060"}'
-
-# Write only (then reload yourself)
-curl -sS -X PUT "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config?apply=none" \
-  -H 'Content-Type: application/toml' \
-  --data-binary $'max_row_limit = 5000\nhttp_laddr = "0.0.0.0:6060"\n'
-
-# Versions + rollback
-curl -sS "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config/versions"
-curl -sS -X POST "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config/rollback/1710000000000?apply=reload"
-```
-
-Audit actions: `plugin_config_update`, `plugin_config_rollback`. Existing `GET` / `PUT .../reload` / `load` / `unload` are unchanged.
-
-### POST /api/v1/plugins/{node}/{plugin}/config/validate
-
-Same body as PUT. Parses and checks the payload; does **not** write. Returns `{ valid, effective, diff, errors }`.
-
-### GET /api/v1/plugins/{node}/{plugin}/config/versions
-
-Last-N backups, newest first: `[{ "version", "ts", "size" }]`.
-
-### POST /api/v1/plugins/{node}/{plugin}/config/rollback/{version}
-
-Restore a backup (operator+). Same `apply` / `effective` rules as PUT.
-
-### Broker / listener / log (`ferromq.toml`)
-
-Read-only overview first. Writable `mqtt` / `listener` / `log` sections update the file only and **always** return `effective=restart_required`. FerroMQ does not hot-restart `ferromqd`.
-
-| Method | Path | Role |
-|--------|------|------|
-| GET | `/api/v1/broker/config` | any authenticated (secrets redacted unless `?reveal=1` + admin) |
-| GET | `/api/v1/broker/config/{mqtt\|listener\|log}` | same |
-| PUT | `/api/v1/broker/config/{mqtt\|listener\|log}` | admin |
-| POST | `/api/v1/broker/config/{section}/validate` | admin |
-| GET | `/api/v1/broker/config/versions` | any authenticated |
-| POST | `/api/v1/broker/config/rollback/{version}` | admin |
-
-File path: `broker_config_file` in `ferromq-http-api.toml`, else `FERROMQ_CONFIG`, else `Settings` `-f` path, else `./ferromq.toml`.
-
-```bash
-curl -sS "http://localhost:6060/api/v1/broker/config"
-curl -sS -b cookie.txt -X PUT "http://localhost:6060/api/v1/broker/config/mqtt" \
-  -H 'Content-Type: application/json' \
-  -d '{"max_sessions": 10000, "delayed_publish_max": 100000}'
-# {"ok":true,"written":true,"applied":false,"effective":"restart_required",...}
-```
-
-Audit actions: `broker_config_update`, `broker_config_rollback`.
-
-## Access control & integrations (P5)
-
-Structured REST on top of P4 plugin-config write + `load_config`. Query `?node=` selects a node (default: the HTTP API local node). Writes default to `apply=reload` (in-process `load_config`, `effective=hot` — **not** a `ferromqd` restart). Secrets (`password` / `token` / `secret` / `jwt`, and URL userinfo) are `***` unless `?reveal=1` and admin. Role: viewer read; operator+ write.
-
-There is **no** FerroMQ blacklist / connection-policy plugin. `GET /api/v1/blacklist` returns `available: false` and points at ACL `control=connect` rules.
-
-### ACL (`ferromq-acl`)
-
-```
-GET    /api/v1/acl
-PUT    /api/v1/acl                 # settings and/or full rules replace
-GET    /api/v1/acl/rules
-POST   /api/v1/acl/rules
-PUT    /api/v1/acl/rules/{index}
-DELETE /api/v1/acl/rules/{index}
-```
-
-```bash
-# List rules (passwords redacted)
-curl -sS http://127.0.0.1:6060/api/v1/acl/rules
-
-# Add a deny-connect rule and hot-apply
-curl -sS -X POST http://127.0.0.1:6060/api/v1/acl/rules \
-  -H 'Content-Type: application/json' \
-  -d '{"access":"deny","who":{"ipaddr":"10.1.2.3"},"control":"connect"}'
-# {"ok":true,"written":true,"applied":true,"effective":"hot","rule":{"index":2,...}}
-
-# Structured or raw array are both accepted
-curl -sS -X POST http://127.0.0.1:6060/api/v1/acl/rules \
-  -H 'Content-Type: application/json' \
-  -d '["allow",{"user":"sensor"},"pubsub",["iot/%u/#"]]'
-```
-
-Audit: `acl_rule_add`, `acl_rule_update`, `acl_rule_delete`, `acl_config_update`.
-
-### Auth providers (`ferromq-auth-http` / `ferromq-auth-jwt`)
-
-MQTT **client** auth plugins — not dashboard login.
-
-```
-GET  /api/v1/auth-providers
-GET  /api/v1/auth-providers/{http|jwt}
-PUT  /api/v1/auth-providers/{http|jwt}
-POST /api/v1/auth-providers/{name}/test
-```
-
-`POST .../test` is a stub: HTTP does a **TCP connect** after SSRF checks (no HTTP request). JWT checks that `hmac_secret` is present or `public_key` exists. Pass `allow_private=1` as admin to probe loopback.
-
-### Auto-subscription / topic-rewrite
-
-```
-GET/POST          /api/v1/auto-subscriptions
-PUT/DELETE        /api/v1/auto-subscriptions/{index}
-GET/POST          /api/v1/topic-rewrites
-PUT/DELETE        /api/v1/topic-rewrites/{index}
-```
-
-### Webhooks (`ferromq-web-hook`)
-
-```
-GET    /api/v1/webhooks
-PUT    /api/v1/webhooks
-POST   /api/v1/webhooks/urls
-DELETE /api/v1/webhooks/urls/{index}
-POST   /api/v1/webhooks/rules
-PUT    /api/v1/webhooks/rules/{hook}/{index}
-DELETE /api/v1/webhooks/rules/{hook}/{index}
-POST   /api/v1/webhooks/test
-```
-
-```bash
-curl -sS http://127.0.0.1:6060/api/v1/webhooks
-# urls have userinfo redacted: https://***:***@hooks.example.com/mqtt
-
-curl -sS -X POST http://127.0.0.1:6060/api/v1/webhooks/urls \
-  -H 'Content-Type: application/json' \
-  -d '{"url":"https://hooks.example.com/mqtt"}'
-
-curl -sS -X POST http://127.0.0.1:6060/api/v1/webhooks/test \
-  -H 'Content-Type: application/json' \
-  -d '{"url":"https://hooks.example.com/mqtt"}'
-# {"ok":true,"kind":"tcp_connect",...}  — no HTTP POST is sent (SSRF)
-```
-
-`file://` urls are allowed in config; test ping rejects them. `queue_capacity` / `concurrency_limit` still need a plugin restart (plugin docs).
-
-### Bridges
-
-```
-GET /api/v1/bridges
-GET /api/v1/bridges/{plugin}
-PUT /api/v1/bridges/{plugin}           # P4 config write
-PUT /api/v1/bridges/{plugin}/load
-PUT /api/v1/bridges/{plugin}/unload
-```
-
-```bash
-curl -sS http://127.0.0.1:6060/api/v1/bridges
-curl -sS http://127.0.0.1:6060/api/v1/bridges/ferromq-bridge-egress-mqtt
-# attrs come from the plugin attrs() hook when loaded (clients/errors if the plugin exposes them)
-
-curl -sS -X PUT http://127.0.0.1:6060/api/v1/bridges/ferromq-bridge-egress-mqtt?apply=reload \
-  -H 'Content-Type: application/json' \
-  -d '{"bridges":[{"enable":true,"name":"b1","server":"tcp://127.0.0.1:2883"}]}'
-```
-
-## Diagnostics & cluster ops (P6)
-
-What FerroMQ can actually support is exposed. Gaps return structured `available: false` (or HTTP 501 for writes) instead of fake UIs. Viewer can read; operator+ can acknowledge alarms and attempt cluster writes. Existing `/brokers`, `/nodes`, `/health/check`, `/features`, `/stats`, `/metrics` stay compatible; `/brokers` and `/nodes` gain an additive `cluster` object.
-
-| Endpoint | Reality |
-|----------|---------|
-| `GET /api/v1/alarms` / `/alarms/history` | **Real (derived).** Thin in-memory bus fed from health, feature inconsistency / partial failures, and unreachable peers. Lost on restart. Not a native alarm plugin. |
-| `POST /api/v1/alarms/{id}/acknowledge` | **Real.** Marks a current alarm. Audit: `alarm_acknowledge`. |
-| `GET /api/v1/logs` | **Gap.** No log collector. Points at `GET /broker/config/log`. |
-| `GET /api/v1/trace` (+ write) | **Gap.** No packet-trace plugin. Writes are 501. |
-| `GET /api/v1/slow-subs` | **Gap.** No per-subscriber latency tracker. |
-| `GET /api/v1/topic-metrics` | **Partial.** `available: true`, `kind: route_derived`. Subscriber counts from the topic router (same as `/routes`). **No per-topic rates.** `$SYS/brokers/{id}/stats\|metrics` listed only when `ferromq-sys-topic` is loaded. |
-| `GET /api/v1/cluster` | **Real (read-only topology).** `mode`: `standalone` / `raft` / `broadcast`. `membership.join` / `leave` say whether write APIs exist. |
-| `POST /api/v1/cluster/join` | **501.** `Raft::join` is consumed at `ferromq-cluster-raft` init (`raft_peer_addrs`). Always returns per-node results in `details.nodes`. |
-| `POST /api/v1/cluster/leave` | **Raft only.** Forwards `Plugin::send({"op":"leave"})` → `Mailbox::leave` on the local node. Broadcast / standalone: 501. Per-node results always. Audit: `cluster_leave`. |
-
-```bash
-curl -sS http://127.0.0.1:6060/api/v1/alarms
-# {"available":true,"source":"derived","items":[...]}
-
-curl -sS http://127.0.0.1:6060/api/v1/logs
-# {"available":false,"kind":"logs","gap":"...", "alternatives":[...]}
-
-curl -sS http://127.0.0.1:6060/api/v1/topic-metrics
-# {"available":true,"kind":"route_derived","items":[{"topic":"t","subscribers":1,"node_ids":[1]}],"sys_topic":{"active":false,...}}
-
-curl -sS http://127.0.0.1:6060/api/v1/cluster
-# {"mode":"standalone","membership":{"join":false,"leave":false,"reason":"..."},"nodes":[...]}
-
-curl -sS -X POST http://127.0.0.1:6060/api/v1/cluster/join
-# HTTP 501 {"code":501,"details":{"ok":false,"action":"join","nodes":[{"ok":false,"node_id":1,"error":"..."}]}}
-```
-
-`GET /brokers` / `GET /nodes` include `cluster: { mode, plugin, leader_id, role, peers }` without removing existing fields.
 
 ### PUT /api/v1/plugins/{node}/{plugin}/config/reload
 

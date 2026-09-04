@@ -129,15 +129,6 @@ impl Settings {
         }
     }
 
-    /// Returns the global `Settings` instance if [`init`](Self::init) has run.
-    ///
-    /// HTTP API tests and optional management endpoints use this instead of
-    /// panicking when the broker singleton was never installed.
-    #[inline]
-    pub fn try_instance() -> Option<&'static Self> {
-        SETTINGS.get()
-    }
-
     /// Initializes the global `Settings` singleton with the given options.
     ///
     /// This must be called once before [`Settings::instance()`] can be used.

@@ -13,33 +13,6 @@ http_laddr = "0.0.0.0:6060"
 ## When not set (default), no authentication is required.
 #http_bearer_token = "public"
 
-## Dashboard session login (P3a) + API keys / audit (P3b).
-## First login or POST /api/v1/auth/init creates the admin (durable bcrypt hash).
-## Bearer token remains a superuser admin credential. API keys are hashed
-## (SHA-256) and authenticate as Bearer with a bound role.
-## User/key hashes are persisted per node; sessions are process-local
-## (sticky sessions in a cluster).
-# dashboard_admin_username = "admin"
-# dashboard_admin_password = "change-me"
-# dashboard_viewer_username = "viewer"
-# dashboard_viewer_password = "change-me-too"
-# Persisted hash store. Defaults to `.ferromq-dashboard-auth.json` inside
-# the configured plugin directory.
-# dashboard_auth_file = "/var/lib/ferromq/dashboard-auth.json"
-# Unsafe legacy opt-in. Default anonymous access is read-only.
-# dashboard_allow_anonymous_admin = false
-# dashboard_cookie_secure = false
-# dashboard_session_idle_timeout = "30m"
-# dashboard_session_max_age = "12h"
-# dashboard_login_rate_limit = 10
-# dashboard_login_rate_window = "1m"
-# audit_max_events = 10000
-# audit_file = "/var/log/ferromq/http-api-audit.jsonl"
-# Last-N backups of plugin / ferromq.toml writes (P4). Default: 10
-# config_history_keep = 10
-# Path to this node's ferromq.toml for GET/PUT /api/v1/broker/config
-# broker_config_file = "ferromq.toml"
-
 ## Enable TCP SO_REUSEADDR on the HTTP listener.
 ## Default: true
 # http_reuseaddr = true
@@ -79,15 +52,14 @@ prometheus_metrics_cache_interval = "5s"
 
 ## Dashboard static directory (optional).
 ##
-## By default (when unset), the React console is served from assets
-## embedded from crate-local dashboard-dist/ (Vite build of
-## https://github.com/sllt/ferromq-dashboard: Hash Router, base './').
-## Rebuild those files with ./scripts/sync-dashboard-dist.sh.
+## By default (when unset), the Dashboard SPA is served from assets
+## embedded directly into the binary via rust-embed at compile time,
+## so no external files are needed.
 ##
-## If set AND the path exists, the plugin serves that directory at
-## `/dashboard/` (and `/`) instead — typically a local Vite dist/
-## for preview without recompiling. Missing path → warn + embed.
-# dashboard_static_dir = "/path/to/ferromq-dashboard/dist"
+## If set, the http-api plugin loads the Dashboard SPA from this
+## external directory at the `/dashboard/` path instead, which allows
+## swapping the frontend build without recompiling the binary.
+# dashboard_static_dir = "/path/to/dashboard/dist"
 
 ##--------------------------------------------------------------------
 ## Stats/Metrics History Persistence (optional)

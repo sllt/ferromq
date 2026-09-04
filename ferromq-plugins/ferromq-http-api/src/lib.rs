@@ -3,7 +3,6 @@
 //! Provides a RESTful HTTP API for broker management and monitoring.
 //! ...
 #![deny(unsafe_code)]
-#![recursion_limit = "256"]
 
 use std::sync::Arc;
 
@@ -23,20 +22,13 @@ use config::PluginConfig;
 use flusher::{new_cache, start_flusher, start_recovery_loop, start_warmup, HistoryCaches};
 
 mod api;
-mod audit;
-mod auth;
 mod clients;
 mod config;
-mod config_mgmt;
-mod diagnostics;
 mod embed;
 mod flusher;
 mod handler;
-mod integrations;
-mod openapi;
 mod plugin;
 mod prome;
-mod response;
 mod subs;
 mod types;
 
@@ -65,7 +57,7 @@ impl HttpApiPlugin {
     async fn new<S: Into<String>>(scx: ServerContext, name: S) -> Result<Self> {
         let name = name.into();
         let mut cfg = scx.plugins.read_config_default::<PluginConfig>(&name)?;
-        log::info!("{name} HttpApiPlugin cfg: {}", cfg.log_summary());
+        log::info!("{name} HttpApiPlugin cfg: {cfg:?}");
 
         // Replace {node} placeholder in storage config paths (before init_db)
         if let Some(ref mut storage_cfg) = cfg.storage {

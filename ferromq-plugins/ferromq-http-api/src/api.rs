@@ -1,13 +1,12 @@
 //! HTTP API route handlers for the FerroMQ management API.
 //!
-//! Defines the HTTP server, route tree, session + Bearer authentication, and
+//! Defines the HTTP server, route tree, Bearer token authentication, and
 //! handler functions for brokers, nodes, clients, subscriptions, routes,
 //! MQTT actions, plugins, stats, metrics, and history.
 
 use std::convert::From as _;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use salvo::conn::tcp::TcpAcceptor;
@@ -41,27 +40,14 @@ use ferromq::{
     Result,
 };
 
-use super::audit::{list_audit, AuditLog, AUDIT_LOG};
-use super::auth::{
-    auth_change_password, auth_init, auth_login, auth_logout, auth_me, create_api_key, create_user,
-    delete_api_key, disable_user, enable_user, get_api_key, identity_from_depot, list_api_keys, list_users,
-    require_admin, require_write, AuthGuard, AuthState, AUTH_STATE,
-};
-use super::config_mgmt;
-use super::diagnostics::{self, AlarmBus, ALARM_BUS};
-use super::embed::mount_dashboard;
+use salvo::serve_static::{static_embed, StaticDir};
+
+use super::embed::DashboardAssets;
 use super::flusher::{HistoryCache, HistoryCaches};
-use super::integrations;
-use super::openapi::{get_docs, get_openapi};
 use super::prome::{Monitor, PROME_MONITOR};
-use super::response::{
-    apply_list_headers, cluster_node_failure, cluster_node_success, new_request_id, render_api_error,
-    render_api_error_with, render_list, render_not_found, status_for_plugin_error, subscription_to_json,
-    wants_page_format, ListPaging, DEPOT_REQUEST_ID, HEADER_REQUEST_ID,
-};
 use super::types::{
     ClientSearchParams, ClientSearchResult, FeatureConflict, FeatureValueGroup, Features, FeaturesInfo,
-    FeaturesNodeResult, FeaturesSummary, HistoryData, HistoryQuery, Message, MessageReply,
+    FeaturesInfoOrError, FeaturesSummary, HistoryData, HistoryQuery, Message, MessageReply,
     PrometheusDataType, PublishParams, RetainInfo, RetainQueryParams, SubscribeParams, UnsubscribeParams,
 };
 use super::{clients, plugin, prome, subs, PluginConfigType};
@@ -69,118 +55,65 @@ use super::{clients, plugin, prome, subs, PluginConfigType};
 /// Depot key for the history caches + storage handle.
 const HISTORY_CACHES: &str = "HISTORY_CACHES";
 
-/// Test helper: build the API router with a fresh [`AuthState`] from an optional bearer.
-/// Production uses [`route_with_auth`] so the same `AuthState` can be shared with startup checks.
-#[cfg(test)]
-pub(crate) fn route(
+struct BearerValidator {
+    token: String,
+}
+impl BearerValidator {
+    pub fn new(token: &str) -> Self {
+        Self { token: format!("Bearer {token}") }
+    }
+}
+
+#[async_trait]
+impl Handler for BearerValidator {
+    async fn handle(&self, req: &mut Request, depot: &mut Depot, res: &mut Response, ctrl: &mut FlowCtrl) {
+        if req.headers().get("authorization").is_some_and(|token| token == &self.token) {
+            ctrl.call_next(req, depot, res).await;
+        } else {
+            res.status_code(StatusCode::UNAUTHORIZED);
+            ctrl.skip_rest()
+        }
+    }
+}
+
+fn route(
     scx: ServerContext,
     cfg: PluginConfigType,
     token: Option<String>,
     monitor: prome::Monitor,
     history_caches: Option<HistoryCaches>,
 ) -> Router {
-    route_with_auth(scx, cfg, Arc::new(AuthState::new(token)), monitor, history_caches)
-}
-
-pub(crate) fn route_with_auth(
-    scx: ServerContext,
-    cfg: PluginConfigType,
-    auth_state: Arc<AuthState>,
-    monitor: prome::Monitor,
-    history_caches: Option<HistoryCaches>,
-) -> Router {
-    let audit_log = {
-        let guard = cfg.try_read();
-        match guard {
-            Ok(c) => Arc::new(AuditLog::from_config(&c)),
-            Err(_) => Arc::new(AuditLog::new(10_000, None)),
-        }
-    };
     let mut router = Router::with_path("api/v1")
         .hoop(affix_state::inject((scx, cfg)))
         .hoop(affix_state::insert(PROME_MONITOR, monitor))
-        .hoop(affix_state::insert(AUTH_STATE, auth_state.clone()))
-        .hoop(affix_state::insert(AUDIT_LOG, audit_log))
-        .hoop(affix_state::insert(ALARM_BUS, Arc::new(AlarmBus::default_bus())))
-        .hoop(request_id_hoop)
         .hoop(api_logger);
+    if let Some(token) = token {
+        router = router.hoop(BearerValidator::new(&token));
+    }
     // Inject history caches so query handlers can access LRU + storage.
     if let Some(hc) = history_caches {
         router = router.hoop(affix_state::insert(HISTORY_CACHES, hc));
     }
-
-    // Public: login/init/logout, health probes, and the OpenAPI contract.
-    let public = Router::new()
-        .push(Router::with_path("auth/login").post(auth_login))
-        .push(Router::with_path("auth/logout").post(auth_logout))
-        .push(Router::with_path("auth/init").post(auth_init))
-        .push(Router::with_path("openapi.json").get(get_openapi))
-        .push(Router::with_path("docs").get(get_docs))
-        .push(
-            Router::with_path("health/check")
-                .get(check_health)
-                .push(Router::with_path("{id}").get(check_health)),
-        );
-
-    // Session cookie or Bearer token (or anonymous viewer by default when auth is unset).
-    let protected = Router::new()
-        .hoop(AuthGuard::new(auth_state))
+    router
         .get(list_apis)
-        .push(Router::with_path("auth/me").get(auth_me))
-        .push(Router::with_path("auth/change-password").post(auth_change_password))
-        .push(
-            Router::with_path("users")
-                .hoop(require_admin)
-                .get(list_users)
-                .post(create_user)
-                .push(Router::with_path("{username}/disable").post(disable_user))
-                .push(Router::with_path("{username}/enable").post(enable_user)),
-        )
-        .push(
-            Router::with_path("api-keys")
-                .hoop(require_admin)
-                .get(list_api_keys)
-                .post(create_api_key)
-                .push(Router::with_path("{id}").get(get_api_key).delete(delete_api_key)),
-        )
-        .push(Router::with_path("audit").hoop(require_admin).get(list_audit))
         .push(Router::with_path("brokers").get(get_brokers).push(Router::with_path("{id}").get(get_brokers)))
-        .push(
-            Router::with_path("broker/config")
-                .get(config_mgmt::broker_config_get)
-                .push(Router::with_path("versions").get(config_mgmt::broker_config_versions))
-                .push(
-                    Router::with_path("rollback/{version}")
-                        .hoop(require_admin)
-                        .post(config_mgmt::broker_config_rollback),
-                )
-                .push(
-                    Router::with_path("{section}")
-                        .get(config_mgmt::broker_config_section_get)
-                        .push(Router::new().hoop(require_admin).put(config_mgmt::broker_config_section_put))
-                        .push(
-                            Router::with_path("validate")
-                                .hoop(require_admin)
-                                .post(config_mgmt::broker_config_section_validate),
-                        ),
-                ),
-        )
         .push(Router::with_path("nodes").get(get_nodes).push(Router::with_path("{id}").get(get_nodes)))
         .push(
             Router::with_path("features").get(get_features).push(Router::with_path("{id}").get(get_features)),
         )
         .push(
+            Router::with_path("health/check")
+                .get(check_health)
+                .push(Router::with_path("{id}").get(check_health)),
+        )
+        .push(
             Router::with_path("clients")
-                .push(
-                    Router::with_path("offlines")
-                        .get(search_offlines)
-                        .push(Router::new().hoop(require_write).delete(kick_offlines)),
-                )
+                .push(Router::with_path("offlines").get(search_offlines).delete(kick_offlines))
                 .get(search_clients)
                 .push(
                     Router::with_path("{clientid}")
                         .get(get_client)
-                        .push(Router::new().hoop(require_write).delete(kick_client))
+                        .delete(kick_client)
                         .push(Router::with_path("online").get(check_online)),
                 ),
         )
@@ -190,14 +123,9 @@ pub(crate) fn route_with_auth(
                 .push(Router::with_path("{clientid}").get(get_client_subscriptions)),
         )
         .push(Router::with_path("routes").get(get_routes).push(Router::with_path("{topic}").get(get_route)))
-        .push(
-            Router::with_path("retains")
-                .get(get_retains)
-                .push(Router::new().hoop(require_write).delete(delete_retain)),
-        )
+        .push(Router::with_path("retains").get(get_retains).delete(delete_retain))
         .push(
             Router::with_path("mqtt")
-                .hoop(require_write)
                 .push(Router::with_path("publish").post(publish))
                 .push(Router::with_path("subscribe").post(subscribe))
                 .push(Router::with_path("unsubscribe").post(unsubscribe)),
@@ -207,163 +135,10 @@ pub(crate) fn route_with_auth(
                 .get(all_plugins)
                 .push(Router::with_path("{node}").get(node_plugins))
                 .push(Router::with_path("{node}/{plugin}").get(node_plugin_info))
-                .push(
-                    Router::with_path("{node}/{plugin}/config")
-                        .get(node_plugin_config)
-                        .push(Router::new().hoop(require_write).put(config_mgmt::node_plugin_config_update)),
-                )
-                .push(
-                    Router::with_path("{node}/{plugin}/config/reload")
-                        .hoop(require_write)
-                        .put(node_plugin_config_reload),
-                )
-                .push(
-                    Router::with_path("{node}/{plugin}/config/validate")
-                        .hoop(require_write)
-                        .post(config_mgmt::node_plugin_config_validate),
-                )
-                .push(
-                    Router::with_path("{node}/{plugin}/config/versions")
-                        .get(config_mgmt::node_plugin_config_versions),
-                )
-                .push(
-                    Router::with_path("{node}/{plugin}/config/rollback/{version}")
-                        .hoop(require_write)
-                        .post(config_mgmt::node_plugin_config_rollback),
-                )
-                .push(Router::with_path("{node}/{plugin}/load").hoop(require_write).put(node_plugin_load))
-                .push(
-                    Router::with_path("{node}/{plugin}/unload").hoop(require_write).put(node_plugin_unload),
-                ),
-        )
-        .push(
-            Router::with_path("acl")
-                .get(integrations::acl_get)
-                .push(Router::new().hoop(require_write).put(integrations::acl_put))
-                .push(
-                    Router::with_path("rules")
-                        .get(integrations::acl_rules_list)
-                        .push(Router::new().hoop(require_write).post(integrations::acl_rules_add))
-                        .push(
-                            Router::with_path("{index}")
-                                .hoop(require_write)
-                                .put(integrations::acl_rules_update)
-                                .delete(integrations::acl_rules_delete),
-                        ),
-                ),
-        )
-        .push(
-            Router::with_path("auth-providers").get(integrations::auth_providers_list).push(
-                Router::with_path("{name}")
-                    .get(integrations::auth_provider_get)
-                    .push(Router::new().hoop(require_write).put(integrations::auth_provider_put))
-                    .push(
-                        Router::with_path("test").hoop(require_write).post(integrations::auth_provider_test),
-                    ),
-            ),
-        )
-        .push(
-            Router::with_path("blacklist")
-                .get(integrations::blacklist_get)
-                .push(
-                    Router::new()
-                        .hoop(require_write)
-                        .post(integrations::blacklist_write)
-                        .delete(integrations::blacklist_write),
-                )
-                .push(
-                    Router::with_path("{id}")
-                        .hoop(require_write)
-                        .put(integrations::blacklist_write)
-                        .delete(integrations::blacklist_write),
-                ),
-        )
-        .push(
-            Router::with_path("auto-subscriptions")
-                .get(integrations::auto_sub_get)
-                .push(Router::new().hoop(require_write).post(integrations::auto_sub_add))
-                .push(
-                    Router::with_path("{index}")
-                        .hoop(require_write)
-                        .put(integrations::auto_sub_update)
-                        .delete(integrations::auto_sub_delete),
-                ),
-        )
-        .push(
-            Router::with_path("topic-rewrites")
-                .get(integrations::topic_rewrite_get)
-                .push(Router::new().hoop(require_write).post(integrations::topic_rewrite_add))
-                .push(
-                    Router::with_path("{index}")
-                        .hoop(require_write)
-                        .put(integrations::topic_rewrite_update)
-                        .delete(integrations::topic_rewrite_delete),
-                ),
-        )
-        .push(
-            Router::with_path("webhooks")
-                .get(integrations::webhooks_get)
-                .push(Router::new().hoop(require_write).put(integrations::webhooks_put))
-                .push(
-                    Router::with_path("urls")
-                        .push(Router::new().hoop(require_write).post(integrations::webhook_urls_add))
-                        .push(
-                            Router::with_path("{index}")
-                                .hoop(require_write)
-                                .delete(integrations::webhook_urls_delete),
-                        ),
-                )
-                .push(
-                    Router::with_path("rules")
-                        .push(Router::new().hoop(require_write).post(integrations::webhook_rules_add))
-                        .push(
-                            Router::with_path("{hook}/{index}")
-                                .hoop(require_write)
-                                .put(integrations::webhook_rules_update)
-                                .delete(integrations::webhook_rules_delete),
-                        ),
-                )
-                .push(Router::with_path("test").hoop(require_write).post(integrations::webhook_test)),
-        )
-        .push(
-            Router::with_path("bridges").get(integrations::bridges_list).push(
-                Router::with_path("{plugin}")
-                    .get(integrations::bridge_get)
-                    .push(Router::new().hoop(require_write).put(integrations::bridge_put))
-                    .push(Router::with_path("load").hoop(require_write).put(integrations::bridge_load))
-                    .push(Router::with_path("unload").hoop(require_write).put(integrations::bridge_unload)),
-            ),
-        )
-        .push(
-            Router::with_path("alarms")
-                .get(diagnostics::alarms_current)
-                .push(Router::with_path("history").get(diagnostics::alarms_history))
-                .push(
-                    Router::with_path("{id}/acknowledge")
-                        .hoop(require_write)
-                        .post(diagnostics::alarms_acknowledge),
-                ),
-        )
-        .push(Router::with_path("logs").get(diagnostics::logs_get))
-        .push(
-            Router::with_path("trace")
-                .get(diagnostics::trace_get)
-                .push(Router::new().hoop(require_write).post(diagnostics::trace_write))
-                .push(
-                    Router::with_path("{*rest}")
-                        .hoop(require_write)
-                        .post(diagnostics::trace_write)
-                        .put(diagnostics::trace_write)
-                        .delete(diagnostics::trace_write),
-                ),
-        )
-        .push(Router::with_path("slow-subs").get(diagnostics::slow_subs_get))
-        .push(Router::with_path("topic-metrics").get(diagnostics::topic_metrics_get))
-        .push(
-            Router::with_path("cluster")
-                .get(diagnostics::cluster_get)
-                .push(Router::with_path("join").hoop(require_write).post(diagnostics::cluster_join))
-                .push(Router::with_path("leave").hoop(require_write).post(diagnostics::cluster_leave)),
+                .push(Router::with_path("{node}/{plugin}/config").get(node_plugin_config))
+                .push(Router::with_path("{node}/{plugin}/config/reload").put(node_plugin_config_reload))
+                .push(Router::with_path("{node}/{plugin}/load").put(node_plugin_load))
+                .push(Router::with_path("{node}/{plugin}/unload").put(node_plugin_unload)),
         )
         .push(
             Router::with_path("stats")
@@ -400,9 +175,7 @@ pub(crate) fn route_with_auth(
                         .push(Router::with_path("{id}").get(get_metrics_history)),
                 )
                 .push(Router::with_path("{id}").get(get_metrics)),
-        );
-
-    router.push(public).push(protected)
+        )
 }
 
 pub(crate) async fn listen_and_serve(
@@ -413,48 +186,15 @@ pub(crate) async fn listen_and_serve(
     rx: oneshot::Receiver<()>,
     started_tx: oneshot::Sender<()>,
 ) -> Result<()> {
-    let (reuseaddr, reuseport, dashboard_static_dir, dashboard_auth_file) = {
+    let (reuseaddr, reuseport, http_bearer_token, dashboard_static_dir) = {
         let cfg = cfg.read().await;
         (
             cfg.http_reuseaddr,
             cfg.http_reuseport,
+            cfg.http_bearer_token.clone(),
             cfg.dashboard_static_dir.clone(),
-            cfg.dashboard_auth_file
-                .as_deref()
-                .map(str::trim)
-                .filter(|p| !p.is_empty())
-                .map(std::path::PathBuf::from)
-                .or_else(|| {
-                    scx.plugins
-                        .config_dir()
-                        .map(|dir| std::path::Path::new(dir).join(".ferromq-dashboard-auth.json"))
-                }),
         )
     };
-    let auth_state = Arc::new(
-        // Production authorization always reads the live PluginConfig token.
-        // No snapshot fallback: removing a bearer via load_config revokes it.
-        AuthState::load(None, dashboard_auth_file).map_err(|e| anyhow!("dashboard auth store: {e}"))?,
-    );
-    {
-        let cfg_snap = cfg.read().await.clone();
-        if !auth_state.auth_required(&cfg_snap).await {
-            let role = if cfg_snap.dashboard_allow_anonymous_admin {
-                "admin (unsafe compatibility mode)"
-            } else {
-                "viewer"
-            };
-            log::warn!(
-                "HTTP API authentication is not configured (no http_bearer_token, dashboard password, users, or API keys). Requests are anonymous {role}. Set http_bearer_token or dashboard_admin_password to require authentication."
-            );
-        }
-    }
-    let monitor = prome::Monitor::new();
-    let api_router = route_with_auth(scx, cfg, auth_state, monitor, history_caches);
-    let mut root_router = Router::new().push(api_router);
-    // Prefer dashboard_static_dir when it exists; otherwise rust-embed dashboard-dist/.
-    root_router = mount_dashboard(root_router, dashboard_static_dir.as_deref());
-
     log::info!("HTTP API Listening on {laddr}, reuseaddr: {reuseaddr}, reuseport: {reuseport}");
 
     let listen = tokio::net::TcpListener::from_std(bind(laddr, 128, reuseaddr, reuseport)?)?;
@@ -467,6 +207,44 @@ pub(crate) async fn listen_and_serve(
         handler.stop_graceful(None);
     });
     let _ = started_tx.send(());
+    let monitor = prome::Monitor::new();
+    let api_router = route(scx, cfg, http_bearer_token, monitor, history_caches);
+
+    let mut root_router = Router::new().push(api_router);
+
+    // Mount Dashboard SPA — prefer filesystem directory (dev hot-reload) over embedded assets.
+    // If dashboard_static_dir is configured AND the directory exists, use StaticDir
+    // (supports live editing of dashboard files during development).
+    // Otherwise, fall back to assets embedded via rust-embed (production mode, no config needed).
+    let dashboard_mounted = if let Some(dir) = &dashboard_static_dir {
+        let path = std::path::Path::new(dir);
+        if path.exists() {
+            root_router = root_router.push(
+                Router::with_path("dashboard/{**path}").get(StaticDir::new([dir]).defaults("index.html")),
+            );
+            root_router = root_router
+                .push(Router::with_path("{**path}").get(StaticDir::new([dir]).defaults("index.html")));
+            log::info!("Dashboard SPA mounted from filesystem: {dir}, canonical: {:?}", path.canonicalize());
+            true
+        } else {
+            log::warn!(
+                "Dashboard static dir configured but not found: {dir}, falling back to embedded assets"
+            );
+            false
+        }
+    } else {
+        false
+    };
+
+    if !dashboard_mounted {
+        root_router = root_router.push(
+            Router::with_path("dashboard/{*path}")
+                .get(static_embed::<DashboardAssets>().fallback("index.html")),
+        );
+        root_router = root_router
+            .push(Router::with_path("{*path}").get(static_embed::<DashboardAssets>().fallback("index.html")));
+        log::info!("Dashboard SPA mounted from embedded assets (rust-embed)");
+    }
 
     server.try_serve(root_router).await?;
     Ok(())
@@ -492,114 +270,8 @@ fn bind(
 }
 
 #[handler]
-async fn request_id_hoop(req: &mut Request, depot: &mut Depot, res: &mut Response, ctrl: &mut FlowCtrl) {
-    let id = req.header::<String>("x-request-id").filter(|s| !s.is_empty()).unwrap_or_else(new_request_id);
-    depot.insert(DEPOT_REQUEST_ID, id.clone());
-    if let Ok(v) = HeaderValue::from_str(&id) {
-        res.add_header(HEADER_REQUEST_ID, v, true).ok();
-    }
-    ctrl.call_next(req, depot, res).await;
-}
-
-#[handler]
 async fn list_apis(res: &mut Response) {
     let data = serde_json::json!([
-        {
-            "name": "auth_login",
-            "method": "POST",
-            "path": "/api/v1/auth/login",
-            "descr": "Dashboard login; sets an HttpOnly session cookie"
-        },
-        {
-            "name": "auth_logout",
-            "method": "POST",
-            "path": "/api/v1/auth/logout",
-            "descr": "Clear the dashboard session cookie"
-        },
-        {
-            "name": "auth_me",
-            "method": "GET",
-            "path": "/api/v1/auth/me",
-            "descr": "Current dashboard user (session, bearer, or anonymous)"
-        },
-        {
-            "name": "auth_change_password",
-            "method": "POST",
-            "path": "/api/v1/auth/change-password",
-            "descr": "Change the current dashboard user's password"
-        },
-        {
-            "name": "auth_init",
-            "method": "POST",
-            "path": "/api/v1/auth/init",
-            "descr": "One-time bootstrap of the configured dashboard admin"
-        },
-        {
-            "name": "list_users",
-            "method": "GET",
-            "path": "/api/v1/users",
-            "descr": "List dashboard users (admin)"
-        },
-        {
-            "name": "create_user",
-            "method": "POST",
-            "path": "/api/v1/users",
-            "descr": "Create a dashboard user (admin)"
-        },
-        {
-            "name": "disable_user",
-            "method": "POST",
-            "path": "/api/v1/users/{username}/disable",
-            "descr": "Disable a dashboard user (admin)"
-        },
-        {
-            "name": "enable_user",
-            "method": "POST",
-            "path": "/api/v1/users/{username}/enable",
-            "descr": "Re-enable a dashboard user (admin)"
-        },
-        {
-            "name": "list_api_keys",
-            "method": "GET",
-            "path": "/api/v1/api-keys",
-            "descr": "List API keys without secrets (admin)"
-        },
-        {
-            "name": "create_api_key",
-            "method": "POST",
-            "path": "/api/v1/api-keys",
-            "descr": "Create an API key; secret is returned once (admin)"
-        },
-        {
-            "name": "get_api_key",
-            "method": "GET",
-            "path": "/api/v1/api-keys/{id}",
-            "descr": "Get one API key metadata (admin)"
-        },
-        {
-            "name": "delete_api_key",
-            "method": "DELETE",
-            "path": "/api/v1/api-keys/{id}",
-            "descr": "Revoke an API key (admin)"
-        },
-        {
-            "name": "list_audit",
-            "method": "GET",
-            "path": "/api/v1/audit",
-            "descr": "Paged audit log (admin)"
-        },
-        {
-            "name": "get_openapi",
-            "method": "GET",
-            "path": "/api/v1/openapi.json",
-            "descr": "OpenAPI 3 document for the /api/v1 management surface"
-        },
-        {
-            "name": "get_docs",
-            "method": "GET",
-            "path": "/api/v1/docs",
-            "descr": "Swagger UI for the OpenAPI document"
-        },
         {
             "name": "get_brokers",
             "method": "GET",
@@ -736,46 +408,10 @@ async fn list_apis(res: &mut Response) {
             "descr": "Get a plugin info"
         },
         {
-            "name": "get_broker_config",
-            "method": "GET",
-            "path": "/api/v1/broker/config",
-            "descr": "Read-only ferromq.toml overview (mqtt/listener/log); secrets redacted unless reveal=1 and admin"
-        },
-        {
-            "name": "put_broker_config_section",
-            "method": "PUT",
-            "path": "/api/v1/broker/config/{section}",
-            "descr": "Write mqtt/listener/log to ferromq.toml (admin). Always effective=restart_required; ferromqd is not hot-restarted"
-        },
-        {
             "name": "node_plugin_config",
             "method": "GET",
             "path": "/api/v1/plugins/{node}/{plugin}/config",
-            "descr": "Get a plugin config (secrets redacted unless ?reveal=1 and admin)"
-        },
-        {
-            "name": "node_plugin_config_update",
-            "method": "PUT",
-            "path": "/api/v1/plugins/{node}/{plugin}/config",
-            "descr": "Write a plugin config (JSON or TOML); optional apply=reload; returns diff + effective mode"
-        },
-        {
-            "name": "node_plugin_config_validate",
-            "method": "POST",
-            "path": "/api/v1/plugins/{node}/{plugin}/config/validate",
-            "descr": "Dry-run validate a plugin config without writing"
-        },
-        {
-            "name": "node_plugin_config_versions",
-            "method": "GET",
-            "path": "/api/v1/plugins/{node}/{plugin}/config/versions",
-            "descr": "List last-N plugin config backups"
-        },
-        {
-            "name": "node_plugin_config_rollback",
-            "method": "POST",
-            "path": "/api/v1/plugins/{node}/{plugin}/config/rollback/{version}",
-            "descr": "Restore a plugin config backup"
+            "descr": "Get a plugin config"
         },
         {
             "name": "node_plugin_config_reload",
@@ -794,138 +430,6 @@ async fn list_apis(res: &mut Response) {
             "method": "PUT",
             "path": "/api/v1/plugins/{node}/{plugin}/unload",
             "descr": "Unload the specified plugin under the specified node."
-        },
-        {
-            "name": "acl_get",
-            "method": "GET",
-            "path": "/api/v1/acl",
-            "descr": "Structured ferromq-acl settings + rules (secrets redacted unless reveal=1)"
-        },
-        {
-            "name": "acl_rules_list",
-            "method": "GET",
-            "path": "/api/v1/acl/rules",
-            "descr": "List ACL rules without hand-editing TOML"
-        },
-        {
-            "name": "acl_rules_add",
-            "method": "POST",
-            "path": "/api/v1/acl/rules",
-            "descr": "Append an ACL rule and hot-apply via plugin load_config"
-        },
-        {
-            "name": "auth_providers_list",
-            "method": "GET",
-            "path": "/api/v1/auth-providers",
-            "descr": "MQTT client auth plugins (ferromq-auth-http / ferromq-auth-jwt)"
-        },
-        {
-            "name": "auth_provider_test",
-            "method": "POST",
-            "path": "/api/v1/auth-providers/{name}/test",
-            "descr": "HTTP TCP-connect stub or JWT local config check (SSRF-safe)"
-        },
-        {
-            "name": "blacklist_get",
-            "method": "GET",
-            "path": "/api/v1/blacklist",
-            "descr": "Honest gap: no blacklist plugin; ACL connect rules are the alternative"
-        },
-        {
-            "name": "auto_subscriptions",
-            "method": "GET",
-            "path": "/api/v1/auto-subscriptions",
-            "descr": "List ferromq-auto-subscription topic filters"
-        },
-        {
-            "name": "topic_rewrites",
-            "method": "GET",
-            "path": "/api/v1/topic-rewrites",
-            "descr": "List ferromq-topic-rewrite rules"
-        },
-        {
-            "name": "webhooks_get",
-            "method": "GET",
-            "path": "/api/v1/webhooks",
-            "descr": "ferromq-web-hook urls + rules (URL userinfo redacted)"
-        },
-        {
-            "name": "webhook_test",
-            "method": "POST",
-            "path": "/api/v1/webhooks/test",
-            "descr": "TCP connectivity stub for a webhook URL (no HTTP POST; SSRF checks)"
-        },
-        {
-            "name": "bridges_list",
-            "method": "GET",
-            "path": "/api/v1/bridges",
-            "descr": "Bridge plugins + attrs/status from plugin attrs()"
-        },
-        {
-            "name": "bridge_config",
-            "method": "PUT",
-            "path": "/api/v1/bridges/{plugin}",
-            "descr": "Write a bridge plugin config via the P4 plugin-config path"
-        },
-        {
-            "name": "alarms_current",
-            "method": "GET",
-            "path": "/api/v1/alarms",
-            "descr": "Current alarms derived from health/features/unreachable peers (in-memory)"
-        },
-        {
-            "name": "alarms_history",
-            "method": "GET",
-            "path": "/api/v1/alarms/history",
-            "descr": "Cleared alarms (process memory; lost on restart)"
-        },
-        {
-            "name": "alarms_acknowledge",
-            "method": "POST",
-            "path": "/api/v1/alarms/{id}/acknowledge",
-            "descr": "Acknowledge a current alarm (operator+)"
-        },
-        {
-            "name": "logs_get",
-            "method": "GET",
-            "path": "/api/v1/logs",
-            "descr": "Honest gap: no log collector; points at broker log config"
-        },
-        {
-            "name": "trace_get",
-            "method": "GET",
-            "path": "/api/v1/trace",
-            "descr": "Honest gap: no packet-trace plugin"
-        },
-        {
-            "name": "slow_subs_get",
-            "method": "GET",
-            "path": "/api/v1/slow-subs",
-            "descr": "Honest gap: no slow-subscription tracker"
-        },
-        {
-            "name": "topic_metrics_get",
-            "method": "GET",
-            "path": "/api/v1/topic-metrics",
-            "descr": "Route-derived subscriber counts; per-topic rates are not collected"
-        },
-        {
-            "name": "cluster_get",
-            "method": "GET",
-            "path": "/api/v1/cluster",
-            "descr": "Read-only cluster topology (raft/broadcast/standalone)"
-        },
-        {
-            "name": "cluster_join",
-            "method": "POST",
-            "path": "/api/v1/cluster/join",
-            "descr": "Runtime join is not supported (501 + per-node result); membership is startup config"
-        },
-        {
-            "name": "cluster_leave",
-            "method": "POST",
-            "path": "/api/v1/cluster/leave",
-            "descr": "Leave via ferromq-cluster-raft Plugin::send, else 501 with per-node result"
         },
 
         {
@@ -1001,9 +505,7 @@ async fn list_apis(res: &mut Response) {
     res.render(Json(data));
 }
 
-pub(crate) fn get_scx_cfg(
-    depot: &mut Depot,
-) -> std::result::Result<&(ServerContext, PluginConfigType), salvo::Error> {
+fn get_scx_cfg(depot: &mut Depot) -> std::result::Result<&(ServerContext, PluginConfigType), salvo::Error> {
     let scx_cfg = depot.obtain::<(ServerContext, PluginConfigType)>().map_err(|e| match e {
         None => salvo::Error::Io(std::io::Error::new(ErrorKind::NotFound, anyhow!("None"))),
         Some(e) => salvo::Error::Io(std::io::Error::new(ErrorKind::NotFound, format!("{e:?}"))),
@@ -1028,122 +530,18 @@ fn get_history_caches(depot: &Depot) -> Option<HistoryCaches> {
     }
 }
 
-/// Auth endpoints whose bodies are never written to request logs.
-fn is_auth_body_path(path: &str) -> bool {
-    let p = path.split('?').next().unwrap_or(path).trim_end_matches('/');
-    p.ends_with("/auth/login")
-        || p.ends_with("/auth/change-password")
-        || p.ends_with("/auth/init")
-        || p.ends_with("/auth/logout")
-}
-
-/// Extra keys the request logger redacts on top of [`config_mgmt::is_secret_key`].
-fn is_request_log_secret_key(key: &str) -> bool {
-    if config_mgmt::is_secret_key(key) {
-        return true;
-    }
-    let k = key.trim().to_ascii_lowercase().replace('-', "_");
-    k == "authorization"
-        || k == "cookie"
-        || k == "set_cookie"
-        || k == "api_key"
-        || k == "apikey"
-        || k.ends_with("_authorization")
-        || k.ends_with("_api_key")
-        || k.ends_with("_apikey")
-        || k.contains("authorization")
-        || k.contains("api_key")
-        || k.contains("apikey")
-}
-
-fn redact_log_secret_value(v: serde_json::Value) -> serde_json::Value {
-    match v {
-        serde_json::Value::Null => serde_json::Value::Null,
-        serde_json::Value::String(s) if s.is_empty() => serde_json::Value::String(String::new()),
-        serde_json::Value::Object(_) | serde_json::Value::Array(_) => redact_request_log_value(v),
-        _ => serde_json::Value::String("***".into()),
-    }
-}
-
-fn redact_request_log_value(value: serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut out = serde_json::Map::new();
-            for (k, v) in map {
-                if is_request_log_secret_key(&k) {
-                    out.insert(k, redact_log_secret_value(v));
-                } else {
-                    out.insert(k, redact_request_log_value(v));
-                }
-            }
-            serde_json::Value::Object(out)
-        }
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.into_iter().map(redact_request_log_value).collect())
-        }
-        serde_json::Value::String(s) if s.contains("://") => {
-            serde_json::Value::String(integrations::redact_url_userinfo(&s))
-        }
-        other => other,
-    }
-}
-
-/// Render a request-body fragment for `http_request_log`.
-///
-/// Auth endpoints omit the body entirely. JSON/TOML is parsed and secret
-/// fields plus URL userinfo are redacted. Unparsed bodies are length-only
-/// so plaintext secrets never reach the log.
-pub(crate) fn summarize_request_body(path: &str, body: &str) -> String {
-    let bytes = body.len();
-    if is_auth_body_path(path) {
-        return format!("[omitted; {bytes} bytes]");
-    }
-    let trimmed = body.trim();
-    if trimmed.is_empty() {
-        return format!("[empty; {bytes} bytes]");
-    }
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        return redact_request_log_value(v).to_string();
-    }
-    if let Ok(v) = config_mgmt::toml_to_json(trimmed) {
-        return format!("(toml) {}", redact_request_log_value(v));
-    }
-    format!("[unparsed; {bytes} bytes]")
-}
-
-/// Safe one-line request summary. Does not accept or render headers
-/// (`Authorization` / `Cookie` are never logged).
-pub(crate) fn request_log_summary(
-    remote: &str,
-    version: &str,
-    method: &str,
-    uri: &str,
-    body: Option<&str>,
-) -> String {
-    let uri = integrations::redact_url_userinfo(uri);
-    let path = uri.split('?').next().unwrap_or(uri.as_str());
-    let base = format!("Request {remote}, {version}, {method}, {uri}");
-    match body {
-        Some(b) => format!("{base}, body: {}", summarize_request_body(path, b)),
-        None => base,
-    }
-}
-
 #[handler]
 async fn api_logger(req: &mut Request, depot: &mut Depot) -> std::result::Result<(), salvo::Error> {
     let (_, cfg) = get_scx_cfg(depot)?;
     if !cfg.read().await.http_request_log {
         return Ok(());
     }
-    // Headers (Authorization, Cookie, …) are intentionally not read or logged.
-    let remote = req.remote_addr().to_string();
-    let version = format!("{:?}", req.version());
-    let method = req.method().to_string();
-    let uri = req.uri().to_string();
+    let log_data =
+        format!("Request {}, {:?}, {}, {}", req.remote_addr(), req.version(), req.method(), req.uri());
     let txt_body = if let Some(m) = req.content_type() {
         if let mime::PLAIN | mime::JSON | mime::TEXT = m.subtype() {
             if let Ok(body) = req.payload().await {
-                Some(String::from_utf8_lossy(body).into_owned())
+                Some(String::from_utf8_lossy(body))
             } else {
                 None
             }
@@ -1153,7 +551,11 @@ async fn api_logger(req: &mut Request, depot: &mut Depot) -> std::result::Result
     } else {
         None
     };
-    log::info!("{}", request_log_summary(&remote, &version, &method, &uri, txt_body.as_deref()));
+    if let Some(txt_body) = txt_body {
+        log::info!("{log_data}, body: {txt_body}");
+    } else {
+        log::info!("{log_data}");
+    }
     Ok(())
 }
 
@@ -1167,28 +569,21 @@ async fn get_brokers(
     let message_type = cfg.read().await.message_type;
 
     let id = req.param::<NodeId>("id");
-    let topo = diagnostics::cluster_snapshot(scx).await;
     if let Some(id) = id {
         match _get_broker(scx, message_type, id).await {
-            Ok(Some(broker_info)) => res.render(Json(diagnostics::attach_cluster_field(broker_info, &topo))),
+            Ok(Some(broker_info)) => res.render(Json(broker_info)),
             Ok(None) => {
                 //| Err(MqttError::None)
-                render_not_found(res, "not found");
+                res.status_code(StatusCode::NOT_FOUND);
             }
             Err(e) => {
-                render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string());
+                res.render(StatusError::service_unavailable().detail(e.to_string()));
             }
         }
     } else {
         match _get_brokers(scx, message_type).await {
-            Ok(brokers) => {
-                let brokers = brokers
-                    .into_iter()
-                    .map(|b| diagnostics::attach_cluster_field(b, &topo))
-                    .collect::<Vec<_>>();
-                res.render(Json(brokers));
-            }
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Ok(brokers) => res.render(Json(brokers)),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
         }
     }
     Ok(())
@@ -1214,25 +609,24 @@ async fn _get_broker(
             )
             .send()
             .await;
-            match reply {
+            let broker_info = match reply {
                 Ok(GrpcMessageReply::Data(msg)) => match MessageReply::decode(&msg)? {
-                    MessageReply::BrokerInfo(broker_info) => {
-                        Ok(Some(cluster_node_success(broker_info.to_json())))
-                    }
+                    MessageReply::BrokerInfo(broker_info) => broker_info.to_json(),
                     _ => {
                         log::error!("unreachable!(), msg: {msg:?}");
-                        Err(anyhow!("unreachable!()"))
+                        serde_json::Value::String("unreachable!()".into())
                     }
                 },
                 Ok(reply) => {
                     log::info!("Get GrpcMessage::BrokerInfo from other node({id}), reply: {reply:?}");
-                    Err(anyhow!("Invalid Result"))
+                    serde_json::Value::String("Invalid Result".into())
                 }
                 Err(e) => {
                     log::warn!("Get GrpcMessage::BrokerInfo from other node, error: {e}");
-                    Err(e)
+                    serde_json::Value::String(e.to_string())
                 }
-            }
+            };
+            Ok(Some(broker_info))
         } else {
             Ok(None)
         }
@@ -1241,7 +635,7 @@ async fn _get_broker(
 
 #[inline]
 async fn _get_brokers(scx: &ServerContext, message_type: MessageType) -> Result<Vec<serde_json::Value>> {
-    let mut brokers = vec![cluster_node_success(scx.node.broker_info(scx).await.to_json())];
+    let mut brokers = vec![scx.node.broker_info(scx).await.to_json()];
     let grpc_clients = scx.extends.shared().await.get_grpc_clients();
     if !grpc_clients.is_empty() {
         let msg = Message::BrokerInfo.encode()?;
@@ -1256,7 +650,7 @@ async fn _get_brokers(scx: &ServerContext, message_type: MessageType) -> Result<
         .drain(..)
         .map(|reply| match reply {
             (_, Ok(GrpcMessageReply::Data(msg))) => match MessageReply::decode(&msg) {
-                Ok(MessageReply::BrokerInfo(broker_info)) => Ok(cluster_node_success(broker_info.to_json())),
+                Ok(MessageReply::BrokerInfo(broker_info)) => Ok(broker_info.to_json()),
                 Err(e) => Err(e),
                 _ => {
                     log::error!("unreachable!(), msg: {msg:?}");
@@ -1265,11 +659,11 @@ async fn _get_brokers(scx: &ServerContext, message_type: MessageType) -> Result<
             },
             (id, Ok(reply)) => {
                 log::info!("Get GrpcMessage::BrokerInfo from other node({id}), reply: {reply:?}");
-                Ok(cluster_node_failure(id, "Invalid Result"))
+                Ok(serde_json::Value::String("Invalid Result".into()))
             }
             (id, Err(e)) => {
                 log::warn!("Get GrpcMessage::BrokerInfo from other node({id}), error: {e}");
-                Ok(cluster_node_failure(id, e))
+                Ok(serde_json::Value::String(e.to_string()))
             }
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1288,16 +682,13 @@ async fn get_nodes(
     let message_type = cfg.read().await.message_type;
 
     let id = req.param::<NodeId>("id");
-    let topo = diagnostics::cluster_snapshot(scx).await;
     if let Some(id) = id {
         match get_node(scx, message_type, id).await {
-            Ok(Some(node_info)) => {
-                res.render(Json(diagnostics::attach_cluster_field(node_info.to_json(), &topo)))
-            }
+            Ok(Some(node_info)) => res.render(Json(node_info.to_json())),
             Ok(None) => {
-                render_not_found(res, "not found");
+                res.status_code(StatusCode::NOT_FOUND);
             }
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
         }
     } else {
         match get_nodes_all(scx, message_type).await {
@@ -1306,19 +697,16 @@ async fn get_nodes(
                 for item in node_infos {
                     match item {
                         Ok(node_info) => {
-                            nodes.push(diagnostics::attach_cluster_field(
-                                cluster_node_success(node_info.to_json()),
-                                &topo,
-                            ));
+                            nodes.push(node_info.to_json());
                         }
-                        Err((id, e)) => {
-                            nodes.push(cluster_node_failure(id, e));
+                        Err(e) => {
+                            nodes.push(serde_json::Value::String(e.to_string()));
                         }
                     }
                 }
                 res.render(Json(nodes))
             }
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
         }
     }
     Ok(())
@@ -1354,7 +742,7 @@ async fn _get_nodes(scx: &ServerContext, message_type: MessageType) -> Result<Ve
             }
             (id, Err(e)) => {
                 log::warn!("Get GrpcMessage::NodeInfo from other node({id}), error: {e}");
-                Ok(cluster_node_failure(id, e))
+                Ok(serde_json::Value::String(e.to_string()))
             }
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1410,7 +798,7 @@ pub(crate) async fn get_node(
 pub(crate) async fn get_nodes_all(
     scx: &ServerContext,
     message_type: MessageType,
-) -> Result<Vec<std::result::Result<NodeInfo, (NodeId, anyhow::Error)>>> {
+) -> Result<Vec<Result<NodeInfo>>> {
     let mut nodes = vec![Ok(scx.node.node_info(scx).await)];
     let grpc_clients = scx.extends.shared().await.get_grpc_clients();
     if !grpc_clients.is_empty() {
@@ -1435,11 +823,11 @@ pub(crate) async fn get_nodes_all(
             },
             (id, Ok(reply)) => {
                 log::info!("Get GrpcMessage::NodeInfo from other node({id}), reply: {reply:?}");
-                Ok(Err((id, anyhow!("Invalid Result"))))
+                Err(anyhow!("Invalid Result"))
             }
             (id, Err(e)) => {
                 log::warn!("Get GrpcMessage::NodeInfo from other node({id}), error: {e}");
-                Ok(Err((id, e)))
+                Ok(Err(e))
             }
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1512,11 +900,11 @@ async fn get_feature(
 
 /// Query the feature support state of all cluster nodes.
 #[inline]
-pub(crate) async fn get_features_all(
+async fn get_features_all(
     scx: &ServerContext,
     message_type: MessageType,
-) -> Result<Vec<FeaturesNodeResult>> {
-    let mut features = vec![FeaturesNodeResult::ok(build_features(scx).await)];
+) -> Result<Vec<Result<FeaturesInfo>>> {
+    let mut features = vec![Ok(build_features(scx).await)];
     let grpc_clients = scx.extends.shared().await.get_grpc_clients();
     if !grpc_clients.is_empty() {
         let msg = Message::Features.encode()?;
@@ -1531,7 +919,7 @@ pub(crate) async fn get_features_all(
         .drain(..)
         .map(|reply| match reply {
             (_, Ok(GrpcMessageReply::Data(msg))) => match MessageReply::decode(&msg) {
-                Ok(MessageReply::Features(features_info)) => Ok(FeaturesNodeResult::ok(features_info)),
+                Ok(MessageReply::Features(features_info)) => Ok(Ok(features_info)),
                 Err(e) => Err(e),
                 _ => {
                     log::error!("unreachable!(), msg: {msg:?}");
@@ -1540,11 +928,11 @@ pub(crate) async fn get_features_all(
             },
             (id, Ok(reply)) => {
                 log::info!("Get GrpcMessage::Features from other node({id}), reply: {reply:?}");
-                Ok(FeaturesNodeResult::err(id, "Invalid Result"))
+                Err(anyhow!("Invalid Result"))
             }
             (id, Err(e)) => {
                 log::warn!("Get GrpcMessage::Features from other node({id}), error: {e}");
-                Ok(FeaturesNodeResult::err(id, e.to_string()))
+                Ok(Err(e))
             }
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1594,21 +982,6 @@ fn summarize_features(successes: &[FeaturesInfo]) -> (bool, Vec<FeatureConflict>
     (conflicts.is_empty(), conflicts)
 }
 
-/// OR-aggregate feature flags across reachable nodes (dashboard menu gating).
-#[inline]
-fn aggregate_enabled(successes: &[FeaturesInfo]) -> Features {
-    let mut enabled = Features::default();
-    for info in successes {
-        enabled.retain |= info.features.retain;
-        enabled.message_storage |= info.features.message_storage;
-        enabled.session_storage |= info.features.session_storage;
-        enabled.delayed |= info.features.delayed;
-        enabled.shared_subscription |= info.features.shared_subscription;
-        enabled.auto_subscription |= info.features.auto_subscription;
-    }
-    enabled
-}
-
 /// Query which broker features are supported.
 ///
 /// `GET /api/v1/features` returns the feature support state of every cluster
@@ -1628,26 +1001,22 @@ async fn get_features(
         match get_feature(scx, message_type, id).await {
             Ok(Some(features_info)) => res.render(Json(features_info)),
             Ok(None) => {
-                render_not_found(res, "not found");
+                res.status_code(StatusCode::NOT_FOUND);
             }
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
         }
     } else {
         match get_features_all(scx, message_type).await {
-            Ok(nodes) => {
+            Ok(features_infos) => {
+                let mut nodes: Vec<FeaturesInfoOrError> = Vec::with_capacity(features_infos.len());
                 let mut successes: Vec<FeaturesInfo> = Vec::new();
-                let mut failed_count = 0usize;
-                for item in &nodes {
-                    if item.ok {
-                        if let Some(features) = item.features.clone() {
-                            successes.push(FeaturesInfo {
-                                node_id: item.node_id,
-                                node_name: item.node_name.clone().unwrap_or_default(),
-                                features,
-                            });
+                for item in features_infos {
+                    match item {
+                        Ok(features_info) => {
+                            successes.push(features_info.clone());
+                            nodes.push(FeaturesInfoOrError::Info(features_info));
                         }
-                    } else {
-                        failed_count += 1;
+                        Err(e) => nodes.push(FeaturesInfoOrError::Error(e.to_string())),
                     }
                 }
                 let (consistent, conflicts) = summarize_features(&successes);
@@ -1661,14 +1030,11 @@ async fn get_features(
                 res.render(Json(FeaturesSummary {
                     consistent,
                     node_count: successes.len(),
-                    failed_count,
-                    partial: failed_count > 0,
-                    enabled: aggregate_enabled(&successes),
                     conflicts,
                     nodes,
                 }))
             }
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
         }
     }
     Ok(())
@@ -1685,8 +1051,8 @@ async fn check_health(
     let id = req.param::<NodeId>("id");
     if let Some(id) = id {
         match check_health_one(scx, message_type, id).await {
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
-            Ok(None) => render_not_found(res, "not found"),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+            Ok(None) => res.render(StatusError::not_found()),
             Ok(Some(health_status)) => {
                 if health_status.is_running() {
                     res.render(Json(health_status.to_json()))
@@ -1699,7 +1065,7 @@ async fn check_health(
         }
     } else {
         match scx.extends.shared().await.check_health().await {
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
             Ok(health_info) => res.render(Json(health_info.to_json())),
         }
     }
@@ -1762,12 +1128,12 @@ async fn get_client(
             Ok(Some(reply)) => res.render(Json(reply)),
             Ok(None) => {
                 //| Err(MqttError::None)
-                render_not_found(res, "not found");
+                res.status_code(StatusCode::NOT_FOUND);
             }
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
         }
     } else {
-        render_api_error(res, StatusCode::BAD_REQUEST, "bad request")
+        res.render(StatusError::bad_request())
     }
     Ok(())
 }
@@ -1829,20 +1195,20 @@ async fn search_clients(
     let mut q = match req.parse_queries::<ClientSearchParams>() {
         Ok(q) => q,
         Err(e) => {
-            render_api_error(res, StatusCode::BAD_REQUEST, e.to_string());
+            res.render(StatusError::bad_request().detail(e.to_string()));
             return Ok(());
         }
     };
 
-    let paging = ListPaging::from_request(req, q._limit, max_row_limit);
-    q._limit = paging.fetch_limit;
+    if q._limit == 0 || q._limit > max_row_limit {
+        q._limit = max_row_limit;
+    }
     match _search_clients(scx, message_type, q).await {
         Ok(replys) => {
-            let (page, truncated) = paging.apply(replys);
-            let replys = page.iter().map(|res| res.to_json()).collect::<Vec<_>>();
-            render_list(req, res, replys, paging, truncated, None);
+            let replys = replys.iter().map(|res| res.to_json()).collect::<Vec<_>>();
+            res.render(Json(replys))
         }
-        Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
     }
     Ok(())
 }
@@ -1859,21 +1225,21 @@ async fn search_offlines(
     let mut q = match req.parse_queries::<ClientSearchParams>() {
         Ok(q) => q,
         Err(e) => {
-            render_api_error(res, StatusCode::BAD_REQUEST, e.to_string());
+            res.render(StatusError::bad_request().detail(e.to_string()));
             return Ok(());
         }
     };
     q.connected = Some(false);
 
-    let paging = ListPaging::from_request(req, q._limit, max_row_limit);
-    q._limit = paging.fetch_limit;
+    if q._limit == 0 || q._limit > max_row_limit {
+        q._limit = max_row_limit;
+    }
     match _search_clients(scx, message_type, q).await {
         Ok(replys) => {
-            let (page, truncated) = paging.apply(replys);
-            let replys = page.iter().map(|res| res.to_json()).collect::<Vec<_>>();
-            render_list(req, res, replys, paging, truncated, None);
+            let replys = replys.iter().map(|res| res.to_json()).collect::<Vec<_>>();
+            res.render(Json(replys))
         }
-        Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
     }
     Ok(())
 }
@@ -1931,42 +1297,18 @@ async fn kick_client(
     let (scx, _) = get_scx_cfg(depot)?;
     let clientid = req.param::<String>("clientid");
     if let Some(clientid) = clientid {
-        let mut entry =
-            scx.extends.shared().await.entry(Id::from(scx.node.id(), ClientId::from(clientid.clone())));
+        let mut entry = scx.extends.shared().await.entry(Id::from(scx.node.id(), ClientId::from(clientid)));
         let s = entry.session();
         if let Some(s) = s {
             match entry.kick(true, true, true).await {
-                Err(e) => {
-                    crate::audit::record(
-                        req,
-                        depot,
-                        "kick_client",
-                        Some(clientid),
-                        false,
-                        Some(json!({"error": e.to_string()})),
-                    )
-                    .await;
-                    render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string());
-                }
-                Ok(_) => {
-                    crate::audit::record(req, depot, "kick_client", Some(clientid), true, None).await;
-                    res.render(Json(s.id.to_json()));
-                }
+                Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
+                Ok(_) => res.render(Json(s.id.to_json())),
             }
         } else {
-            crate::audit::record(
-                req,
-                depot,
-                "kick_client",
-                Some(clientid),
-                false,
-                Some(json!({"error": "not found"})),
-            )
-            .await;
-            render_not_found(res, "not found");
+            res.status_code(StatusCode::NOT_FOUND);
         }
     } else {
-        render_api_error(res, StatusCode::BAD_REQUEST, "bad request")
+        res.render(StatusError::bad_request())
     }
     Ok(())
 }
@@ -1983,7 +1325,7 @@ async fn kick_offlines(
     let mut q = match req.parse_queries::<ClientSearchParams>() {
         Ok(q) => q,
         Err(e) => {
-            render_api_error(res, StatusCode::BAD_REQUEST, e.to_string());
+            res.render(StatusError::bad_request().detail(e.to_string()));
             return Ok(());
         }
     };
@@ -2044,7 +1386,7 @@ async fn check_online(
         let online = entry.online().await;
         res.render(Json(online));
     } else {
-        render_api_error(res, StatusCode::BAD_REQUEST, "bad request")
+        res.render(StatusError::bad_request())
     }
     Ok(())
 }
@@ -2060,12 +1402,13 @@ async fn query_subscriptions(
     let mut q = match req.parse_queries::<SubsSearchParams>() {
         Ok(q) => q,
         Err(e) => {
-            render_api_error(res, StatusCode::BAD_REQUEST, e.to_string());
+            res.render(StatusError::bad_request().detail(e.to_string()));
             return Ok(());
         }
     };
-    let paging = ListPaging::from_request(req, q._limit, max_row_limit);
-    q._limit = paging.fetch_limit;
+    if q._limit == 0 || q._limit > max_row_limit {
+        q._limit = max_row_limit;
+    }
     let replys = scx
         .extends
         .shared()
@@ -2073,10 +1416,9 @@ async fn query_subscriptions(
         .query_subscriptions(&q)
         .await
         .into_iter()
-        .map(|res| subscription_to_json(res.to_json()))
+        .map(|res| res.to_json())
         .collect::<Vec<serde_json::Value>>();
-    let (page, truncated) = paging.apply(replys);
-    render_list(req, res, page, paging, truncated, None);
+    res.render(Json(replys));
     Ok(())
 }
 
@@ -2091,17 +1433,13 @@ async fn get_client_subscriptions(
     if let Some(clientid) = clientid {
         let entry = scx.extends.shared().await.entry(Id::from(scx.node.id(), ClientId::from(clientid)));
         if let Some(subs) = entry.subscriptions().await {
-            let subs = subs
-                .into_iter()
-                .map(|res| subscription_to_json(res.to_json()))
-                .collect::<Vec<serde_json::Value>>();
-            let paging = ListPaging::new(0, subs.len(), subs.len().max(1));
-            render_list(req, res, subs, paging, false, None);
+            let subs = subs.into_iter().map(|res| res.to_json()).collect::<Vec<serde_json::Value>>();
+            res.render(Json(subs));
         } else {
-            render_not_found(res, "client not found");
+            res.status_code(StatusCode::NOT_FOUND);
         }
     } else {
-        render_api_error(res, StatusCode::BAD_REQUEST, "bad request");
+        res.render(StatusError::bad_request());
     }
     Ok(())
 }
@@ -2114,11 +1452,18 @@ async fn get_routes(
 ) -> std::result::Result<(), salvo::Error> {
     let (scx, cfg) = get_scx_cfg(depot)?;
     let max_row_limit = cfg.read().await.max_row_limit;
-    let requested = req.query::<usize>("_limit").or_else(|| req.query::<usize>("limit")).unwrap_or(0);
-    let paging = ListPaging::from_request(req, requested, max_row_limit);
-    let replys = scx.extends.router().await.gets(paging.fetch_limit).await;
-    let (page, truncated) = paging.apply(replys);
-    render_list(req, res, page, paging, truncated, None);
+    let limit = req.query::<usize>("_limit");
+    let limit = if let Some(limit) = limit {
+        if limit > max_row_limit {
+            max_row_limit
+        } else {
+            limit
+        }
+    } else {
+        max_row_limit
+    };
+    let replys = scx.extends.router().await.gets(limit).await;
+    res.render(Json(replys));
     Ok(())
 }
 
@@ -2132,14 +1477,11 @@ async fn get_route(
     let topic = req.param::<String>("topic");
     if let Some(topic) = topic {
         match scx.extends.router().await.get(&topic).await {
-            Ok(replys) => {
-                let paging = ListPaging::new(0, replys.len(), replys.len().max(1));
-                render_list(req, res, replys, paging, false, None);
-            }
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Ok(replys) => res.render(Json(replys)),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
         }
     } else {
-        render_api_error(res, StatusCode::BAD_REQUEST, "bad request")
+        res.render(StatusError::bad_request())
     }
     Ok(())
 }
@@ -2168,7 +1510,7 @@ async fn get_retains(
     let mut q = match req.parse_queries::<RetainQueryParams>() {
         Ok(q) => q,
         Err(e) => {
-            render_api_error(res, StatusCode::BAD_REQUEST, e.to_string());
+            res.render(StatusError::bad_request().detail(e.to_string()));
             return Ok(());
         }
     };
@@ -2186,7 +1528,7 @@ async fn get_retains(
                 has_more,
             ),
             Err(e) => {
-                render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string());
+                res.render(StatusError::service_unavailable().detail(e.to_string()));
                 return Ok(());
             }
         }
@@ -2205,24 +1547,13 @@ async fn get_retains(
                 (items, has_more)
             }
             Err(e) => {
-                render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string());
+                res.render(StatusError::service_unavailable().detail(e.to_string()));
                 return Ok(());
             }
         }
     };
 
-    apply_list_headers(res, items.len(), has_more);
-    if wants_page_format(req) {
-        res.render(Json(json!({
-            "items": items,
-            "has_more": has_more,
-            "offset": q.offset,
-            "limit": q.limit,
-            "truncated": has_more,
-        })));
-    } else {
-        res.render(Json(json!({"items": items, "has_more": has_more})));
-    }
+    res.render(Json(json!({"items": items, "has_more": has_more})));
     Ok(())
 }
 
@@ -2253,7 +1584,7 @@ async fn delete_retain(
     let topic = match req.query::<String>("topic") {
         Some(t) if !t.trim().is_empty() => TopicName::from(t.trim()),
         _ => {
-            render_api_error(res, StatusCode::BAD_REQUEST, "topic is required");
+            res.render(StatusError::bad_request().detail("topic is required"));
             return Ok(());
         }
     };
@@ -2261,17 +1592,16 @@ async fn delete_retain(
     // Deletion requires a concrete topic; wildcards are not supported.
     let topic_str = topic.to_string();
     if topic_str.contains('#') || topic_str.contains('+') {
-        render_api_error(
-            res,
-            StatusCode::BAD_REQUEST,
-            "topic must be a concrete topic, wildcards '#' and '+' are not allowed",
+        res.render(
+            StatusError::bad_request()
+                .detail("topic must be a concrete topic, wildcards '#' and '+' are not allowed"),
         );
         return Ok(());
     }
 
     let retain_mgr = scx.extends.retain().await;
     if !retain_mgr.enable() {
-        render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, "retain storage is not enabled");
+        res.render(StatusError::service_unavailable().detail("retain storage is not enabled"));
         return Ok(());
     }
 
@@ -2279,12 +1609,14 @@ async fn delete_retain(
     match retain_mgr.get(&topic).await {
         Ok(list) => {
             if !list.iter().any(|(t, _)| t == &topic) {
-                render_not_found(res, format!("retain message not found for topic: {topic}"));
+                res.render(
+                    StatusError::not_found().detail(format!("retain message not found for topic: {topic}")),
+                );
                 return Ok(());
             }
         }
         Err(e) => {
-            render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string());
+            res.render(StatusError::service_unavailable().detail(e.to_string()));
             return Ok(());
         }
     }
@@ -2310,7 +1642,7 @@ async fn delete_retain(
     let retain = Retain { msg_id: None, from, publish: <CodecPublish as Into<Publish>>::into(p) };
 
     if let Err(e) = retain_mgr.set(&topic, retain.clone(), None).await {
-        render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string());
+        res.render(StatusError::service_unavailable().detail(e.to_string()));
         return Ok(());
     }
 
@@ -2345,21 +1677,13 @@ async fn publish(
     let params = match req.parse_json::<PublishParams>().await {
         Ok(p) => p,
         Err(e) => {
-            render_api_error(res, StatusCode::BAD_REQUEST, e.to_string());
+            res.render(StatusError::bad_request().detail(e.to_string()));
             return Ok(());
         }
     };
-    let topic = params.topic.as_ref().or(params.topics.as_ref()).map(|t| t.to_string());
     match _publish(scx, params, remote_addr, http_laddr, expiry_interval).await {
-        Ok(()) => {
-            crate::audit::record(req, depot, "publish", topic, true, None).await;
-            res.render(Text::Plain("ok"));
-        }
-        Err(e) => {
-            crate::audit::record(req, depot, "publish", topic, false, Some(json!({"error": e.to_string()})))
-                .await;
-            render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string());
-        }
+        Ok(()) => res.render(Text::Plain("ok")),
+        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
     }
     Ok(())
 }
@@ -2455,7 +1779,7 @@ async fn subscribe(
     let params = match req.parse_json::<SubscribeParams>().await {
         Ok(p) => p,
         Err(e) => {
-            render_api_error(res, StatusCode::BAD_REQUEST, e.to_string());
+            res.render(StatusError::bad_request().detail(e.to_string()));
             return Ok(());
         }
     };
@@ -2464,11 +1788,11 @@ async fn subscribe(
         if status.online {
             status.id.node_id
         } else {
-            render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, "the session is offline");
+            res.render(StatusError::service_unavailable().detail("the session is offline"));
             return Ok(());
         }
     } else {
-        render_not_found(res, "session does not exist");
+        res.render(StatusError::not_found().detail("session does not exist"));
         return Ok(());
     };
 
@@ -2488,7 +1812,7 @@ async fn subscribe(
                     .collect::<HashMap<_, _>>();
                 res.render(Json(replys))
             }
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
         }
     } else {
         // let cfg = get_cfg(depot)?;
@@ -2510,7 +1834,7 @@ async fn subscribe(
                     .collect::<HashMap<_, _>>();
                 res.render(Json(replys))
             }
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
         }
     }
     Ok(())
@@ -2554,7 +1878,7 @@ async fn unsubscribe(
     let params = match req.parse_json::<UnsubscribeParams>().await {
         Ok(p) => p,
         Err(e) => {
-            render_api_error(res, StatusCode::BAD_REQUEST, e.to_string());
+            res.render(StatusError::bad_request().detail(e.to_string()));
             return Ok(());
         }
     };
@@ -2563,18 +1887,18 @@ async fn unsubscribe(
         if status.online {
             status.id.node_id
         } else {
-            render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, "the session is offline");
+            res.render(StatusError::service_unavailable().detail("the session is offline"));
             return Ok(());
         }
     } else {
-        render_not_found(res, "session does not exist");
+        res.render(StatusError::not_found().detail("session does not exist"));
         return Ok(());
     };
 
     if node_id == scx.node.id() {
         match subs::unsubscribe(scx, params).await {
             Ok(()) => res.render(Json(true)),
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
         }
     } else {
         // let cfg = get_cfg(depot)?;
@@ -2582,7 +1906,7 @@ async fn unsubscribe(
         //The session is on another node
         match _unsubscribe_on_other_node(scx, message_type, node_id, params).await {
             Ok(()) => res.render(Text::Plain("ok")),
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
         }
     }
     Ok(())
@@ -2617,23 +1941,13 @@ async fn _unsubscribe_on_other_node(
 }
 
 #[handler]
-async fn all_plugins(
-    req: &mut Request,
-    depot: &mut Depot,
-    res: &mut Response,
-) -> std::result::Result<(), salvo::Error> {
+async fn all_plugins(depot: &mut Depot, res: &mut Response) -> std::result::Result<(), salvo::Error> {
     let (scx, cfg) = get_scx_cfg(depot)?;
     let message_type = cfg.read().await.message_type;
-    let max_row_limit = cfg.read().await.max_row_limit;
-    let requested = req.query::<usize>("_limit").or_else(|| req.query::<usize>("limit")).unwrap_or(0);
-    let paging = ListPaging::from_request(req, requested, max_row_limit);
 
     match _all_plugins(scx, message_type).await {
-        Ok(pluginss) => {
-            let (page, truncated) = paging.apply(pluginss);
-            render_list(req, res, page, paging, truncated, None);
-        }
-        Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+        Ok(pluginss) => res.render(Json(pluginss)),
+        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
     }
     Ok(())
 }
@@ -2645,7 +1959,6 @@ async fn _all_plugins(scx: &ServerContext, message_type: MessageType) -> Result<
     let plugins = plugin::get_plugins(scx).await?;
     let plugins = plugins.into_iter().map(|p| p.to_json()).collect::<Result<Vec<_>>>()?;
     pluginss.push(json!({
-        "ok": true,
         "node": node_id,
         "plugins": plugins,
     }));
@@ -2662,51 +1975,28 @@ async fn _all_plugins(scx: &ServerContext, message_type: MessageType) -> Result<
         .join_all()
         .await
         .drain(..)
-        .map(|(node_id, reply)| match reply {
-            Ok(GrpcMessageReply::Data(reply_msg)) => match MessageReply::decode(&reply_msg) {
-                Ok(MessageReply::GetPlugins(plugins)) => {
-                    match plugins.into_iter().map(|p| p.to_json()).collect::<Result<Vec<_>>>() {
-                        Ok(plugins) => json!({
-                            "ok": true,
-                            "node": node_id,
-                            "plugins": plugins,
-                        }),
-                        Err(e) => json!({
-                            "ok": false,
-                            "node": node_id,
-                            "plugins": [],
-                            "error": e.to_string(),
-                        }),
+        .map(|(node_id, reply)| {
+            let plugins = match reply {
+                Ok(GrpcMessageReply::Data(reply_msg)) => match MessageReply::decode(&reply_msg) {
+                    Ok(MessageReply::GetPlugins(plugins)) => {
+                        match plugins.into_iter().map(|p| p.to_json()).collect::<Result<Vec<_>>>() {
+                            Ok(plugins) => serde_json::Value::Array(plugins),
+                            Err(e) => serde_json::Value::String(e.to_string()),
+                        }
                     }
-                }
-                Err(e) => json!({
-                    "ok": false,
-                    "node": node_id,
-                    "plugins": [],
-                    "error": e.to_string(),
-                }),
-                _ => {
-                    log::error!("unreachable!(), reply_msg: {reply_msg:?}");
-                    json!({
-                        "ok": false,
-                        "node": node_id,
-                        "plugins": [],
-                        "error": "unreachable!()",
-                    })
-                }
-            },
-            Ok(_) => json!({
-                "ok": false,
+                    Err(e) => serde_json::Value::String(e.to_string()),
+                    _ => {
+                        log::error!("unreachable!(), reply_msg: {reply_msg:?}");
+                        serde_json::Value::String("unreachable!()".into())
+                    }
+                },
+                Ok(_) => serde_json::Value::String("Invalid Result".into()),
+                Err(e) => serde_json::Value::String(e.to_string()),
+            };
+            json!({
                 "node": node_id,
-                "plugins": [],
-                "error": "Invalid Result",
-            }),
-            Err(e) => json!({
-                "ok": false,
-                "node": node_id,
-                "plugins": [],
-                "error": e.to_string(),
-            }),
+                "plugins": plugins,
+            })
         })
         .collect::<Vec<_>>();
         pluginss.extend(replys);
@@ -2725,23 +2015,17 @@ async fn node_plugins(
     let node_id = if let Some(node_id) = req.param::<NodeId>("node") {
         node_id
     } else {
-        render_not_found(res, "node not found");
+        res.status_code(StatusCode::NOT_FOUND);
         return Ok(());
     };
-    let max_row_limit = cfg.read().await.max_row_limit;
-    let requested = req.query::<usize>("_limit").or_else(|| req.query::<usize>("limit")).unwrap_or(0);
-    let paging = ListPaging::from_request(req, requested, max_row_limit);
     match _node_plugins(scx, node_id, message_type).await {
-        Ok(plugins) => {
-            let (page, truncated) = paging.apply(plugins);
-            render_list(req, res, page, paging, truncated, None);
-        }
-        Err(e) => render_api_error(res, status_for_plugin_error(&e), e.to_string()),
+        Ok(plugins) => res.render(Json(plugins)),
+        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
     }
     Ok(())
 }
 
-pub(crate) async fn _node_plugins(
+async fn _node_plugins(
     scx: &ServerContext,
     node_id: NodeId,
     message_type: MessageType,
@@ -2783,26 +2067,25 @@ async fn node_plugin_info(
     let node_id = if let Some(node_id) = req.param::<NodeId>("node") {
         node_id
     } else {
-        render_not_found(res, "node not found");
+        res.status_code(StatusCode::NOT_FOUND);
         return Ok(());
     };
     let name = if let Some(name) = req.param::<String>("plugin") {
         name
     } else {
-        render_not_found(res, "plugin not found");
+        res.status_code(StatusCode::NOT_FOUND);
         return Ok(());
     };
 
     match _node_plugin_info(scx, node_id, &name, message_type).await {
-        Ok(Some(plugin)) => res.render(Json(plugin)),
-        Ok(None) => render_not_found(res, format!("plugin not found: {name}")),
-        Err(e) => render_api_error(res, status_for_plugin_error(&e), e.to_string()),
+        Ok(plugin) => res.render(Json(plugin)),
+        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
     }
 
     Ok(())
 }
 
-pub(crate) async fn _node_plugin_info(
+async fn _node_plugin_info(
     scx: &ServerContext,
     node_id: NodeId,
     name: &str,
@@ -2845,70 +2128,27 @@ async fn node_plugin_config(
     res: &mut Response,
 ) -> std::result::Result<(), salvo::Error> {
     let (scx, cfg) = get_scx_cfg(depot)?;
-    let scx = scx.clone();
     let message_type = cfg.read().await.message_type;
     let node_id = if let Some(node_id) = req.param::<NodeId>("node") {
         node_id
     } else {
-        render_not_found(res, "node not found");
+        res.status_code(StatusCode::NOT_FOUND);
         return Ok(());
     };
     let name = if let Some(name) = req.param::<String>("plugin") {
         name
     } else {
-        render_not_found(res, "plugin not found");
+        res.status_code(StatusCode::NOT_FOUND);
         return Ok(());
     };
 
-    if config_mgmt::wants_reveal(req) {
-        match identity_from_depot(depot) {
-            Some(id) if id.can_admin() => {}
-            Some(id) => {
-                render_api_error_with(
-                    res,
-                    StatusCode::FORBIDDEN,
-                    "forbidden",
-                    Some(json!({
-                        "required_role": "admin",
-                        "role": id.role.as_str(),
-                        "reason": "reveal=1 requires admin",
-                    })),
-                );
-                return Ok(());
-            }
-            None => {
-                render_api_error(res, StatusCode::UNAUTHORIZED, "unauthorized");
-                return Ok(());
-            }
-        }
-    }
-    let reveal = config_mgmt::wants_reveal(req);
-
-    match _node_plugin_config(&scx, node_id, &name, message_type).await {
+    match _node_plugin_config(scx, node_id, &name, message_type).await {
         Ok(cfg) => {
-            let body = if node_id == scx.node.id() {
-                match config_mgmt::redact_get_config(&scx, &name, cfg.clone(), reveal).await {
-                    Ok(b) => b,
-                    Err(_) => match serde_json::from_slice::<serde_json::Value>(&cfg) {
-                        Ok(v) if !reveal => {
-                            serde_json::to_vec(&config_mgmt::redact_secrets(v)).unwrap_or(cfg)
-                        }
-                        _ => cfg,
-                    },
-                }
-            } else if reveal {
-                cfg
-            } else {
-                match serde_json::from_slice::<serde_json::Value>(&cfg) {
-                    Ok(v) => serde_json::to_vec(&config_mgmt::redact_secrets(v)).unwrap_or(cfg),
-                    Err(_) => cfg,
-                }
-            };
             res.headers_mut()
                 .insert(CONTENT_TYPE, HeaderValue::from_static("application/json; charset=utf-8"));
-            res.write_body(body).ok();
+            res.write_body(cfg).ok();
         }
-        Err(e) => render_api_error(res, status_for_plugin_error(&e), e.to_string()),
+        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
     }
     Ok(())
 }
@@ -2951,42 +2191,24 @@ async fn node_plugin_config_reload(
     depot: &mut Depot,
     res: &mut Response,
 ) -> std::result::Result<(), salvo::Error> {
+    let (scx, cfg) = get_scx_cfg(depot)?;
+    let message_type = cfg.read().await.message_type;
     let node_id = if let Some(node_id) = req.param::<NodeId>("node") {
         node_id
     } else {
-        render_not_found(res, "node not found");
+        res.status_code(StatusCode::NOT_FOUND);
         return Ok(());
     };
     let name = if let Some(name) = req.param::<String>("plugin") {
         name
     } else {
-        render_not_found(res, "plugin not found");
+        res.status_code(StatusCode::NOT_FOUND);
         return Ok(());
     };
-    if config_mgmt::deny_http_api_unless_admin(&name, depot, res) {
-        return Ok(());
-    }
-    let (scx, cfg) = get_scx_cfg(depot)?;
-    let message_type = cfg.read().await.message_type;
 
     match _node_plugin_config_reload(scx, node_id, &name, message_type).await {
-        Ok(r) => {
-            crate::audit::record(req, depot, "plugin_reload", Some(format!("{node_id}/{name}")), r, None)
-                .await;
-            res.render(Json(r));
-        }
-        Err(e) => {
-            crate::audit::record(
-                req,
-                depot,
-                "plugin_reload",
-                Some(format!("{node_id}/{name}")),
-                false,
-                Some(json!({"error": e.to_string()})),
-            )
-            .await;
-            render_api_error(res, status_for_plugin_error(&e), e.to_string());
-        }
+        Ok(r) => res.render(Json(r)),
+        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
     }
     Ok(())
 }
@@ -3036,33 +2258,19 @@ async fn node_plugin_load(
     let node_id = if let Some(node_id) = req.param::<NodeId>("node") {
         node_id
     } else {
-        render_not_found(res, "node not found");
+        res.status_code(StatusCode::NOT_FOUND);
         return Ok(());
     };
     let name = if let Some(name) = req.param::<String>("plugin") {
         name
     } else {
-        render_not_found(res, "plugin not found");
+        res.status_code(StatusCode::NOT_FOUND);
         return Ok(());
     };
 
     match _node_plugin_load(scx, node_id, &name, message_type).await {
-        Ok(r) => {
-            crate::audit::record(req, depot, "plugin_load", Some(format!("{node_id}/{name}")), r, None).await;
-            res.render(Json(r));
-        }
-        Err(e) => {
-            crate::audit::record(
-                req,
-                depot,
-                "plugin_load",
-                Some(format!("{node_id}/{name}")),
-                false,
-                Some(json!({"error": e.to_string()})),
-            )
-            .await;
-            render_api_error(res, status_for_plugin_error(&e), e.to_string());
-        }
+        Ok(r) => res.render(Json(r)),
+        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
     }
     Ok(())
 }
@@ -3111,34 +2319,19 @@ async fn node_plugin_unload(
     let node_id = if let Some(node_id) = req.param::<NodeId>("node") {
         node_id
     } else {
-        render_not_found(res, "node not found");
+        res.status_code(StatusCode::NOT_FOUND);
         return Ok(());
     };
     let name = if let Some(name) = req.param::<String>("plugin") {
         name
     } else {
-        render_not_found(res, "plugin not found");
+        res.status_code(StatusCode::NOT_FOUND);
         return Ok(());
     };
 
     match _node_plugin_unload(scx, node_id, &name, message_type).await {
-        Ok(r) => {
-            crate::audit::record(req, depot, "plugin_unload", Some(format!("{node_id}/{name}")), r, None)
-                .await;
-            res.render(Json(r));
-        }
-        Err(e) => {
-            crate::audit::record(
-                req,
-                depot,
-                "plugin_unload",
-                Some(format!("{node_id}/{name}")),
-                false,
-                Some(json!({"error": e.to_string()})),
-            )
-            .await;
-            render_api_error(res, status_for_plugin_error(&e), e.to_string());
-        }
+        Ok(r) => res.render(Json(r)),
+        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
     }
     Ok(())
 }
@@ -3183,7 +2376,7 @@ async fn get_stats_sum(depot: &mut Depot, res: &mut Response) -> std::result::Re
 
     match _get_stats_sum(scx, message_type, false).await {
         Ok(stats_sum) => res.render(Json(stats_sum)),
-        Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
     }
     Ok(())
 }
@@ -3198,7 +2391,6 @@ async fn _get_stats_sum(
     nodes.insert(
         this_id,
         json!({
-            "ok": true,
             "name": scx.node.name(scx,this_id).await,
             "running": scx.node.status(scx).await.is_running(),
         }),
@@ -3223,7 +2415,6 @@ async fn _get_stats_sum(
                         nodes.insert(
                             id,
                             json!({
-                                "ok": true,
                                 "name": scx.node.name(scx, id).await,
                                 "running": node_status.is_running(),
                             }),
@@ -3241,7 +2432,7 @@ async fn _get_stats_sum(
                 }
                 (id, Err(e)) => {
                     log::warn!("Get GrpcMessage::StateInfo from other node({id}), error: {e}");
-                    nodes.insert(id, cluster_node_failure(id, e));
+                    nodes.insert(id, serde_json::Value::String(e.to_string()));
                 }
             };
         }
@@ -3274,9 +2465,9 @@ async fn get_stats(
             }
             Ok(None) => {
                 //| Err(MqttError::None)
-                render_not_found(res, "not found");
+                res.status_code(StatusCode::NOT_FOUND);
             }
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
         }
     } else {
         match get_stats_all(scx, message_type).await {
@@ -3288,18 +2479,14 @@ async fn get_stats(
                             stat_infos
                                 .push(_build_stats(scx, id, node_status, state.to_json(scx).await).await);
                         }
-                        Err((id, e)) => {
-                            stat_infos.push(json!({
-                                "ok": false,
-                                "node": { "id": id },
-                                "error": e.to_string(),
-                            }));
+                        Err(e) => {
+                            stat_infos.push(serde_json::Value::String(e.to_string()));
                         }
                     }
                 }
                 res.render(Json(stat_infos))
             }
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
         }
     }
     Ok(())
@@ -3354,10 +2541,11 @@ pub(crate) async fn get_stats_one(
 pub(crate) async fn get_stats_all(
     scx: &ServerContext,
     message_type: MessageType,
-) -> Result<Vec<std::result::Result<(NodeId, NodeStatus, Box<Stats>), (NodeId, anyhow::Error)>>> {
+) -> Result<Vec<Result<(NodeId, NodeStatus, Box<Stats>)>>> {
     let id = scx.node.id();
     let node_status = scx.node.status(scx).await;
     let state = scx.stats.clone(scx).await;
+    //let mut stats = vec![_build_stats(id, node_status, state).await];
     let mut stats = vec![Ok((id, node_status, Box::new(state)))];
 
     let grpc_clients = scx.extends.shared().await.get_grpc_clients();
@@ -3377,16 +2565,16 @@ pub(crate) async fn get_stats_all(
                     MessageReply::StatsInfo(node_status, stats) => Ok((id, node_status, stats)),
                     _ => {
                         log::error!("unreachable!(), msg: {msg:?}");
-                        return Err(anyhow!("unreachable!()"));
+                        Err(anyhow!("unreachable!()"))
                     }
                 },
                 (id, Ok(reply)) => {
                     log::info!("Get GrpcMessage::StateInfo from other node({id}), reply: {reply:?}");
-                    Err((id, anyhow!("Invalid Result")))
+                    continue;
                 }
                 (id, Err(e)) => {
                     log::warn!("Get GrpcMessage::StateInfo from other node({id}), error: {e}");
-                    Err((id, e))
+                    Err(e)
                 }
             };
             stats.push(data);
@@ -3403,15 +2591,15 @@ async fn _build_stats(
     stats: serde_json::Value,
 ) -> serde_json::Value {
     let node_name = scx.node.name(scx, id).await;
-    json!({
-        "ok": true,
+    let data = json!({
         "node": {
             "id": id,
             "name": node_name,
             "running": node_status.is_running(),
         },
         "stats": stats
-    })
+    });
+    data
 }
 
 #[handler]
@@ -3431,9 +2619,9 @@ async fn get_sys_stats(
                 res.render(Json(stat_info))
             }
             Ok(None) => {
-                render_not_found(res, "not found");
+                res.status_code(StatusCode::NOT_FOUND);
             }
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
         }
     } else {
         match get_stats_all(scx, message_type).await {
@@ -3445,18 +2633,14 @@ async fn get_sys_stats(
                             stat_infos
                                 .push(_build_stats(scx, id, node_status, state.to_sys_json(scx).await).await);
                         }
-                        Err((id, e)) => {
-                            stat_infos.push(json!({
-                                "ok": false,
-                                "node": { "id": id },
-                                "error": e.to_string(),
-                            }));
+                        Err(e) => {
+                            stat_infos.push(serde_json::Value::String(e.to_string()));
                         }
                     }
                 }
                 res.render(Json(stat_infos))
             }
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
         }
     }
     Ok(())
@@ -3470,7 +2654,7 @@ async fn get_sys_stats_sum(depot: &mut Depot, res: &mut Response) -> std::result
 
     match _get_stats_sum(scx, message_type, true).await {
         Ok(stats_sum) => res.render(Json(stats_sum)),
-        Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
     }
     Ok(())
 }
@@ -3493,9 +2677,9 @@ async fn get_metrics(
                 res.render(Json(metrics))
             }
             Ok(None) => {
-                render_not_found(res, "not found");
+                res.status_code(StatusCode::NOT_FOUND);
             }
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
         }
     } else {
         match get_metrics_all(scx, message_type).await {
@@ -3506,18 +2690,14 @@ async fn get_metrics(
                         Ok((id, metrics)) => {
                             metrics_infos.push(_build_metrics(scx, id, metrics.to_json()).await);
                         }
-                        Err((id, e)) => {
-                            metrics_infos.push(json!({
-                                "ok": false,
-                                "node": { "id": id },
-                                "error": e.to_string(),
-                            }));
+                        Err(e) => {
+                            metrics_infos.push(serde_json::Value::String(e.to_string()));
                         }
                     }
                 }
                 res.render(Json(metrics_infos))
             }
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
         }
     }
     Ok(())
@@ -3571,7 +2751,7 @@ pub(crate) async fn get_metrics_one(
 pub(crate) async fn get_metrics_all(
     scx: &ServerContext,
     message_type: MessageType,
-) -> Result<Vec<std::result::Result<(NodeId, Box<Metrics>), (NodeId, anyhow::Error)>>> {
+) -> Result<Vec<Result<(NodeId, Box<Metrics>)>>> {
     let id = scx.node.id();
     let mut metricses = vec![Ok((id, Box::new(scx.metrics.clone())))];
 
@@ -3592,16 +2772,16 @@ pub(crate) async fn get_metrics_all(
                     MessageReply::MetricsInfo(metrics) => Ok((id, metrics)),
                     _ => {
                         log::error!("unreachable!(), msg: {msg:?}");
-                        return Err(anyhow!("unreachable!()"));
+                        Err(anyhow!("unreachable!()"))
                     }
                 },
                 (id, Ok(reply)) => {
                     log::info!("Get GrpcMessage::MetricsInfo from other node({id}), reply: {reply:?}");
-                    Err((id, anyhow!("Invalid Result")))
+                    continue;
                 }
                 (id, Err(e)) => {
                     log::warn!("Get GrpcMessage::MetricsInfo from other node({id}), error: {e}");
-                    Err((id, e))
+                    Err(e)
                 }
             };
             metricses.push(data);
@@ -3617,7 +2797,7 @@ async fn get_metrics_sum(depot: &mut Depot, res: &mut Response) -> std::result::
 
     match _get_metrics_sum(scx, message_type).await {
         Ok(metrics_sum) => res.render(Json(metrics_sum)),
-        Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
     }
     Ok(())
 }
@@ -3660,14 +2840,14 @@ async fn _get_metrics_sum(scx: &ServerContext, message_type: MessageType) -> Res
 #[inline]
 async fn _build_metrics(scx: &ServerContext, id: NodeId, metrics: serde_json::Value) -> serde_json::Value {
     let node_name = scx.node.name(scx, id).await;
-    json!({
-        "ok": true,
+    let data = json!({
         "node": {
             "id": id,
             "name": node_name,
         },
         "metrics": metrics
-    })
+    });
+    data
 }
 
 #[handler]
@@ -3692,7 +2872,7 @@ async fn get_prometheus_metrics(
                 res.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
                 res.write_body(metrics).ok();
             }
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
         }
     } else {
         match prome::to_metrics(scx, monitor, message_type, cache_interval, PrometheusDataType::All).await {
@@ -3700,7 +2880,7 @@ async fn get_prometheus_metrics(
                 res.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
                 res.write_body(metrics).ok();
             }
-            Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
         }
     }
     Ok(())
@@ -3722,13 +2902,13 @@ async fn get_prometheus_metrics_sum(
             res.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
             res.write_body(metrics).ok();
         }
-        Err(e) => render_api_error(res, StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+        Err(e) => res.render(StatusError::service_unavailable().detail(e.to_string())),
     }
     Ok(())
 }
 
 #[inline]
-pub(crate) async fn get_grpc_client(scx: &ServerContext, node_id: NodeId) -> Result<GrpcClient> {
+async fn get_grpc_client(scx: &ServerContext, node_id: NodeId) -> Result<GrpcClient> {
     scx.extends
         .shared()
         .await
@@ -4211,1599 +3391,4 @@ fn aggregate_history_data(nodes_data: &HashMap<NodeId, HistoryData>) -> (Vec<ser
 
     let data: Vec<serde_json::Value> = result.into_iter().map(|(_, v)| v).collect();
     (data, node_count)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-
-    use salvo::test::{ResponseExt, TestClient};
-    use tokio::sync::RwLock;
-
-    use crate::config::PluginConfig;
-
-    fn test_cfg() -> PluginConfig {
-        serde_json::from_value(json!({"http_bearer_token": null})).expect("PluginConfig defaults")
-    }
-
-    async fn test_service() -> Service {
-        let scx = ServerContext::new().node_id(1).busy_check_enable(false).build().await;
-        let mut cfg = test_cfg();
-        // Most legacy API tests exercise write handlers without configuring
-        // credentials. Opt in explicitly; production defaults to read-only.
-        cfg.dashboard_allow_anonymous_admin = true;
-        let cfg = Arc::new(RwLock::new(cfg));
-        let router = route(scx, cfg, None, prome::Monitor::new(), None);
-        Service::new(router)
-    }
-
-    #[tokio::test]
-    async fn plugins_cluster_list_is_node_grouped_array() {
-        let svc = test_service().await;
-        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/plugins").send(&svc).await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK));
-        assert_eq!(resp.headers().get("X-Row-Count").map(|v| v.as_bytes()), Some(&b"1"[..]));
-        assert_eq!(resp.headers().get("X-Truncated").map(|v| v.as_bytes()), Some(&b"false"[..]));
-        let body: serde_json::Value = resp.take_json().await.unwrap();
-        assert!(body.is_array(), "GET /plugins must remain a bare array");
-        assert_eq!(body[0]["node"], 1);
-        assert!(body[0]["plugins"].is_array());
-        assert_eq!(body[0]["ok"], true);
-    }
-
-    #[tokio::test]
-    async fn node_plugin_missing_returns_json_404_not_null() {
-        let svc = test_service().await;
-        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/plugins/1/no-such-plugin").send(&svc).await;
-        assert_eq!(resp.status_code, Some(StatusCode::NOT_FOUND));
-        let body: serde_json::Value = resp.take_json().await.unwrap();
-        assert_eq!(body["code"], 404);
-        assert!(body["message"].as_str().unwrap().contains("plugin"));
-        assert!(body["request_id"].is_string());
-        assert!(body.get("name").is_none(), "error body is code+message+request_id");
-    }
-
-    #[tokio::test]
-    async fn plugin_config_missing_returns_json_error() {
-        let svc = test_service().await;
-        let mut resp =
-            TestClient::get("http://127.0.0.1:0/api/v1/plugins/1/no-such-plugin/config").send(&svc).await;
-        assert_eq!(resp.status_code, Some(StatusCode::NOT_FOUND));
-        let body: serde_json::Value = resp.take_json().await.unwrap();
-        assert_eq!(body["code"], 404);
-        assert!(body["message"].is_string());
-    }
-
-    #[tokio::test]
-    async fn clients_list_keeps_bare_array_and_adds_headers() {
-        let svc = test_service().await;
-        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/clients?_limit=10").send(&svc).await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK));
-        assert_eq!(resp.headers().get("X-Row-Count").map(|v| v.as_bytes()), Some(&b"0"[..]));
-        assert_eq!(resp.headers().get("X-Truncated").map(|v| v.as_bytes()), Some(&b"false"[..]));
-        let body: serde_json::Value = resp.take_json().await.unwrap();
-        assert_eq!(body, json!([]));
-    }
-
-    #[tokio::test]
-    async fn delete_retains_without_topic_is_json_400() {
-        let svc = test_service().await;
-        let mut resp = TestClient::delete("http://127.0.0.1:0/api/v1/retains").send(&svc).await;
-        assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
-        let body: serde_json::Value = resp.take_json().await.unwrap();
-        assert_eq!(body["code"], 400);
-        assert!(body["message"].as_str().unwrap().contains("topic"));
-    }
-
-    #[tokio::test]
-    async fn bearer_required_returns_json_401() {
-        let scx = ServerContext::new().node_id(1).busy_check_enable(false).build().await;
-        let cfg = Arc::new(RwLock::new(test_cfg()));
-        let router = route(scx, cfg, Some("secret".into()), prome::Monitor::new(), None);
-        let svc = Service::new(router);
-        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/plugins").send(&svc).await;
-        assert_eq!(resp.status_code, Some(StatusCode::UNAUTHORIZED));
-        let body: serde_json::Value = resp.take_json().await.unwrap();
-        assert_eq!(body["code"], 401);
-        assert_eq!(body["message"], "unauthorized");
-        assert!(body["request_id"].is_string());
-    }
-
-    #[tokio::test]
-    async fn openapi_json_is_served_and_is_openapi3() {
-        let svc = test_service().await;
-        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/openapi.json").send(&svc).await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK));
-        let ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("");
-        assert!(ct.contains("json"), "content-type={ct}");
-        let body: serde_json::Value = resp.take_json().await.unwrap();
-        assert!(body["openapi"].as_str().unwrap().starts_with("3."));
-        assert!(body["paths"]["/api/v1/clients"].is_object());
-        assert!(body["components"]["schemas"]["Error"]["properties"]["request_id"].is_object());
-        assert!(body["components"]["schemas"]["Page"]["properties"]["items"].is_object());
-    }
-
-    #[tokio::test]
-    async fn docs_page_is_html() {
-        let svc = test_service().await;
-        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/docs").send(&svc).await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK));
-        let body = resp.take_string().await.unwrap();
-        assert!(body.contains("swagger") || body.contains("openapi.json"), "{body}");
-    }
-
-    #[tokio::test]
-    async fn api_and_embedded_dashboard_share_one_router() {
-        let scx = ServerContext::new().node_id(1).busy_check_enable(false).build().await;
-        let cfg = Arc::new(RwLock::new(test_cfg()));
-        let api = route(scx, cfg, None, prome::Monitor::new(), None);
-        let svc = Service::new(mount_dashboard(Router::new().push(api), None));
-
-        let mut openapi = TestClient::get("http://127.0.0.1:0/api/v1/openapi.json").send(&svc).await;
-        assert_eq!(openapi.status_code, Some(StatusCode::OK));
-        let spec: serde_json::Value = openapi.take_json().await.unwrap();
-        assert!(spec["openapi"].as_str().unwrap().starts_with("3."));
-
-        let mut docs = TestClient::get("http://127.0.0.1:0/api/v1/docs").send(&svc).await;
-        assert_eq!(docs.status_code, Some(StatusCode::OK));
-        let docs_body = docs.take_string().await.unwrap();
-        assert!(docs_body.contains("swagger") || docs_body.contains("openapi.json"));
-
-        let mut dash = TestClient::get("http://127.0.0.1:0/dashboard/").send(&svc).await;
-        assert_eq!(dash.status_code, Some(StatusCode::OK));
-        let html = dash.take_string().await.unwrap();
-        assert!(html.contains("root"), "{html}");
-        assert_eq!(
-            dash.headers().get("x-content-type-options").and_then(|v| v.to_str().ok()),
-            Some("nosniff")
-        );
-    }
-
-    #[tokio::test]
-    async fn clients_format_page_wraps_array() {
-        let svc = test_service().await;
-        let mut resp =
-            TestClient::get("http://127.0.0.1:0/api/v1/clients?_limit=10&format=page").send(&svc).await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK));
-        assert_eq!(resp.headers().get("X-Row-Count").map(|v| v.as_bytes()), Some(&b"0"[..]));
-        let body: serde_json::Value = resp.take_json().await.unwrap();
-        assert!(body.is_object(), "format=page must be an object");
-        assert_eq!(body["items"], json!([]));
-        assert_eq!(body["offset"], 0);
-        assert_eq!(body["limit"], 10);
-        assert_eq!(body["truncated"], false);
-        assert!(body.get("total").is_none());
-    }
-
-    #[tokio::test]
-    async fn clients_default_stays_bare_array() {
-        let svc = test_service().await;
-        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/clients?_limit=10").send(&svc).await;
-        let body: serde_json::Value = resp.take_json().await.unwrap();
-        assert!(body.is_array());
-    }
-
-    #[tokio::test]
-    async fn error_body_includes_request_id_header() {
-        let svc = test_service().await;
-        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/plugins/1/no-such-plugin")
-            .add_header("x-request-id", "req-p2-test", true)
-            .send(&svc)
-            .await;
-        assert_eq!(resp.status_code, Some(StatusCode::NOT_FOUND));
-        assert_eq!(resp.headers().get("X-Request-Id").map(|v| v.as_bytes()), Some(&b"req-p2-test"[..]));
-        let body: serde_json::Value = resp.take_json().await.unwrap();
-        assert_eq!(body["code"], 404);
-        assert_eq!(body["request_id"], "req-p2-test");
-        assert!(body["message"].is_string());
-    }
-
-    #[tokio::test]
-    async fn features_summary_has_enabled_and_structured_nodes() {
-        let svc = test_service().await;
-        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/features").send(&svc).await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK));
-        let body: serde_json::Value = resp.take_json().await.unwrap();
-        assert!(body["consistent"].is_boolean());
-        assert_eq!(body["failed_count"], 0);
-        assert_eq!(body["partial"], false);
-        assert!(body["enabled"].is_object());
-        for key in [
-            "retain",
-            "message_storage",
-            "session_storage",
-            "delayed",
-            "shared_subscription",
-            "auto_subscription",
-        ] {
-            assert!(body["enabled"][key].is_boolean(), "missing enabled.{key}");
-        }
-        assert!(body["nodes"].is_array());
-        assert_eq!(body["nodes"][0]["ok"], true);
-        assert!(body["nodes"][0]["features"].is_object());
-        assert!(body["nodes"][0]["node_id"].is_number());
-    }
-
-    #[tokio::test]
-    async fn stats_cluster_items_are_objects_with_ok() {
-        let svc = test_service().await;
-        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/stats").send(&svc).await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK));
-        let body: serde_json::Value = resp.take_json().await.unwrap();
-        assert!(body.is_array());
-        assert_eq!(body[0]["ok"], true);
-        assert!(body[0]["node"]["id"].is_number());
-        assert!(body[0]["stats"].is_object());
-        assert!(!body[0].is_string(), "partial failure must not be a bare string");
-    }
-
-    fn session_cookie(resp: &Response) -> String {
-        resp.headers()
-            .get_all("set-cookie")
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .find_map(|v| {
-                v.split(';').next().filter(|p| p.starts_with("ferromq_session=")).map(|s| s.to_string())
-            })
-            .expect("ferromq_session cookie")
-    }
-
-    fn dashboard_cfg() -> PluginConfig {
-        let mut cfg = test_cfg();
-        cfg.dashboard_admin_username = "admin".into();
-        cfg.dashboard_admin_password = Some("admin-secret".into());
-        cfg.dashboard_viewer_username = Some("viewer".into());
-        cfg.dashboard_viewer_password = Some("viewer-secret".into());
-        cfg
-    }
-
-    async fn dashboard_service(
-        cfg: PluginConfig,
-        token: Option<String>,
-    ) -> (Service, Arc<crate::auth::AuthState>) {
-        let scx = ServerContext::new().node_id(1).busy_check_enable(false).build().await;
-        let state = Arc::new(crate::auth::AuthState::new(token.clone()));
-        let cfg = Arc::new(RwLock::new(cfg));
-        let router = route_with_auth(scx, cfg, state.clone(), prome::Monitor::new(), None);
-        (Service::new(router), state)
-    }
-
-    async fn login(svc: &Service, username: &str, password: &str) -> (Response, serde_json::Value) {
-        let mut resp = TestClient::post("http://127.0.0.1:0/api/v1/auth/login")
-            .json(&json!({"username": username, "password": password}))
-            .send(svc)
-            .await;
-        let body: serde_json::Value = resp.take_json().await.unwrap_or(json!({}));
-        (resp, body)
-    }
-
-    #[tokio::test]
-    async fn login_logout_me_and_change_password() {
-        let (svc, _) = dashboard_service(dashboard_cfg(), None).await;
-
-        let (resp, body) = login(&svc, "admin", "admin-secret").await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
-        assert_eq!(body["username"], "admin");
-        assert_eq!(body["role"], "admin");
-        assert_eq!(body["auth"], "session");
-        assert!(body["expires_in"].as_u64().unwrap_or(0) > 0);
-        let cookie = session_cookie(&resp);
-
-        let mut me = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        assert_eq!(me.status_code, Some(StatusCode::OK));
-        let me_body: serde_json::Value = me.take_json().await.unwrap();
-        assert_eq!(me_body["username"], "admin");
-        assert_eq!(me_body["role"], "admin");
-        assert_eq!(me_body["auth"], "session");
-
-        let mut changed = TestClient::post("http://127.0.0.1:0/api/v1/auth/change-password")
-            .add_header("cookie", &cookie, true)
-            .json(&json!({"old_password": "admin-secret", "new_password": "admin-secret-2"}))
-            .send(&svc)
-            .await;
-        assert_eq!(changed.status_code, Some(StatusCode::OK));
-        let changed_body: serde_json::Value = changed.take_json().await.unwrap();
-        assert_eq!(changed_body["ok"], true);
-        assert_eq!(changed_body["session_rotated"], true);
-        assert_eq!(changed_body["username"], "admin");
-        assert_eq!(changed_body["role"], "admin");
-        assert_eq!(changed_body["auth"], "session");
-        let rotated = session_cookie(&changed);
-
-        let me_stale = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        assert_eq!(me_stale.status_code, Some(StatusCode::UNAUTHORIZED));
-
-        let mut me_fresh = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
-            .add_header("cookie", &rotated, true)
-            .send(&svc)
-            .await;
-        assert_eq!(me_fresh.status_code, Some(StatusCode::OK));
-        let me_fresh_body: serde_json::Value = me_fresh.take_json().await.unwrap();
-        assert_eq!(me_fresh_body["username"], "admin");
-
-        let (bad, bad_body) = login(&svc, "admin", "admin-secret").await;
-        assert_eq!(bad.status_code, Some(StatusCode::UNAUTHORIZED), "{bad_body}");
-
-        let (ok2, ok2_body) = login(&svc, "admin", "admin-secret-2").await;
-        assert_eq!(ok2.status_code, Some(StatusCode::OK), "{ok2_body}");
-
-        let mut logout = TestClient::post("http://127.0.0.1:0/api/v1/auth/logout")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        assert_eq!(logout.status_code, Some(StatusCode::OK));
-        let logout_body: serde_json::Value = logout.take_json().await.unwrap();
-        assert_eq!(logout_body["ok"], true);
-
-        let me_after = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        assert_eq!(me_after.status_code, Some(StatusCode::UNAUTHORIZED));
-    }
-
-    #[tokio::test]
-    async fn login_rejects_bad_password_and_init_is_one_time() {
-        let (svc, _) = dashboard_service(dashboard_cfg(), None).await;
-        let (resp, body) = login(&svc, "admin", "wrong-password").await;
-        assert_eq!(resp.status_code, Some(StatusCode::UNAUTHORIZED), "{body}");
-        assert_eq!(body["code"], 401);
-
-        let mut init = TestClient::post("http://127.0.0.1:0/api/v1/auth/init").send(&svc).await;
-        assert_eq!(init.status_code, Some(StatusCode::OK));
-        let init_body: serde_json::Value = init.take_json().await.unwrap();
-        assert_eq!(init_body["username"], "admin");
-        assert_eq!(init_body["created"], true);
-
-        let again = TestClient::post("http://127.0.0.1:0/api/v1/auth/init").send(&svc).await;
-        assert_eq!(again.status_code, Some(StatusCode::CONFLICT));
-    }
-
-    #[tokio::test]
-    async fn me_anonymous_when_auth_disabled() {
-        let scx = ServerContext::new().node_id(1).busy_check_enable(false).build().await;
-        let cfg = Arc::new(RwLock::new(test_cfg()));
-        let svc = Service::new(route(scx, cfg, None, prome::Monitor::new(), None));
-        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/auth/me").send(&svc).await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK));
-        let body: serde_json::Value = resp.take_json().await.unwrap();
-        assert_eq!(body["username"], "anonymous");
-        assert_eq!(body["role"], "viewer");
-        assert_eq!(body["auth"], "anonymous");
-
-        let denied = TestClient::post("http://127.0.0.1:0/api/v1/users")
-            .json(&json!({"username":"attacker","password":"attacker-pass","role":"admin"}))
-            .send(&svc)
-            .await;
-        assert_eq!(denied.status_code, Some(StatusCode::FORBIDDEN));
-
-        let reveal = TestClient::get("http://127.0.0.1:0/api/v1/plugins/1/ferromq-http-api/config?reveal=1")
-            .send(&svc)
-            .await;
-        assert_eq!(reveal.status_code, Some(StatusCode::FORBIDDEN));
-
-        let private_probe = TestClient::post("http://127.0.0.1:0/api/v1/webhooks/test?allow_private=1")
-            .json(&json!({"url":"http://127.0.0.1:80"}))
-            .send(&svc)
-            .await;
-        assert_eq!(private_probe.status_code, Some(StatusCode::FORBIDDEN));
-    }
-
-    #[tokio::test]
-    async fn anonymous_admin_requires_explicit_unsafe_opt_in() {
-        let scx = ServerContext::new().node_id(1).busy_check_enable(false).build().await;
-        let mut cfg = test_cfg();
-        cfg.dashboard_allow_anonymous_admin = true;
-        let cfg = Arc::new(RwLock::new(cfg));
-        let svc = Service::new(route(scx, cfg, None, prome::Monitor::new(), None));
-        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/auth/me").send(&svc).await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK));
-        let body: serde_json::Value = resp.take_json().await.unwrap();
-        assert_eq!(body["role"], "admin");
-    }
-
-    #[tokio::test]
-    async fn bearer_still_works_as_operator() {
-        let (svc, _) = dashboard_service(dashboard_cfg(), Some("secret".into())).await;
-        let denied = TestClient::get("http://127.0.0.1:0/api/v1/plugins").send(&svc).await;
-        assert_eq!(denied.status_code, Some(StatusCode::UNAUTHORIZED));
-
-        let mut ok = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
-            .add_header("authorization", "Bearer secret", true)
-            .send(&svc)
-            .await;
-        assert_eq!(ok.status_code, Some(StatusCode::OK));
-        let body: serde_json::Value = ok.take_json().await.unwrap();
-        assert_eq!(body["username"], "operator");
-        assert_eq!(body["role"], "admin");
-        assert_eq!(body["auth"], "bearer");
-    }
-
-    #[tokio::test]
-    async fn viewer_is_denied_kick_publish_and_plugin_load() {
-        let (svc, state) = dashboard_service(dashboard_cfg(), None).await;
-        state.insert_user("viewer", "viewer-secret", crate::auth::Role::Viewer).await.expect("viewer");
-        let (resp, body) = login(&svc, "viewer", "viewer-secret").await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
-        assert_eq!(body["role"], "viewer");
-        let cookie = session_cookie(&resp);
-
-        let mut kick = TestClient::delete("http://127.0.0.1:0/api/v1/clients/no-such-client")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        assert_eq!(kick.status_code, Some(StatusCode::FORBIDDEN));
-        let kick_body: serde_json::Value = kick.take_json().await.unwrap();
-        assert_eq!(kick_body["code"], 403);
-        assert_eq!(kick_body["message"], "forbidden");
-        assert_eq!(kick_body["details"]["required_role"], "operator");
-
-        let pub_resp = TestClient::post("http://127.0.0.1:0/api/v1/mqtt/publish")
-            .add_header("cookie", &cookie, true)
-            .json(&json!({"topic": "t", "payload": "x"}))
-            .send(&svc)
-            .await;
-        assert_eq!(pub_resp.status_code, Some(StatusCode::FORBIDDEN));
-
-        let load = TestClient::put("http://127.0.0.1:0/api/v1/plugins/1/ferromq-http-api/load")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        assert_eq!(load.status_code, Some(StatusCode::FORBIDDEN));
-
-        let plugins = TestClient::get("http://127.0.0.1:0/api/v1/plugins")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        assert_eq!(plugins.status_code, Some(StatusCode::OK));
-    }
-
-    #[tokio::test]
-    async fn admin_and_bearer_pass_write_rbac() {
-        let (svc, _) = dashboard_service(dashboard_cfg(), Some("secret".into())).await;
-        let (resp, body) = login(&svc, "admin", "admin-secret").await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
-        let cookie = session_cookie(&resp);
-
-        let kick = TestClient::delete("http://127.0.0.1:0/api/v1/clients/no-such-client")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        assert_ne!(kick.status_code, Some(StatusCode::FORBIDDEN));
-        assert_eq!(kick.status_code, Some(StatusCode::NOT_FOUND));
-
-        let kick_bearer = TestClient::delete("http://127.0.0.1:0/api/v1/clients/no-such-client")
-            .add_header("authorization", "Bearer secret", true)
-            .send(&svc)
-            .await;
-        assert_ne!(kick_bearer.status_code, Some(StatusCode::FORBIDDEN));
-        assert_eq!(kick_bearer.status_code, Some(StatusCode::NOT_FOUND));
-    }
-
-    #[tokio::test]
-    async fn login_rate_limit_returns_429() {
-        let mut cfg = dashboard_cfg();
-        cfg.dashboard_login_rate_limit = 3;
-        let (svc, _) = dashboard_service(cfg, None).await;
-        for _ in 0..3 {
-            let (resp, _) = login(&svc, "admin", "wrong").await;
-            assert_eq!(resp.status_code, Some(StatusCode::UNAUTHORIZED));
-        }
-        let (resp, body) = login(&svc, "admin", "wrong").await;
-        assert_eq!(resp.status_code, Some(StatusCode::TOO_MANY_REQUESTS), "{body}");
-        assert_eq!(body["code"], 429);
-    }
-
-    #[tokio::test]
-    async fn health_and_login_remain_public_when_bearer_required() {
-        let (svc, _) = dashboard_service(dashboard_cfg(), Some("secret".into())).await;
-        let health = TestClient::get("http://127.0.0.1:0/api/v1/health/check").send(&svc).await;
-        assert_eq!(health.status_code, Some(StatusCode::OK));
-        let openapi = TestClient::get("http://127.0.0.1:0/api/v1/openapi.json").send(&svc).await;
-        assert_eq!(openapi.status_code, Some(StatusCode::OK));
-        let (resp, body) = login(&svc, "admin", "admin-secret").await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
-    }
-
-    #[tokio::test]
-    async fn session_uses_live_user_role_and_invalidates_deleted_user() {
-        let (svc, state) = dashboard_service(dashboard_cfg(), None).await;
-        state.insert_user("ops", "ops-secret-1", crate::auth::Role::Operator).await.unwrap();
-        let (resp, body) = login(&svc, "ops", "ops-secret-1").await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
-        let cookie = session_cookie(&resp);
-
-        let mut me = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        let me_body: serde_json::Value = me.take_json().await.unwrap();
-        assert_eq!(me_body["role"], "operator");
-
-        state.set_user_role("ops", crate::auth::Role::Viewer).await.unwrap();
-        let mut me2 = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        assert_eq!(me2.status_code, Some(StatusCode::OK));
-        let me2_body: serde_json::Value = me2.take_json().await.unwrap();
-        assert_eq!(me2_body["role"], "viewer");
-
-        let kick = TestClient::delete("http://127.0.0.1:0/api/v1/clients/no-such-client")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        assert_eq!(kick.status_code, Some(StatusCode::FORBIDDEN));
-
-        state.remove_user("ops").await;
-        let gone = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        assert_eq!(gone.status_code, Some(StatusCode::UNAUTHORIZED));
-    }
-
-    #[tokio::test]
-    async fn change_password_revokes_other_sessions() {
-        let (svc, _) = dashboard_service(dashboard_cfg(), None).await;
-        let (a, _) = login(&svc, "admin", "admin-secret").await;
-        let (b, _) = login(&svc, "admin", "admin-secret").await;
-        let cookie_a = session_cookie(&a);
-        let cookie_b = session_cookie(&b);
-
-        let changed = TestClient::post("http://127.0.0.1:0/api/v1/auth/change-password")
-            .add_header("cookie", &cookie_a, true)
-            .json(&json!({"old_password": "admin-secret", "new_password": "admin-secret-2"}))
-            .send(&svc)
-            .await;
-        assert_eq!(changed.status_code, Some(StatusCode::OK));
-
-        let stale_b = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
-            .add_header("cookie", &cookie_b, true)
-            .send(&svc)
-            .await;
-        assert_eq!(stale_b.status_code, Some(StatusCode::UNAUTHORIZED));
-    }
-
-    #[tokio::test]
-    async fn viewer_first_login_does_not_block_admin_bootstrap() {
-        let (svc, _) = dashboard_service(dashboard_cfg(), None).await;
-        let (viewer, viewer_body) = login(&svc, "viewer", "viewer-secret").await;
-        assert_eq!(viewer.status_code, Some(StatusCode::UNAUTHORIZED), "{viewer_body}");
-
-        let (admin, admin_body) = login(&svc, "admin", "admin-secret").await;
-        assert_eq!(admin.status_code, Some(StatusCode::OK), "{admin_body}");
-
-        let (viewer2, viewer2_body) = login(&svc, "viewer", "viewer-secret").await;
-        assert_eq!(viewer2.status_code, Some(StatusCode::OK), "{viewer2_body}");
-        assert_eq!(viewer2_body["role"], "viewer");
-    }
-
-    #[tokio::test]
-    async fn cookie_csrf_rejects_cross_origin_but_allows_missing_and_bearer() {
-        let (svc, _) = dashboard_service(dashboard_cfg(), Some("secret".into())).await;
-        let (resp, _) = login(&svc, "admin", "admin-secret").await;
-        let cookie = session_cookie(&resp);
-
-        let blocked = TestClient::delete("http://127.0.0.1:0/api/v1/clients/no-such-client")
-            .add_header("cookie", &cookie, true)
-            .add_header("host", "127.0.0.1:0", true)
-            .add_header("origin", "https://evil.example", true)
-            .send(&svc)
-            .await;
-        assert_eq!(blocked.status_code, Some(StatusCode::FORBIDDEN));
-
-        let same = TestClient::delete("http://127.0.0.1:0/api/v1/clients/no-such-client")
-            .add_header("cookie", &cookie, true)
-            .add_header("host", "127.0.0.1:0", true)
-            .add_header("origin", "http://127.0.0.1:0", true)
-            .send(&svc)
-            .await;
-        assert_ne!(same.status_code, Some(StatusCode::FORBIDDEN));
-
-        let missing = TestClient::delete("http://127.0.0.1:0/api/v1/clients/no-such-client")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        assert_ne!(missing.status_code, Some(StatusCode::FORBIDDEN));
-
-        let bearer = TestClient::delete("http://127.0.0.1:0/api/v1/clients/no-such-client")
-            .add_header("authorization", "Bearer secret", true)
-            .add_header("origin", "https://evil.example", true)
-            .send(&svc)
-            .await;
-        assert_ne!(bearer.status_code, Some(StatusCode::FORBIDDEN));
-        assert_eq!(bearer.status_code, Some(StatusCode::NOT_FOUND));
-    }
-
-    #[tokio::test]
-    async fn operator_can_write_but_cannot_manage_users_keys_or_audit() {
-        let (svc, state) = dashboard_service(dashboard_cfg(), None).await;
-        state.insert_user("ops", "ops-secret-1", crate::auth::Role::Operator).await.expect("ops");
-        let (resp, body) = login(&svc, "ops", "ops-secret-1").await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
-        assert_eq!(body["role"], "operator");
-        let cookie = session_cookie(&resp);
-
-        let kick = TestClient::delete("http://127.0.0.1:0/api/v1/clients/no-such-client")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        assert_ne!(kick.status_code, Some(StatusCode::FORBIDDEN));
-        assert_eq!(kick.status_code, Some(StatusCode::NOT_FOUND));
-
-        let mut users = TestClient::get("http://127.0.0.1:0/api/v1/users")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        assert_eq!(users.status_code, Some(StatusCode::FORBIDDEN));
-        let users_body: serde_json::Value = users.take_json().await.unwrap();
-        assert_eq!(users_body["details"]["required_role"], "admin");
-
-        let keys = TestClient::get("http://127.0.0.1:0/api/v1/api-keys")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        assert_eq!(keys.status_code, Some(StatusCode::FORBIDDEN));
-
-        let audit = TestClient::get("http://127.0.0.1:0/api/v1/audit")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        assert_eq!(audit.status_code, Some(StatusCode::FORBIDDEN));
-    }
-
-    #[tokio::test]
-    async fn admin_user_crud_and_disabled_user_cannot_login() {
-        let (svc, _) = dashboard_service(dashboard_cfg(), None).await;
-        let (resp, body) = login(&svc, "admin", "admin-secret").await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
-        let cookie = session_cookie(&resp);
-
-        let mut created = TestClient::post("http://127.0.0.1:0/api/v1/users")
-            .add_header("cookie", &cookie, true)
-            .json(&json!({"username": "ops", "password": "ops-secret-1", "role": "operator"}))
-            .send(&svc)
-            .await;
-        assert_eq!(created.status_code, Some(StatusCode::CREATED),);
-        let created_body: serde_json::Value = created.take_json().await.unwrap();
-        assert_eq!(created_body["username"], "ops");
-        assert_eq!(created_body["role"], "operator");
-        assert_eq!(created_body["enabled"], true);
-
-        let mut listed = TestClient::get("http://127.0.0.1:0/api/v1/users")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        assert_eq!(listed.status_code, Some(StatusCode::OK));
-        let listed_body: serde_json::Value = listed.take_json().await.unwrap();
-        assert!(listed_body.as_array().unwrap().iter().any(|u| u["username"] == "ops"));
-
-        let (ok, ok_body) = login(&svc, "ops", "ops-secret-1").await;
-        assert_eq!(ok.status_code, Some(StatusCode::OK), "{ok_body}");
-
-        let disabled = TestClient::post("http://127.0.0.1:0/api/v1/users/ops/disable")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        assert_eq!(disabled.status_code, Some(StatusCode::OK));
-
-        let (denied, denied_body) = login(&svc, "ops", "ops-secret-1").await;
-        assert_eq!(denied.status_code, Some(StatusCode::UNAUTHORIZED), "{denied_body}");
-    }
-
-    #[tokio::test]
-    async fn api_key_create_shows_secret_once_and_authenticates_with_role() {
-        let (svc, _) = dashboard_service(dashboard_cfg(), Some("static-secret".into())).await;
-        let (resp, body) = login(&svc, "admin", "admin-secret").await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
-        let cookie = session_cookie(&resp);
-
-        let mut created = TestClient::post("http://127.0.0.1:0/api/v1/api-keys")
-            .add_header("cookie", &cookie, true)
-            .json(&json!({"name": "ci", "role": "operator"}))
-            .send(&svc)
-            .await;
-        assert_eq!(created.status_code, Some(StatusCode::CREATED));
-        let created_body: serde_json::Value = created.take_json().await.unwrap();
-        let secret = created_body["secret"].as_str().expect("secret once").to_string();
-        let key_id = created_body["id"].as_str().expect("id").to_string();
-        assert!(secret.starts_with("fmqk_"));
-        assert_eq!(created_body["role"], "operator");
-
-        let mut listed = TestClient::get("http://127.0.0.1:0/api/v1/api-keys")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        let listed_body: serde_json::Value = listed.take_json().await.unwrap();
-        assert!(listed_body[0].get("secret").is_none(), "list must not include secret");
-
-        let mut me = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
-            .add_header("authorization", format!("Bearer {secret}"), true)
-            .send(&svc)
-            .await;
-        assert_eq!(me.status_code, Some(StatusCode::OK));
-        let me_body: serde_json::Value = me.take_json().await.unwrap();
-        assert_eq!(me_body["auth"], "api_key");
-        assert_eq!(me_body["role"], "operator");
-        assert_eq!(me_body["key_id"], key_id);
-
-        let kick = TestClient::delete("http://127.0.0.1:0/api/v1/clients/no-such-client")
-            .add_header("authorization", format!("Bearer {secret}"), true)
-            .send(&svc)
-            .await;
-        assert_eq!(kick.status_code, Some(StatusCode::NOT_FOUND));
-
-        let users = TestClient::get("http://127.0.0.1:0/api/v1/users")
-            .add_header("authorization", format!("Bearer {secret}"), true)
-            .send(&svc)
-            .await;
-        assert_eq!(users.status_code, Some(StatusCode::FORBIDDEN));
-
-        // Static bearer token is still admin and is not shadowed by API keys.
-        let mut static_me = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
-            .add_header("authorization", "Bearer static-secret", true)
-            .send(&svc)
-            .await;
-        let static_body: serde_json::Value = static_me.take_json().await.unwrap();
-        assert_eq!(static_body["username"], "operator");
-        assert_eq!(static_body["role"], "admin");
-        assert_eq!(static_body["auth"], "bearer");
-
-        let deleted = TestClient::delete(format!("http://127.0.0.1:0/api/v1/api-keys/{key_id}"))
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        assert_eq!(deleted.status_code, Some(StatusCode::OK));
-
-        let after = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
-            .add_header("authorization", format!("Bearer {secret}"), true)
-            .send(&svc)
-            .await;
-        assert_eq!(after.status_code, Some(StatusCode::UNAUTHORIZED));
-    }
-
-    #[tokio::test]
-    async fn audit_records_writes_and_is_admin_only_with_paging() {
-        let (svc, _) = dashboard_service(dashboard_cfg(), None).await;
-        let (resp, body) = login(&svc, "admin", "admin-secret").await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
-        let cookie = session_cookie(&resp);
-
-        let _ = TestClient::delete("http://127.0.0.1:0/api/v1/clients/no-such-client")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        let _ = TestClient::post("http://127.0.0.1:0/api/v1/mqtt/publish")
-            .add_header("cookie", &cookie, true)
-            .json(&json!({"topic": "t", "payload": "x"}))
-            .send(&svc)
-            .await;
-        let _ = TestClient::put("http://127.0.0.1:0/api/v1/plugins/1/ferromq-http-api/load")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        let _ = TestClient::post("http://127.0.0.1:0/api/v1/api-keys")
-            .add_header("cookie", &cookie, true)
-            .json(&json!({"name": "audit-key", "role": "viewer"}))
-            .send(&svc)
-            .await;
-
-        let mut audit = TestClient::get("http://127.0.0.1:0/api/v1/audit?_limit=50")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        assert_eq!(audit.status_code, Some(StatusCode::OK));
-        let events: serde_json::Value = audit.take_json().await.unwrap();
-        let actions: Vec<&str> =
-            events.as_array().unwrap().iter().filter_map(|e| e["action"].as_str()).collect();
-        assert!(actions.contains(&"login"));
-        assert!(actions.contains(&"kick_client"));
-        assert!(actions.contains(&"publish"));
-        assert!(actions.contains(&"plugin_load"));
-        assert!(actions.contains(&"api_key_create"));
-
-        let mut page = TestClient::get("http://127.0.0.1:0/api/v1/audit?format=page&_limit=2")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        let page_body: serde_json::Value = page.take_json().await.unwrap();
-        assert_eq!(page_body["limit"], 2);
-        assert!(page_body["items"].as_array().unwrap().len() <= 2);
-        assert!(page_body["total"].as_u64().unwrap() >= 2);
-
-        let (bad, _) = login(&svc, "admin", "wrong-password").await;
-        assert_eq!(bad.status_code, Some(StatusCode::UNAUTHORIZED));
-        let mut failed = TestClient::get("http://127.0.0.1:0/api/v1/audit?action=login_failed")
-            .add_header("cookie", &cookie, true)
-            .send(&svc)
-            .await;
-        let failed_body: serde_json::Value = failed.take_json().await.unwrap();
-        assert!(failed_body.as_array().unwrap().iter().any(|e| e["action"] == "login_failed"));
-    }
-
-    #[tokio::test]
-    async fn openapi_includes_p3b_paths() {
-        let svc = test_service().await;
-        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/openapi.json").send(&svc).await;
-        let body: serde_json::Value = resp.take_json().await.unwrap();
-        assert!(body["paths"]["/api/v1/api-keys"].is_object());
-        assert!(body["paths"]["/api/v1/users"].is_object());
-        assert!(body["paths"]["/api/v1/audit"].is_object());
-        let roles = &body["components"]["schemas"]["SessionUser"]["properties"]["role"]["enum"];
-        assert!(roles.as_array().unwrap().iter().any(|v| v == "operator"));
-        assert!(roles.as_array().unwrap().iter().any(|v| v == "admin"));
-        assert!(roles.as_array().unwrap().iter().any(|v| v == "viewer"));
-    }
-
-    struct P4DemoPlugin {
-        name: String,
-        cfg: serde_json::Value,
-    }
-
-    struct P4FailPlugin;
-
-    impl ferromq::plugin::PackageInfo for P4FailPlugin {
-        fn name(&self) -> &str {
-            "p4-fail"
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ferromq::plugin::Plugin for P4FailPlugin {
-        async fn get_config(&self) -> Result<serde_json::Value> {
-            Ok(json!({"value": 1}))
-        }
-
-        async fn load_config(&mut self) -> Result<()> {
-            Err(anyhow!("intentional config rejection"))
-        }
-    }
-
-    impl ferromq::plugin::PackageInfo for P4DemoPlugin {
-        fn name(&self) -> &str {
-            &self.name
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ferromq::plugin::Plugin for P4DemoPlugin {
-        async fn get_config(&self) -> Result<serde_json::Value> {
-            Ok(self.cfg.clone())
-        }
-        async fn load_config(&mut self) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    struct P4Env {
-        svc: Service,
-        dir: std::path::PathBuf,
-        state: Arc<crate::auth::AuthState>,
-    }
-
-    impl Drop for P4Env {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
-    }
-
-    async fn p4_env(cfg: PluginConfig) -> P4Env {
-        let dir = std::env::temp_dir().join(format!(
-            "ferromq-p4-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        std::fs::write(
-            dir.join("ferromq.toml"),
-            r#"
-mqtt.max_sessions = 10
-mqtt.delayed_publish_max = 100
-mqtt.delayed_publish_immediate = true
-log.to = "console"
-log.level = "info"
-log.dir = "/tmp"
-log.file = "ferromq.log"
-listener.tcp.external.addr = "0.0.0.0:1883"
-"#,
-        )
-        .expect("broker toml");
-        std::fs::write(
-            dir.join("p4-demo.toml"),
-            "http_laddr = \"0.0.0.0:6060\"\nhttp_bearer_token = \"file-secret\"\nmax_row_limit = 1000\n",
-        )
-        .expect("plugin toml");
-        std::fs::write(dir.join("p4-fail.toml"), "value = 1\n").expect("failing plugin toml");
-
-        let scx = ServerContext::new()
-            .node_id(1)
-            .plugins_config_dir(dir.to_string_lossy().into_owned())
-            .busy_check_enable(false)
-            .build()
-            .await;
-        scx.plugins
-            .register("p4-demo", true, false, || {
-                Box::pin(async {
-                    Ok(Box::new(P4DemoPlugin {
-                        name: "p4-demo".into(),
-                        cfg: json!({
-                            "http_laddr": "0.0.0.0:6060",
-                            "http_bearer_token": "super-secret",
-                            "max_row_limit": 1000
-                        }),
-                    }) as ferromq::plugin::DynPlugin)
-                })
-            })
-            .await
-            .expect("register p4-demo");
-        scx.plugins
-            .register("p4-fail", true, false, || {
-                Box::pin(async { Ok(Box::new(P4FailPlugin) as ferromq::plugin::DynPlugin) })
-            })
-            .await
-            .expect("register p4-fail");
-
-        let mut cfg = cfg;
-        cfg.broker_config_file = Some(dir.join("ferromq.toml").display().to_string());
-        cfg.config_history_keep = 5;
-        let state = Arc::new(crate::auth::AuthState::new(None));
-        let cfg = Arc::new(RwLock::new(cfg));
-        let router = route_with_auth(scx, cfg, state.clone(), prome::Monitor::new(), None);
-        P4Env { svc: Service::new(router), dir, state }
-    }
-
-    #[tokio::test]
-    async fn plugin_config_get_redacts_secrets_and_reveal_is_admin_only() {
-        let env = p4_env(dashboard_cfg()).await;
-        let (resp, body) = login(&env.svc, "admin", "admin-secret").await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
-        let admin = session_cookie(&resp);
-
-        env.state.insert_user("ops", "ops-secret-1", crate::auth::Role::Operator).await.unwrap();
-        env.state.insert_user("viewer", "viewer-secret", crate::auth::Role::Viewer).await.unwrap();
-        let (ops_resp, _) = login(&env.svc, "ops", "ops-secret-1").await;
-        let ops = session_cookie(&ops_resp);
-        let (viewer_resp, _) = login(&env.svc, "viewer", "viewer-secret").await;
-        let viewer = session_cookie(&viewer_resp);
-
-        let mut redacted = TestClient::get("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config")
-            .add_header("cookie", &viewer, true)
-            .send(&env.svc)
-            .await;
-        assert_eq!(redacted.status_code, Some(StatusCode::OK));
-        let redacted_body: serde_json::Value = redacted.take_json().await.unwrap();
-        assert_eq!(redacted_body["http_laddr"], "0.0.0.0:6060");
-        assert_eq!(redacted_body["http_bearer_token"], "***");
-        assert_ne!(redacted_body["http_bearer_token"], "super-secret");
-
-        let reveal_ops = TestClient::get("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config?reveal=1")
-            .add_header("cookie", &ops, true)
-            .send(&env.svc)
-            .await;
-        assert_eq!(reveal_ops.status_code, Some(StatusCode::FORBIDDEN));
-
-        let mut reveal_admin = TestClient::get("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config?reveal=1")
-            .add_header("cookie", &admin, true)
-            .send(&env.svc)
-            .await;
-        assert_eq!(reveal_admin.status_code, Some(StatusCode::OK));
-        let revealed: serde_json::Value = reveal_admin.take_json().await.unwrap();
-        assert_eq!(revealed["http_bearer_token"], "file-secret");
-    }
-
-    #[tokio::test]
-    async fn plugin_config_validate_put_versions_rollback_and_reload_stay_compatible() {
-        let mut cfg = test_cfg();
-        cfg.dashboard_allow_anonymous_admin = true;
-        let env = p4_env(cfg).await;
-
-        let mut bad = TestClient::post("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config/validate")
-            .json(&json!([1, 2, 3]))
-            .send(&env.svc)
-            .await;
-        assert_eq!(bad.status_code, Some(StatusCode::BAD_REQUEST));
-        let bad_body: serde_json::Value = bad.take_json().await.unwrap();
-        assert_eq!(bad_body["code"], 400);
-
-        let mut validated = TestClient::post("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config/validate")
-            .json(&json!({"max_row_limit": 42, "http_laddr": "127.0.0.1:6061"}))
-            .send(&env.svc)
-            .await;
-        assert_eq!(validated.status_code, Some(StatusCode::OK));
-        let vbody: serde_json::Value = validated.take_json().await.unwrap();
-        assert_eq!(vbody["valid"], true);
-        assert_eq!(vbody["effective"], "hot");
-
-        let mut written = TestClient::put("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config?apply=none")
-            .json(&json!({"max_row_limit": 42, "http_laddr": "127.0.0.1:6061"}))
-            .send(&env.svc)
-            .await;
-        assert_eq!(written.status_code, Some(StatusCode::OK));
-        let wbody: serde_json::Value = written.take_json().await.unwrap();
-        assert_eq!(wbody["ok"], true);
-        assert_eq!(wbody["written"], true);
-        assert_eq!(wbody["applied"], false);
-        assert_eq!(wbody["effective"], "reload");
-        assert!(wbody["diff"]["changed"].as_array().unwrap().iter().any(|k| k == "max_row_limit"));
-
-        let disk = std::fs::read_to_string(env.dir.join("p4-demo.toml")).unwrap();
-        assert!(disk.contains("max_row_limit"));
-        assert!(disk.contains("file-secret"), "omitted secret must be preserved: {disk}");
-        assert!(!disk.contains("***"), "must never persist redacted placeholder: {disk}");
-
-        let mut redacted_put =
-            TestClient::put("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config?apply=none")
-                .json(&json!({"http_bearer_token": "***", "max_row_limit": 44}))
-                .send(&env.svc)
-                .await;
-        assert_eq!(redacted_put.status_code, Some(StatusCode::OK));
-        let disk2 = std::fs::read_to_string(env.dir.join("p4-demo.toml")).unwrap();
-        assert!(disk2.contains("file-secret"), "redacted *** must keep previous secret: {disk2}");
-        assert!(!disk2.contains("***"), "must never persist ***: {disk2}");
-        let rbody: serde_json::Value = redacted_put.take_json().await.unwrap();
-        assert_eq!(rbody["written"], true);
-
-        let mut applied = TestClient::put("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config?apply=reload")
-            .json(&json!({"max_row_limit": 43, "http_laddr": "127.0.0.1:6061"}))
-            .send(&env.svc)
-            .await;
-        let abody: serde_json::Value = applied.take_json().await.unwrap();
-        assert_eq!(abody["effective"], "hot");
-        assert_eq!(abody["applied"], true);
-
-        let mut versions = TestClient::get("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config/versions")
-            .send(&env.svc)
-            .await;
-        assert_eq!(versions.status_code, Some(StatusCode::OK));
-        let vers: serde_json::Value = versions.take_json().await.unwrap();
-        assert!(!vers.as_array().unwrap().is_empty());
-        let ver = vers[0]["version"].as_str().unwrap().to_string();
-
-        let mut rb = TestClient::post(format!(
-            "http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config/rollback/{ver}?apply=none"
-        ))
-        .send(&env.svc)
-        .await;
-        assert_eq!(rb.status_code, Some(StatusCode::OK));
-        let rb_body: serde_json::Value = rb.take_json().await.unwrap();
-        assert_eq!(rb_body["written"], true);
-        assert_eq!(rb_body["effective"], "reload");
-
-        let reload =
-            TestClient::put("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config/reload").send(&env.svc).await;
-        assert_eq!(reload.status_code, Some(StatusCode::OK));
-
-        let missing = TestClient::put("http://127.0.0.1:0/api/v1/plugins/1/no-such-plugin/config")
-            .json(&json!({"a": 1}))
-            .send(&env.svc)
-            .await;
-        assert_eq!(missing.status_code, Some(StatusCode::NOT_FOUND));
-    }
-
-    #[tokio::test]
-    async fn failed_plugin_apply_restores_previous_file() {
-        let mut cfg = test_cfg();
-        cfg.dashboard_allow_anonymous_admin = true;
-        let env = p4_env(cfg).await;
-        let before = std::fs::read_to_string(env.dir.join("p4-fail.toml")).unwrap();
-
-        let mut resp = TestClient::put("http://127.0.0.1:0/api/v1/plugins/1/p4-fail/config")
-            .json(&json!({"value": 2}))
-            .send(&env.svc)
-            .await;
-        assert_eq!(resp.status_code, Some(StatusCode::SERVICE_UNAVAILABLE));
-        let body: serde_json::Value = resp.take_json().await.unwrap();
-        assert!(body["message"].as_str().unwrap_or_default().contains("previous file was restored"));
-        assert_eq!(std::fs::read_to_string(env.dir.join("p4-fail.toml")).unwrap(), before);
-    }
-
-    #[tokio::test]
-    async fn plugin_config_write_rbac_operator_ok_viewer_denied() {
-        let env = p4_env(dashboard_cfg()).await;
-        env.state.insert_user("ops", "ops-secret-1", crate::auth::Role::Operator).await.unwrap();
-        env.state.insert_user("viewer", "viewer-secret", crate::auth::Role::Viewer).await.unwrap();
-        let (ops_resp, _) = login(&env.svc, "ops", "ops-secret-1").await;
-        let ops = session_cookie(&ops_resp);
-        let (viewer_resp, _) = login(&env.svc, "viewer", "viewer-secret").await;
-        let viewer = session_cookie(&viewer_resp);
-
-        let denied = TestClient::put("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config")
-            .add_header("cookie", &viewer, true)
-            .json(&json!({"max_row_limit": 1}))
-            .send(&env.svc)
-            .await;
-        assert_eq!(denied.status_code, Some(StatusCode::FORBIDDEN));
-
-        let mut ok = TestClient::put("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config?apply=none")
-            .add_header("cookie", &ops, true)
-            .json(&json!({"max_row_limit": 7}))
-            .send(&env.svc)
-            .await;
-        assert_eq!(ok.status_code, Some(StatusCode::OK));
-        let body: serde_json::Value = ok.take_json().await.unwrap();
-        assert_eq!(body["written"], true);
-    }
-
-    #[tokio::test]
-    async fn http_api_plugin_config_writes_are_admin_only() {
-        let env = p4_env(dashboard_cfg()).await;
-        let (admin_resp, admin_body) = login(&env.svc, "admin", "admin-secret").await;
-        assert_eq!(admin_resp.status_code, Some(StatusCode::OK), "{admin_body}");
-        let admin = session_cookie(&admin_resp);
-        env.state.insert_user("ops", "ops-secret-1", crate::auth::Role::Operator).await.unwrap();
-        let (ops_resp, _) = login(&env.svc, "ops", "ops-secret-1").await;
-        let ops = session_cookie(&ops_resp);
-
-        for path in [
-            "http://127.0.0.1:0/api/v1/plugins/1/ferromq-http-api/config",
-            "http://127.0.0.1:0/api/v1/plugins/1/ferromq-http-api/config/reload",
-        ] {
-            let denied = TestClient::put(path)
-                .add_header("cookie", &ops, true)
-                .json(&json!({"http_bearer_token": "stolen"}))
-                .send(&env.svc)
-                .await;
-            assert_eq!(denied.status_code, Some(StatusCode::FORBIDDEN), "{path}");
-        }
-
-        let validate =
-            TestClient::post("http://127.0.0.1:0/api/v1/plugins/1/ferromq-http-api/config/validate")
-                .add_header("cookie", &ops, true)
-                .json(&json!({"http_bearer_token": "stolen"}))
-                .send(&env.svc)
-                .await;
-        assert_eq!(validate.status_code, Some(StatusCode::FORBIDDEN));
-
-        let rollback = TestClient::post(
-            "http://127.0.0.1:0/api/v1/plugins/1/ferromq-http-api/config/rollback/1?apply=none",
-        )
-        .add_header("cookie", &ops, true)
-        .send(&env.svc)
-        .await;
-        assert_eq!(rollback.status_code, Some(StatusCode::FORBIDDEN));
-
-        let admin_validate =
-            TestClient::post("http://127.0.0.1:0/api/v1/plugins/1/ferromq-http-api/config/validate")
-                .add_header("cookie", &admin, true)
-                .json(&json!({"max_row_limit": 1}))
-                .send(&env.svc)
-                .await;
-        assert_ne!(admin_validate.status_code, Some(StatusCode::FORBIDDEN));
-    }
-
-    #[tokio::test]
-    async fn broker_config_read_and_write_is_restart_required() {
-        let env = p4_env(dashboard_cfg()).await;
-        let (resp, body) = login(&env.svc, "admin", "admin-secret").await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
-        let admin = session_cookie(&resp);
-        env.state.insert_user("ops", "ops-secret-1", crate::auth::Role::Operator).await.unwrap();
-        let (ops_resp, _) = login(&env.svc, "ops", "ops-secret-1").await;
-        let ops = session_cookie(&ops_resp);
-
-        let mut overview = TestClient::get("http://127.0.0.1:0/api/v1/broker/config")
-            .add_header("cookie", &ops, true)
-            .send(&env.svc)
-            .await;
-        assert_eq!(overview.status_code, Some(StatusCode::OK));
-        let ov: serde_json::Value = overview.take_json().await.unwrap();
-        assert_eq!(ov["effective"], "restart_required");
-        assert_eq!(ov["mqtt"]["max_sessions"], 10);
-        assert!(ov["note"].as_str().unwrap().contains("hot"));
-
-        let denied = TestClient::put("http://127.0.0.1:0/api/v1/broker/config/mqtt")
-            .add_header("cookie", &ops, true)
-            .json(&json!({"max_sessions": 20}))
-            .send(&env.svc)
-            .await;
-        assert_eq!(denied.status_code, Some(StatusCode::FORBIDDEN));
-
-        let mut put = TestClient::put("http://127.0.0.1:0/api/v1/broker/config/mqtt")
-            .add_header("cookie", &admin, true)
-            .json(&json!({"max_sessions": 20}))
-            .send(&env.svc)
-            .await;
-        assert_eq!(put.status_code, Some(StatusCode::OK));
-        let put_body: serde_json::Value = put.take_json().await.unwrap();
-        assert_eq!(put_body["effective"], "restart_required");
-        assert_eq!(put_body["applied"], false);
-        assert_eq!(put_body["written"], true);
-
-        let disk = std::fs::read_to_string(env.dir.join("ferromq.toml")).unwrap();
-        assert!(disk.contains("max_sessions"));
-
-        let mut audit = TestClient::get("http://127.0.0.1:0/api/v1/audit?action=broker_config_update")
-            .add_header("cookie", &admin, true)
-            .send(&env.svc)
-            .await;
-        let events: serde_json::Value = audit.take_json().await.unwrap();
-        assert!(events.as_array().unwrap().iter().any(|e| e["action"] == "broker_config_update"));
-
-        let mut openapi = TestClient::get("http://127.0.0.1:0/api/v1/openapi.json").send(&env.svc).await;
-        let spec: serde_json::Value = openapi.take_json().await.unwrap();
-        assert!(spec["paths"]["/api/v1/plugins/{node}/{plugin}/config"]["put"].is_object());
-        assert!(spec["paths"]["/api/v1/broker/config"].is_object());
-        let modes = spec["components"]["schemas"]["EffectiveMode"]["enum"].as_array().unwrap();
-        assert!(modes.iter().any(|v| v == "hot"));
-        assert!(modes.iter().any(|v| v == "reload"));
-        assert!(modes.iter().any(|v| v == "restart_required"));
-    }
-
-    struct P5Env {
-        svc: Service,
-        dir: std::path::PathBuf,
-        state: Arc<crate::auth::AuthState>,
-    }
-
-    impl Drop for P5Env {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
-    }
-
-    async fn p5_env(cfg: PluginConfig) -> P5Env {
-        let dir = std::env::temp_dir().join(format!(
-            "ferromq-p5-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        std::fs::write(
-            dir.join("ferromq-acl.toml"),
-            r##"
-disconnect_if_pub_rejected = true
-priority = 10
-rules = [
-    ["allow", { user = "dashboard", password = "s3cret" }, "subscribe", ["$SYS/#"]],
-    ["allow", "all"]
-]
-"##,
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("ferromq-auth-http.toml"),
-            "http_timeout = \"5s\"\nhttp_auth_req = { url = \"http://127.0.0.1:9090/mqtt/auth\", method = \"post\", params = { username = \"%u\" } }\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("ferromq-auth-jwt.toml"),
-            "from = \"password\"\nencrypt = \"hmac-based\"\nhmac_secret = \"jwt-secret-value\"\nhmac_base64 = false\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("ferromq-auto-subscription.toml"),
-            "subscribes = [{ topic_filter = \"x/+/#\", qos = 1, no_local = false, retain_as_published = false, retain_handling = 0 }]\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("ferromq-topic-rewrite.toml"),
-            "rules = [{ action = \"all\", source_topic_filter = \"a/b\", dest_topic = \"c/d\" }]\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("ferromq-web-hook.toml"),
-            r##"
-urls = ["https://user:hook-secret@hooks.example.com/mqtt"]
-http_timeout = "8s"
-[[rule.message_publish]]
-action = "message_publish"
-topics = ["#"]
-"##,
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("ferromq-bridge-egress-mqtt.toml"),
-            "[[bridges]]\nenable = true\nname = \"b1\"\nserver = \"tcp://127.0.0.1:2883\"\nusername = \"ferromq_u\"\npassword = \"bridge-pass\"\n",
-        )
-        .unwrap();
-
-        let scx = ServerContext::new()
-            .node_id(1)
-            .plugins_config_dir(dir.to_string_lossy().into_owned())
-            .busy_check_enable(false)
-            .build()
-            .await;
-        for name in [
-            "ferromq-acl",
-            "ferromq-auth-http",
-            "ferromq-auth-jwt",
-            "ferromq-auto-subscription",
-            "ferromq-topic-rewrite",
-            "ferromq-web-hook",
-            "ferromq-bridge-egress-mqtt",
-        ] {
-            let n = name.to_string();
-            scx.plugins
-                .register(name, true, false, move || {
-                    let n = n.clone();
-                    Box::pin(async move {
-                        Ok(Box::new(P4DemoPlugin { name: n, cfg: json!({}) }) as ferromq::plugin::DynPlugin)
-                    })
-                })
-                .await
-                .expect("register p5 plugin");
-        }
-
-        let mut cfg = cfg;
-        cfg.broker_config_file = Some(dir.join("ferromq.toml").display().to_string());
-        cfg.config_history_keep = 5;
-        let state = Arc::new(crate::auth::AuthState::new(None));
-        let cfg = Arc::new(RwLock::new(cfg));
-        let router = route_with_auth(scx, cfg, state.clone(), prome::Monitor::new(), None);
-        P5Env { svc: Service::new(router), dir, state }
-    }
-
-    #[tokio::test]
-    async fn p5_acl_crud_redacts_password_and_hot_applies() {
-        let env = p5_env(dashboard_cfg()).await;
-        let (resp, body) = login(&env.svc, "admin", "admin-secret").await;
-        assert_eq!(resp.status_code, Some(StatusCode::OK), "{body}");
-        let admin = session_cookie(&resp);
-
-        let mut listed = TestClient::get("http://127.0.0.1:0/api/v1/acl/rules")
-            .add_header("cookie", &admin, true)
-            .send(&env.svc)
-            .await;
-        assert_eq!(listed.status_code, Some(StatusCode::OK));
-        let rules: serde_json::Value = listed.take_json().await.unwrap();
-        assert!(rules.as_array().unwrap().len() >= 2);
-        assert_eq!(rules[0]["who"]["password"], "***");
-        assert_ne!(rules[0]["who"]["password"], "s3cret");
-
-        let mut added = TestClient::post("http://127.0.0.1:0/api/v1/acl/rules")
-            .add_header("cookie", &admin, true)
-            .json(&json!({"access":"deny","who":{"ipaddr":"10.1.2.3"},"control":"connect"}))
-            .send(&env.svc)
-            .await;
-        assert_eq!(added.status_code, Some(StatusCode::OK));
-        let added_body: serde_json::Value = added.take_json().await.unwrap();
-        assert_eq!(added_body["written"], true);
-        assert_eq!(added_body["effective"], "hot");
-        assert_eq!(added_body["applied"], true);
-        let idx = added_body["rule"]["index"].as_u64().unwrap();
-
-        let updated = TestClient::put(format!("http://127.0.0.1:0/api/v1/acl/rules/{idx}"))
-            .add_header("cookie", &admin, true)
-            .json(&json!({"access":"deny","who":{"clientid":"bad"},"control":"connect"}))
-            .send(&env.svc)
-            .await;
-        assert_eq!(updated.status_code, Some(StatusCode::OK));
-
-        let deleted = TestClient::delete(format!("http://127.0.0.1:0/api/v1/acl/rules/{idx}"))
-            .add_header("cookie", &admin, true)
-            .send(&env.svc)
-            .await;
-        assert_eq!(deleted.status_code, Some(StatusCode::OK));
-
-        let disk = std::fs::read_to_string(env.dir.join("ferromq-acl.toml")).unwrap();
-        assert!(!disk.contains("10.1.2.3"));
-    }
-
-    #[tokio::test]
-    async fn p5_webhook_bridge_blacklist_and_rbac() {
-        let env = p5_env(dashboard_cfg()).await;
-        let (admin_resp, admin_body) = login(&env.svc, "admin", "admin-secret").await;
-        assert_eq!(admin_resp.status_code, Some(StatusCode::OK), "{admin_body}");
-        let admin = session_cookie(&admin_resp);
-        env.state.insert_user("ops", "ops-secret-1", crate::auth::Role::Operator).await.unwrap();
-        env.state.insert_user("viewer", "viewer-secret", crate::auth::Role::Viewer).await.unwrap();
-        let (ops_resp, _) = login(&env.svc, "ops", "ops-secret-1").await;
-        let ops = session_cookie(&ops_resp);
-        let (viewer_resp, _) = login(&env.svc, "viewer", "viewer-secret").await;
-        let viewer = session_cookie(&viewer_resp);
-
-        let mut hooks = TestClient::get("http://127.0.0.1:0/api/v1/webhooks")
-            .add_header("cookie", &viewer, true)
-            .send(&env.svc)
-            .await;
-        assert_eq!(hooks.status_code, Some(StatusCode::OK));
-        let hooks_body: serde_json::Value = hooks.take_json().await.unwrap();
-        let url = hooks_body["urls"][0].as_str().unwrap();
-        assert!(!url.contains("hook-secret"));
-        assert!(url.contains("***"));
-
-        let denied = TestClient::post("http://127.0.0.1:0/api/v1/webhooks/urls")
-            .add_header("cookie", &viewer, true)
-            .json(&json!({"url":"https://hooks.example.com/other"}))
-            .send(&env.svc)
-            .await;
-        assert_eq!(denied.status_code, Some(StatusCode::FORBIDDEN));
-
-        let mut add = TestClient::post("http://127.0.0.1:0/api/v1/webhooks/urls")
-            .add_header("cookie", &ops, true)
-            .json(&json!({"url":"https://hooks.example.com/other"}))
-            .send(&env.svc)
-            .await;
-        assert_eq!(add.status_code, Some(StatusCode::OK));
-        let add_body: serde_json::Value = add.take_json().await.unwrap();
-        assert_eq!(add_body["written"], true);
-
-        let ssrf = TestClient::post("http://127.0.0.1:0/api/v1/webhooks/test")
-            .add_header("cookie", &ops, true)
-            .json(&json!({"url":"http://127.0.0.1:1/x"}))
-            .send(&env.svc)
-            .await;
-        assert_eq!(ssrf.status_code, Some(StatusCode::BAD_REQUEST));
-
-        let mut bl = TestClient::get("http://127.0.0.1:0/api/v1/blacklist")
-            .add_header("cookie", &ops, true)
-            .send(&env.svc)
-            .await;
-        let bl_body: serde_json::Value = bl.take_json().await.unwrap();
-        assert_eq!(bl_body["available"], false);
-        assert!(bl_body["gap"].as_str().unwrap().contains("blacklist"));
-
-        let write_bl = TestClient::post("http://127.0.0.1:0/api/v1/blacklist")
-            .add_header("cookie", &ops, true)
-            .json(&json!({"ip":"1.2.3.4"}))
-            .send(&env.svc)
-            .await;
-        assert_eq!(write_bl.status_code, Some(StatusCode::NOT_IMPLEMENTED));
-
-        let mut bridges = TestClient::get("http://127.0.0.1:0/api/v1/bridges")
-            .add_header("cookie", &ops, true)
-            .send(&env.svc)
-            .await;
-        assert_eq!(bridges.status_code, Some(StatusCode::OK));
-        let bridges_body: serde_json::Value = bridges.take_json().await.unwrap();
-        assert!(bridges_body["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|b| b["name"] == "ferromq-bridge-egress-mqtt"));
-
-        let mut bridge = TestClient::get("http://127.0.0.1:0/api/v1/bridges/ferromq-bridge-egress-mqtt")
-            .add_header("cookie", &viewer, true)
-            .send(&env.svc)
-            .await;
-        let bridge_body: serde_json::Value = bridge.take_json().await.unwrap();
-        assert_eq!(bridge_body["config"]["bridges"][0]["password"], "***");
-
-        let mut providers = TestClient::get("http://127.0.0.1:0/api/v1/auth-providers")
-            .add_header("cookie", &ops, true)
-            .send(&env.svc)
-            .await;
-        let providers_body: serde_json::Value = providers.take_json().await.unwrap();
-        assert_eq!(providers_body["providers"].as_array().unwrap().len(), 2);
-
-        let mut jwt = TestClient::post("http://127.0.0.1:0/api/v1/auth-providers/jwt/test")
-            .add_header("cookie", &ops, true)
-            .json(&json!({}))
-            .send(&env.svc)
-            .await;
-        let jwt_body: serde_json::Value = jwt.take_json().await.unwrap();
-        assert_eq!(jwt_body["ok"], true);
-        assert_eq!(jwt_body["kind"], "jwt_config");
-
-        let auto = TestClient::post("http://127.0.0.1:0/api/v1/auto-subscriptions")
-            .add_header("cookie", &ops, true)
-            .json(&json!({"topic_filter":"iot/${clientid}/#","qos":1}))
-            .send(&env.svc)
-            .await;
-        assert_eq!(auto.status_code, Some(StatusCode::OK));
-
-        let rw = TestClient::post("http://127.0.0.1:0/api/v1/topic-rewrites")
-            .add_header("cookie", &ops, true)
-            .json(&json!({"action":"publish","source_topic_filter":"in/#","dest_topic":"out/${clientid}"}))
-            .send(&env.svc)
-            .await;
-        assert_eq!(rw.status_code, Some(StatusCode::OK));
-
-        let mut audit = TestClient::get("http://127.0.0.1:0/api/v1/audit?action=webhook_url_add")
-            .add_header("cookie", &admin, true)
-            .send(&env.svc)
-            .await;
-        let events: serde_json::Value = audit.take_json().await.unwrap();
-        assert!(events.as_array().unwrap().iter().any(|e| e["action"] == "webhook_url_add"));
-
-        let mut spec = TestClient::get("http://127.0.0.1:0/api/v1/openapi.json").send(&env.svc).await;
-        let spec_body: serde_json::Value = spec.take_json().await.unwrap();
-        assert!(spec_body["paths"]["/api/v1/acl/rules"].is_object());
-        assert!(spec_body["paths"]["/api/v1/webhooks"].is_object());
-        assert!(spec_body["paths"]["/api/v1/bridges"].is_object());
-    }
-
-    #[test]
-    fn request_log_omits_auth_bodies_and_redacts_secrets() {
-        let login = request_log_summary(
-            "127.0.0.1:1",
-            "HTTP/1.1",
-            "POST",
-            "/api/v1/auth/login",
-            Some(r#"{"username":"admin","password":"change-me-secret"}"#),
-        );
-        assert!(login.contains("[omitted;"), "{login}");
-        assert!(!login.contains("change-me-secret"), "{login}");
-        assert!(!login.contains("password"), "{login}");
-        assert!(!login.to_ascii_lowercase().contains("authorization"), "{login}");
-        assert!(!login.to_ascii_lowercase().contains("cookie"), "{login}");
-
-        let change_pw = request_log_summary(
-            "127.0.0.1:1",
-            "HTTP/1.1",
-            "POST",
-            "/api/v1/auth/change-password",
-            Some(r#"{"old_password":"old-secret-value","new_password":"new-secret-value"}"#),
-        );
-        assert!(change_pw.contains("[omitted;"), "{change_pw}");
-        assert!(!change_pw.contains("old-secret-value"), "{change_pw}");
-        assert!(!change_pw.contains("new-secret-value"), "{change_pw}");
-
-        let plugin = request_log_summary(
-            "127.0.0.1:1",
-            "HTTP/1.1",
-            "PUT",
-            "/api/v1/plugins/1/ferromq-http-api/config",
-            Some(r#"{"http_bearer_token":"super-bearer-secret","http_laddr":"0.0.0.0:6060"}"#),
-        );
-        assert!(!plugin.contains("super-bearer-secret"), "{plugin}");
-        assert!(plugin.contains("***"), "{plugin}");
-        assert!(plugin.contains("0.0.0.0:6060"), "{plugin}");
-
-        let plugin_toml = request_log_summary(
-            "127.0.0.1:1",
-            "HTTP/1.1",
-            "PUT",
-            "/api/v1/plugins/1/ferromq-http-api/config",
-            Some("http_bearer_token = \"toml-bearer-secret\"\nmax_row_limit = 10\n"),
-        );
-        assert!(!plugin_toml.contains("toml-bearer-secret"), "{plugin_toml}");
-        assert!(plugin_toml.contains("***"), "{plugin_toml}");
-
-        let webhook = request_log_summary(
-            "127.0.0.1:1",
-            "HTTP/1.1",
-            "POST",
-            "/api/v1/webhooks/urls",
-            Some(r#"{"url":"https://hookuser:hookpass@hooks.example.com/x"}"#),
-        );
-        assert!(!webhook.contains("hookuser"), "{webhook}");
-        assert!(!webhook.contains("hookpass"), "{webhook}");
-        assert!(webhook.contains("***:***@hooks.example.com"), "{webhook}");
-
-        let provider = request_log_summary(
-            "127.0.0.1:1",
-            "HTTP/1.1",
-            "PUT",
-            "/api/v1/auth-providers/jwt",
-            Some(r#"{"hmac_secret":"jwt-secret-value","encrypt":"hmac-based"}"#),
-        );
-        assert!(!provider.contains("jwt-secret-value"), "{provider}");
-        assert!(provider.contains("***"), "{provider}");
-        assert!(provider.contains("hmac-based"), "{provider}");
-
-        let uri_userinfo = request_log_summary(
-            "127.0.0.1:1",
-            "HTTP/1.1",
-            "GET",
-            "https://alice:bob@127.0.0.1:6060/api/v1/brokers",
-            None,
-        );
-        assert!(!uri_userinfo.contains("alice"), "{uri_userinfo}");
-        assert!(!uri_userinfo.contains("bob"), "{uri_userinfo}");
-
-        let raw = request_log_summary(
-            "127.0.0.1:1",
-            "HTTP/1.1",
-            "POST",
-            "/api/v1/clients",
-            Some("not-json password=should-not-leak"),
-        );
-        assert!(raw.contains("[unparsed;"), "{raw}");
-        assert!(!raw.contains("should-not-leak"), "{raw}");
-    }
 }

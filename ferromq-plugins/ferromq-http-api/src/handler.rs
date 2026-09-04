@@ -12,7 +12,7 @@ use ferromq::{
 };
 
 use super::{
-    api, clients, config_mgmt,
+    api, clients,
     flusher::HistoryCaches,
     plugin, subs,
     types::{HistoryData, Message, MessageReply},
@@ -340,82 +340,6 @@ impl Handler for HookHandler {
                                     Ok(ress) => {
                                         HookResult::GrpcMessageReply(Ok(GrpcMessageReply::Data(ress)))
                                     }
-                                    Err(e) => HookResult::GrpcMessageReply(Ok(GrpcMessageReply::Error(
-                                        e.to_string(),
-                                    ))),
-                                }
-                            }
-                            Ok(Message::WritePluginConfig { name, toml, apply }) => {
-                                match config_mgmt::grpc_write_plugin(&self.scx, name, toml, apply).await {
-                                    Ok(s) => match MessageReply::WritePluginConfig(s).encode() {
-                                        Ok(ress) => {
-                                            HookResult::GrpcMessageReply(Ok(GrpcMessageReply::Data(ress)))
-                                        }
-                                        Err(e) => HookResult::GrpcMessageReply(Ok(GrpcMessageReply::Error(
-                                            e.to_string(),
-                                        ))),
-                                    },
-                                    Err(e) => HookResult::GrpcMessageReply(Ok(GrpcMessageReply::Error(
-                                        e.to_string(),
-                                    ))),
-                                }
-                            }
-                            Ok(Message::ValidatePluginConfig { name, toml }) => {
-                                match config_mgmt::grpc_validate_plugin(&self.scx, name, toml) {
-                                    Ok(s) => match MessageReply::ValidatePluginConfig(s).encode() {
-                                        Ok(ress) => {
-                                            HookResult::GrpcMessageReply(Ok(GrpcMessageReply::Data(ress)))
-                                        }
-                                        Err(e) => HookResult::GrpcMessageReply(Ok(GrpcMessageReply::Error(
-                                            e.to_string(),
-                                        ))),
-                                    },
-                                    Err(e) => HookResult::GrpcMessageReply(Ok(GrpcMessageReply::Error(
-                                        e.to_string(),
-                                    ))),
-                                }
-                            }
-                            Ok(Message::ListPluginConfigVersions { name }) => {
-                                match config_mgmt::grpc_list_versions(&self.scx, name) {
-                                    Ok(s) => match MessageReply::ListPluginConfigVersions(s).encode() {
-                                        Ok(ress) => {
-                                            HookResult::GrpcMessageReply(Ok(GrpcMessageReply::Data(ress)))
-                                        }
-                                        Err(e) => HookResult::GrpcMessageReply(Ok(GrpcMessageReply::Error(
-                                            e.to_string(),
-                                        ))),
-                                    },
-                                    Err(e) => HookResult::GrpcMessageReply(Ok(GrpcMessageReply::Error(
-                                        e.to_string(),
-                                    ))),
-                                }
-                            }
-                            Ok(Message::RollbackPluginConfig { name, version, apply }) => {
-                                match config_mgmt::grpc_rollback_plugin(&self.scx, name, version, apply).await
-                                {
-                                    Ok(s) => match MessageReply::RollbackPluginConfig(s).encode() {
-                                        Ok(ress) => {
-                                            HookResult::GrpcMessageReply(Ok(GrpcMessageReply::Data(ress)))
-                                        }
-                                        Err(e) => HookResult::GrpcMessageReply(Ok(GrpcMessageReply::Error(
-                                            e.to_string(),
-                                        ))),
-                                    },
-                                    Err(e) => HookResult::GrpcMessageReply(Ok(GrpcMessageReply::Error(
-                                        e.to_string(),
-                                    ))),
-                                }
-                            }
-                            Ok(Message::GetPluginConfigFile { name }) => {
-                                match config_mgmt::grpc_read_plugin_file(&self.scx, name) {
-                                    Ok(s) => match MessageReply::GetPluginConfigFile(s).encode() {
-                                        Ok(ress) => {
-                                            HookResult::GrpcMessageReply(Ok(GrpcMessageReply::Data(ress)))
-                                        }
-                                        Err(e) => HookResult::GrpcMessageReply(Ok(GrpcMessageReply::Error(
-                                            e.to_string(),
-                                        ))),
-                                    },
                                     Err(e) => HookResult::GrpcMessageReply(Ok(GrpcMessageReply::Error(
                                         e.to_string(),
                                     ))),

@@ -31,10 +31,6 @@ ferromq_cluster_broadcast::register(&scx, true, false).await?;
 | `task_exec_queue_workers` | integer | `500` | 任务执行队列工作线程数 |
 | `task_exec_queue_max` | integer | `100_000` | 任务执行队列最大容量 |
 
-## 成员变更
-
-没有运行时 join/leave。对等节点来自启动时的 `node_grpc_addrs`。`Plugin::send({"op":"status"})` 返回 gRPC 客户端统计；`join` / `leave` 会被拒绝。
-
 ## 依赖
 
 `ferromq`（features：`plugin`、`grpc`、`stats`）

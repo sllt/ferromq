@@ -2,126 +2,64 @@
 
 # Dashboard（Web 管理界面）
 
-FerroMQ 内置 Web 管理界面，由 `ferromq-http-api` 插件提供服务。生产静态资源来自 [`sllt/ferromq-dashboard`](https://github.com/sllt/ferromq-dashboard) 的 Vite 构建产物（React 19、Hash Router、`base: './'`），提交在 `ferromq-plugins/ferromq-http-api/dashboard-dist/`，通过 `rust-embed` 打进二进制。
-
-日常前端开发在独立的 dashboard 仓库进行（`pnpm dev`）。本仓库只内嵌构建后的 `dist/`。
+FerroMQ 内置 Web 管理界面（`ferromq-plugins/ferromq-http-api/dashboard/`），用于查看集群状态、指标、客户端、保留消息等。它是一个**无构建步骤**的原生 SPA（`index.html` + 原生 JS + Vue3 / ECharts CDN），由 `ferromq-http-api` 插件提供服务。
 
 ## 访问方式
 
 ### 1. 嵌入模式（默认）
 
-运行时不需要额外文件：
+Dashboard 静态资源通过 `rust-embed` 在编译时嵌入二进制，无需外部文件：
 
 ```
 http://<host>:6060/dashboard/
 ```
 
-`/` 同样会返回 SPA。路由是 hash（`#/overview`、`#/clients` 等），刷新 `/dashboard/` 始终加载 `index.html`。
+修改前端代码需要重新编译（`cargo build`）才能生效。
 
-在 `ferromq-http-api.toml` 中配置了 `dashboard_admin_password` 时，使用用户名/密码登录（`POST /api/v1/auth/login`）。仍可用静态 Bearer Token 或 API Key 作为回退。详见 [HTTP API — 认证](http-api.md#认证p3a-会话--p3b-api-key)。
+### 2. 外部目录模式（热更新）
 
-修改界面需要重新生成 `dashboard-dist/` 并编译（`cargo build`）。
-
-### 2. 外部目录模式（`dashboard_static_dir`）
-
-若要在不重编 FerroMQ 的情况下预览本地 Vite 生产构建，将 `dashboard_static_dir` 指到该 `dist/`：
+在 `ferromq-http-api.toml` 中配置 `dashboard_static_dir` 指向 Dashboard 源码目录：
 
 ```toml
-dashboard_static_dir = "/path/to/ferromq-dashboard/dist"
+dashboard_static_dir = "/path/to/ferromq-plugins/ferromq-http-api/dashboard"
 ```
 
-- 插件将 SPA 同时挂载到 `/` 与 `/dashboard/`
+- 插件将 SPA 同时挂载到 `/` 与 `/dashboard/` 两个路径
 - **相对路径相对于进程 cwd**（不是配置文件所在目录）
-- 仅当目录**存在**时才走文件系统；否则打警告并回退到嵌入资源
-- **改文件刷新浏览器即生效，无需重新编译** — `index.html` 使用 `Cache-Control: no-cache`；`assets/` 下带 hash 的文件为 `immutable`
-
-Vite 开发服务器（HMR）请在 `ferromq-dashboard` 里运行 `pnpm dev`，并把 `/api/v1` 代理到本插件。不要把 `dashboard_static_dir` 指到 dashboard 源码树。
-
-## 如何验证
-
-嵌入模式（默认，未设置 `dashboard_static_dir`）：
-
-```bash
-curl -sI http://127.0.0.1:6060/dashboard/
-# 200, text/html, cache-control: no-cache
-# x-content-type-options: nosniff, x-frame-options: DENY
-
-curl -sI http://127.0.0.1:6060/dashboard/assets/<hashed>.js
-# 200, cache-control: public, max-age=31536000, immutable
-
-curl -s http://127.0.0.1:6060/api/v1/openapi.json | head
-curl -sI http://127.0.0.1:6060/api/v1/docs
-# 同一监听器上的 /api/v1 与 OpenAPI/docs 不受影响
-```
-
-文件系统覆盖：
-
-```bash
-# 修改 ferromq-http-api.toml 后重启插件 / ferromqd
-# dashboard_static_dir = "/path/to/ferromq-dashboard/dist"
-curl -s http://127.0.0.1:6060/dashboard/ | head
-# 响应体应与该 dist/index.html 一致
-```
-
-`dashboard_static_dir` 指向的路径不存在时回退到嵌入资源（日志有警告）。
-
-## 重新生成内嵌资源
-
-在 FerroMQ 仓库根目录（需要 Node 20+、pnpm 9+）：
-
-```bash
-./scripts/sync-dashboard-dist.sh
-cargo build -p ferromq-http-api
-```
-
-源仓库提交 SHA 见 `ferromq-plugins/ferromq-http-api/dashboard-dist/README.md`。
+- **改文件刷新浏览器即生效，无需重新编译**——适合开发调试
 
 ## 页面功能
 
 | 路由 | 页面 | 说明 |
 |------|------|------|
-| `#/overview` | 集群概览 | 统计 / 指标（配置了历史存储时含趋势），节点与 Broker 卡片 |
-| `#/nodes` | 节点 | 节点列表、健康检查、功能支持 |
-| `#/clients` | 客户端 | 搜索、详情、在线/离线踢出 |
-| `#/subscriptions` | 订阅 | 集群订阅列表 |
-| `#/routes` | 路由 | 主题路由表 |
-| `#/retains` | 保留消息 | 查询、预览、按精确主题删除 |
-| `#/publish` | 发布 | `POST /api/v1/mqtt/publish` |
-| `#/plugins` | 插件 | 集群插件列表、加载 / 卸载 / 配置 / 版本 |
-| `#/broker-config` | Broker 配置 | 读取 mqtt / listener / log；admin 写入一律 `restart_required` |
-| `#/acl` | ACL | 结构化 `ferromq-acl` 规则 |
-| `#/auth-providers` | 认证插件 | HTTP / JWT MQTT 客户端认证（不是 Dashboard 登录） |
-| `#/auto-subscriptions` | 自动订阅 | 按索引增删改 |
-| `#/topic-rewrites` | 主题改写 | 按索引增删改 |
-| `#/webhooks` | Webhook | URL / 规则 CRUD 与 TCP 探测 |
-| `#/bridges` | 桥接 | 列表 / 状态 / 配置 / 加载卸载 |
-| `#/blacklist` | 黑名单 | 诚实的 `available: false` 缺口与 ACL 替代说明 |
-| `#/alarms` | 告警 | 派生内存总线；确认（operator+） |
-| `#/logs` `#/trace` `#/slow-subs` | 诊断缺口 | `available: false` / 501，不编造指标 |
-| `#/topic-metrics` | 主题指标 | 由路由派生的订阅者计数（不是按主题速率） |
-| `#/cluster` | 集群 | 只读拓扑；join 始终禁用；leave 仅 raft |
-| `#/users` | 用户 | 列出 / 创建 / 禁用（admin） |
-| `#/api-keys` | API 密钥 | 创建哈希 API Key，密钥只显示一次（admin） |
-| `#/audit` | 审计日志 | 写操作审计（admin） |
-
-真实性见 [HTTP API](http-api.md)。
+| `#/overview` | 集群概览 | 消息丢弃趋势（异常丢弃 / 无订阅者丢弃双标签切换）、连接数 / 主题数 / 订阅数趋势折线图、节点信息卡片 |
+| `#/overview` → 节点 Tab | 节点 | 节点列表（操作系统 CPU 负载 load1/5/15、内存列）与节点详情（客户端统计） |
+| `#/overview` → 功能支持状态 Tab | 功能支持状态 | 集群功能一致性徽章、不一致冲突告警（字段级）、功能 × 节点矩阵表 |
+| `#/clients` | 客户端 | 客户端搜索与高级筛选（含日期时间选择器）、列表、在线/离线踢出 |
+| `#/clients/detail` | 客户端详情 | 连接信息 + 会话信息两栏、当前订阅列表（可取消订阅） |
+| `#/retains` | 保留消息 | `topic_filter` 查询、分页（上一页/下一页）、payload 预览与详情弹窗 |
 
 ## 国际化
 
-控制台内置**简体中文**与 **English**，可在页头切换（写入 `localStorage`）。浅色 / 深色主题同样本地保存。
+Dashboard 内置 **12 种语言**（`locales/*.json`），可在界面右上角切换：
+
+| 文件 | 语言 |
+|------|------|
+| `zh-CN.json` / `zh-TW.json` | 简体中文 / 繁體中文 |
+| `en.json` | English |
+| `ar.json` / `bn.json` / `de.json` / `es.json` / `fr.json` / `hi.json` / `it.json` / `pt.json` / `ru.json` | 阿拉伯语 / 孟加拉语 / 德语 / 西班牙语 / 法语 / 印地语 / 意大利语 / 葡萄牙语 / 俄语 |
 
 ## 开发须知
 
-- **Hash Router + `base: './'`**：资源 URL 为相对路径（`./assets/<name>-<hash>.js`），因此同一套文件可挂在 `/` 与 `/dashboard/`。
-- **缓存**：`index.html` 为 `no-cache`；带 hash 的 `assets/*` 为长期 `immutable`。重新嵌入后普通刷新即可拿到新 HTML 和新 hash。
-- **响应头**：Dashboard 响应带 `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: same-origin`，以及务实的 CSP（同源 + 构建产物里的 Google Fonts）。客户端声明 `Accept-Encoding: gzip` 时启用 Gzip。
-- **`/api/v1` 不受影响**：OpenAPI（`/api/v1/openapi.json`）与 Swagger UI（`/api/v1/docs`）仍走 API 路由。
+- **版本号机制**：`index.html` 中静态资源带 `?v=` 版本号，`i18n.js` 有 `_localeVer` 语言包缓存版本。修改任何 JS/CSS/locale 文件后必须同步递增，否则浏览器缓存不生效。
+- **Vue 3 组合式 API**：模板用到的所有 ref/函数必须显式加入 `setup()` 的 return，否则运行时才报错（`xxx is not a function`）。
+- **死代码判断**：组件是否实际使用，需全项目 grep 组件注册表（`app.js` 的 `pageRegistry` + components 注册）与模板引用，不能只看 `index.html` 是否加载了脚本。
+- **时间控件**：原生 `datetime-local` 的「年/月/日」文案跟随浏览器语言，无法被页面 i18n 控制，因此使用自研 `components/datetime-picker.js`（基于 `Intl.DateTimeFormat` 动态生成文案）。
 
 ## 常见问题
 
 | 问题 | 原因与处理 |
 |------|-----------|
-| 升级后白屏 | 强刷一次，避免沿用旧的 `index.html`；随后会按新 HTML 加载新 hash 资源 |
-| 嵌入模式改了界面不生效 | 重新生成 `dashboard-dist/`（`./scripts/sync-dashboard-dist.sh`）并 `cargo build` |
-| `dashboard_static_dir` 未生效 | 路径必须存在（相对进程 cwd）。检查日志中的 “not found, falling back to embedded assets” |
-| `pnpm dev` 下 API 401 / CORS | Vite 把 `/api/v1` 代理到 Broker；先启动 `ferromqd`，并保持 `VITE_API_PROXY_TARGET` 一致 |
+| 页面白屏/图表不渲染 | Dashboard 从 unpkg.com 加载 Vue/ECharts CDN，离线环境需自行内联或自建 CDN |
+| 改了代码刷新无效 | `?v=` 版本号或 `_localeVer` 未递增，浏览器命中缓存；递增后强刷（Ctrl+F5） |
+| 修改未生效 | 嵌入模式下需重新 `cargo build`；外部目录模式才支持热更新 |

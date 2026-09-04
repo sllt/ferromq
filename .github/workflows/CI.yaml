@@ -3,8 +3,7 @@ name: CI
 on:
   push:
     branches:
-      - main
-      - dev
+      - master
       - dev/*
   pull_request:
 
@@ -19,46 +18,6 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  dashboard-dist:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: ferromq
-      - id: dashboard
-        working-directory: ferromq
-        run: echo "sha=$(tr -d '[:space:]' < ferromq-plugins/ferromq-http-api/dashboard-dist/COMMIT)" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
-        with:
-          repository: sllt/ferromq-dashboard
-          ref: ${{ steps.dashboard.outputs.sha }}
-          path: dashboard
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: pnpm
-          cache-dependency-path: dashboard/pnpm-lock.yaml
-      - working-directory: dashboard
-        run: pnpm install --frozen-lockfile && pnpm build
-      - run: |
-          python3 - <<'PY'
-          import hashlib, pathlib
-          source = pathlib.Path('dashboard/dist')
-          embedded = pathlib.Path('ferromq/ferromq-plugins/ferromq-http-api/dashboard-dist')
-          ignored = {'COMMIT', 'SOURCE', 'README.md', 'THIRD_PARTY_NOTICES.txt'}
-          def hashes(root, ignored):
-              return {
-                  p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
-                  for p in root.rglob('*')
-                  if p.is_file() and p.relative_to(root).as_posix() not in ignored
-              }
-          assert hashes(source, set()) == hashes(embedded, ignored), 'dashboard-dist is stale'
-          assert (embedded / 'THIRD_PARTY_NOTICES.txt').is_file(), 'third-party notice missing'
-          PY
-
   rustfmt:
     runs-on: ubuntu-latest
     steps:

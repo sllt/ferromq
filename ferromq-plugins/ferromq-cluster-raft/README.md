@@ -99,18 +99,6 @@ Compression algorithms: `lz4_flex`, `lz4`, `zstd`, `snap`, `flate2`
 | `raft.batch_append` | boolean | `false` | Enable batch append |
 | `raft.priority` | integer | `0` | Node priority for leader election |
 
-## Runtime membership (`Plugin::send`)
-
-The HTTP API dashboard talks to this plugin via `ServerContext::plugins.send`:
-
-| `op` | Effect |
-|------|--------|
-| `status` | Current `Mailbox::status()` |
-| `leave` | `Mailbox::leave()` — propose `RemoveNode` for this node |
-| `join` | **Rejected.** `Raft::join` is consumed when the plugin starts (`raft_peer_addrs` / `--raft-peer-addrs`). Start a new node with those addresses instead. |
-
-`ferromq-cluster-broadcast` has no membership API.
-
 ## Dependencies
 
 `ferromq` (features: `plugin`, `grpc`, `stats`, `msgstore`), `ferromq-raft`, `tokio`, `serde`

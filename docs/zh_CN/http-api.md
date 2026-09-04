@@ -36,30 +36,6 @@ http_laddr = "0.0.0.0:6060"
 ## When not set (default), no authentication is required.
 #http_bearer_token = "public"
 
-## Dashboard 会话登录（P3a）。配置 `dashboard_admin_password` 后，首次
-## `POST /api/v1/auth/login`（或 `POST /api/v1/auth/init`）会创建 admin，
-## 并持久化保存 bcrypt 哈希。原始 `http_bearer_token` 仍可作为自动化
-## 超级用户/operator 凭证。
-# dashboard_admin_username = "admin"
-# dashboard_admin_password = "change-me"
-# dashboard_viewer_username = "viewer"
-# dashboard_viewer_password = "change-me-too"
-# dashboard_auth_file = "/var/lib/ferromq/dashboard-auth.json"
-# dashboard_allow_anonymous_admin = false  ## 不安全的旧兼容开关
-# dashboard_cookie_secure = false          ## 仅 HTTPS 时设为 true
-# dashboard_session_idle_timeout = "30m"
-# dashboard_session_max_age = "12h"
-# dashboard_login_rate_limit = 10
-# dashboard_login_rate_window = "1m"
-## Cookie CSRF 用 Origin/Referer 对照 Host。反向代理须保留原始公网 Host。
-## 不信任 X-Forwarded-Host。若代理改写了 Host，非浏览器客户端请用 Bearer / API Key。
-# audit_max_events = 10000
-# audit_file = "/var/log/ferromq/http-api-audit.jsonl"
-# config_history_keep = 10
-# broker_config_file = "ferromq.toml"
-## 用户和 API Key 哈希持久化；会话仍仅存于本节点内存。
-## 集群各节点使用独立认证存储，浏览器访问需粘性会话。
-
 ## Enable TCP SO_REUSEADDR on the HTTP listener.
 ## Default: true
 # http_reuseaddr = true
@@ -68,9 +44,7 @@ http_laddr = "0.0.0.0:6060"
 ## Default: false
 # http_reuseport = false
 
-## 打印 HTTP 请求 method/path。/auth/* 的请求体一律省略；其余 JSON/TOML
-## 会递归脱敏 password/token/secret 等字段以及 URL userinfo。
-## 从不记录 Authorization / Cookie 头。
+## Indicates whether to print HTTP request logs
 http_request_log = false
 
 ## Metrics sample interval for collecting and caching internal metrics.
@@ -89,11 +63,13 @@ message_expiry_interval = "5m"
 prometheus_metrics_cache_interval = "5s"
 
 ## Dashboard static directory (optional).
-## By default the React console is rust-embedded from crate-local
-## dashboard-dist/ (https://github.com/sllt/ferromq-dashboard).
-## If set AND the path exists, that directory is served at `/dashboard/`
-## instead (typically a local Vite dist/). Missing path → embed.
-# dashboard_static_dir = "/path/to/ferromq-dashboard/dist"
+## By default (when unset), the Dashboard SPA is served from assets embedded
+## directly into the binary via rust-embed at compile time, so no external
+## files are needed.
+## If set, the plugin loads the Dashboard SPA from this external directory
+## at the `/dashboard/` path instead, allowing swapping the frontend build
+## without recompiling the binary.
+# dashboard_static_dir = "/path/to/dashboard/dist"
 
 ##─── Stats/Metrics History Persistence (optional) ───────────────────────
 ## When `storage` is configured, the plugin periodically snapshots Stats
@@ -143,124 +119,8 @@ FerroMQ 接口在调用成功时总是返回 200 OK，响应内容主要以 JSON
 | 200  | 成功，如果需要返回更多数据，将以 JSON 数据格式返回              |
 | 400  | 客户端请求无效，例如请求体或参数错误                        |
 | 401  | 客户端未通过服务端认证，使用无效的身份验证凭据可能会发生              |
-| 403  | 已认证但角色无权（`viewer` / `operator` / `admin`） |
 | 404  | 找不到请求的路径或者请求的对象不存在                        |
-| 409  | Dashboard 用户已初始化（`POST /auth/init`） |
-| 429  | 登录尝试过于频繁 |
 | 500  | 服务端处理请求时发生内部错误                            |
-
-API 失败时返回 **JSON**（不再使用纯文本 / HTML）：
-
-```json
-{"code": 404, "message": "plugin not found: ferromq-web-hook", "request_id": "19c3e2a1b-5a5a"}
-```
-
-| Field   | Type    | Description |
-|---------|---------|-------------|
-| `code`  | Integer | 与 HTTP 状态码相同 |
-| `message` | String | 错误说明 |
-| `details` | Any   | 可选的结构化附加信息（未使用时省略） |
-| `request_id` | String | 关联 ID（同时出现在 `X-Request-Id` 响应头） |
-
-请求可携带 `X-Request-Id`，服务端会原样回写；未提供时由服务端生成。成功的 `2xx` 响应体保持不变（包括已有的纯文本成功响应，如 `ok`）。
-
-机器可读契约：`GET /api/v1/openapi.json`（Swagger UI：`GET /api/v1/docs`）。
-
-## 认证（P3a 会话 + P3b API Key）
-
-HTTP API 接受以下凭证。**MQTT 客户端认证插件不受影响。**
-
-| 机制 | 用法 | 角色 |
-|------|------|------|
-| 会话 Cookie | `POST /api/v1/auth/login` 提交 `{ "username", "password" }`，设置 `ferromq_session`（`HttpOnly` / `SameSite=Lax`）。每次请求使用用户的**当前**角色；用户删除后会话失效。带 Cookie 的非安全方法在存在 `Origin`/`Referer` 时要求与 `Host` 同源（缺省 Origin 的非浏览器客户端放行；Bearer / API Key 不受此限）。反向代理须**保留原始公网 `Host`**；FerroMQ **不信任** `X-Forwarded-Host`。若代理改写了 `Host`，非浏览器客户端请改用 Bearer / API Key。 | 用户记录上的当前 `admin` / `operator` / `viewer` |
-| 静态 Bearer | `Authorization: Bearer <http_bearer_token>` | 始终为 `admin`（用户名 `operator`） |
-| API Key Bearer | `Authorization: Bearer <fmqk_…>`（`POST /api/v1/api-keys` 创建） | 绑定的角色 |
-| 开放访问 | 未配置 bearer / API Key / `dashboard_admin_password`，且无持久化用户 | 匿名 `viewer`（只读）；匿名管理员只能通过不安全兼容开关显式启用 |
-
-无需会话/Bearer 即可访问：`POST /auth/login`、`POST /auth/logout`、`POST /auth/init`、`GET /health/check`、`GET /openapi.json`、`GET /docs`。
-
-### 角色
-
-| 角色 | 只读 | 踢人 / 发布 / 插件配置 / P5 集成 / P6 告警确认与集群写入 | 用户 / API Key / 审计 / Broker 写入 / `?reveal=1` / **`ferromq-http-api` 配置** |
-|------|------|----------------------|--------------------------------------------------|
-| `admin` | 是 | 是 | 是 |
-| `operator` | 是 | 是（但不能写 `ferromq-http-api` 的 validate/rollback/reload） | 否（`403`，`required_role: admin`） |
-| `viewer` | 是（密钥已脱敏） | 否（`403`，`required_role: operator`） | 否 |
-
-对插件 `ferromq-http-api` 的写入 / 校验 / 回滚 / 重载仅管理员可做（该文件可设置 `http_bearer_token`，解析为 admin）。通用插件 PUT 会对现有 TOML **深合并**：省略或值为 `***` 的密钥会保留，且不会把字面量 `***` 写入文件。
-
-密码以 **bcrypt** 哈希保存；API Key 密钥以 **SHA-256** 哈希保存。用户和 Key 哈希写入 `dashboard_auth_file`；未配置时使用插件配置目录下的 `.ferromq-dashboard-auth.json`。会话仍保存在进程内存中；集群浏览器访问需粘性会话。
-
-### 如何测试
-
-```bash
-curl -sS -X POST http://127.0.0.1:6060/api/v1/auth/init
-
-curl -sS -c cookie.txt -X POST http://127.0.0.1:6060/api/v1/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"change-me"}'
-
-curl -sS -b cookie.txt http://127.0.0.1:6060/api/v1/auth/me
-
-curl -sS -b cookie.txt -X POST http://127.0.0.1:6060/api/v1/users \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"ops","password":"ops-secret-1","role":"operator"}'
-
-curl -sS -b cookie.txt -X POST http://127.0.0.1:6060/api/v1/api-keys \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"ci","role":"operator"}'
-# secret 只返回一次
-
-curl -sS -H 'Authorization: Bearer fmqk_…' \
-  -X DELETE http://127.0.0.1:6060/api/v1/clients/demo
-
-curl -sS -b cookie.txt 'http://127.0.0.1:6060/api/v1/audit?format=page&_limit=20'
-
-curl -sS -H 'Authorization: Bearer public' http://127.0.0.1:6060/api/v1/brokers
-
-curl -sS -b cookie.txt -c cookie.txt -X POST http://127.0.0.1:6060/api/v1/auth/logout
-```
-
-### Dashboard 前端
-
-1. 优先 `POST /api/v1/auth/login`，所有 `/api/v1` 的 `fetch` 带 `credentials: 'include'`。
-2. 启动时调用 `GET /api/v1/auth/me`。`200` 已登录，`401` 显示登录页。
-3. 保留 `Authorization: Bearer <token>` 作为可选回退（静态令牌或 API Key）。
-4. 踢人 / 发布 / 插件按 `role !== 'viewer'` 门控；用户 / Key / 审计按 `role === 'admin'`。
-5. 不要存储密码。API Key 明文只在创建时展示一次。
-
-## 列表分页元数据
-
-仪表盘使用的列表接口（`GET /clients`、`/clients/offlines`、`/subscriptions`、`/routes`、`/retains`、`/plugins`、`/plugins/{node}`）**默认不改变**原有 JSON 结构。
-
-- **默认响应体：** 裸 JSON 数组（`/retains` 除外，它已返回 `{ items, has_more }`）。
-- **`?format=page`（可选，非破坏性）：** 将同一批行包装为 `{ "items": [...], "offset": N, "limit": N, "truncated": bool, "total": N? }`。后端不知道全集大小时省略 `total`。`/retains?format=page` 保留 `has_more`，并增加 `offset` / `limit` / `truncated`。
-- **`_limit` / `limit`：** 最多返回行数。省略或为 `0` 时使用插件配置 `max_row_limit`（默认 `10000`）。`/retains` 使用不带下划线的 `limit`。
-- **`_offset` / `offset`：** 可选跳过条数。`/retains` 已文档化 `offset`。
-- **响应头（非破坏性）：**
-  - `X-Row-Count`：本次返回的行数（`/retains` 与 `format=page` 为 `items` 长度）。
-  - `X-Truncated`：因 `_limit` / `max_row_limit` 截断时为 `true`（`/retains` 与 `has_more` 一致），否则为 `false`。
-  - `X-Request-Id`：关联 ID。
-
-不发送 `format=page`、忽略未知响应头的旧客户端可继续工作。
-
-## 集群部分失败
-
-集群聚合接口（`/brokers`、`/nodes`、`/features`、`/plugins`、`/stats`、`/metrics` 及其 `/sum` 变体）在部分节点不可达时仍返回 **HTTP 200**，并用**按节点的成功/失败对象**表示，而不是一个布尔值概括整个集群。
-
-成功项（额外的 `ok: true` 向后兼容）：
-
-```json
-{ "ok": true, "node_id": 1, "...": "各接口原有字段" }
-```
-
-失败项（取代原先的裸错误字符串）：
-
-```json
-{ "ok": false, "node_id": 2, "error": "connection refused" }
-```
-
-`/plugins` 使用 `{ ok, node, plugins, error? }`（失败时 `plugins` 为 `[]`）。`/stats` 与 `/metrics` 使用 `{ ok, node: { id }, stats|metrics?, error? }`。`/features` 使用 `FeaturesNodeResult`，并增加 `failed_count` / `partial` / `enabled`。
 
 ## API Endpoints
 
@@ -401,25 +261,14 @@ $ curl -i -X GET "http://localhost:6060/api/v1/nodes/1"
 | Name          | Type | Description |
 |---------------|------|-------------|
 | consistent    | Bool | 所有可达节点功能状态是否完全一致；`false` 说明存在节点配置漂移或插件加载失败 |
-| node_count    | Integer | 成功上报功能状态的节点数 |
-| failed_count  | Integer | 上报失败的节点数 |
-| partial       | Bool | `failed_count > 0` 时为 `true`（HTTP 200，部分集群视图） |
-| enabled       | Object | 各标志在可达节点上的 OR 聚合，供仪表盘**菜单门控**（任一节点支持即展示） |
-| - enabled.retain | Bool | 保留消息（`ferromq-retainer`），门控保留消息菜单 |
-| - enabled.message_storage | Bool | 持久消息存储 |
-| - enabled.session_storage | Bool | 持久会话存储 |
-| - enabled.delayed | Bool | 延迟发布（`$delayed/...`） |
-| - enabled.shared_subscription | Bool | 共享订阅 `$share` |
-| - enabled.auto_subscription | Bool | 自动订阅 |
+| node_count    | Integer | 参与一致性比较的节点数量 |
 | conflicts     | Array | 取值不一致的字段（按值分组列出节点）；`consistent` 为 `true` 时为空数组 |
 | - conflicts[i].feature | String | 功能名称，如 `retain` |
 | - conflicts[i].values  | Array | 取值分组，每组包含 `value`（Bool）与 `node_ids`（Integer Array） |
-| nodes         | Array | 逐节点**结构化**成功/失败（`FeaturesNodeResult`） |
-| - nodes[i].ok         | Bool | 成功为 `true` |
+| nodes         | Array | 逐节点明细；不可达节点为错误字符串且不参与一致性比较 |
 | - nodes[i].node_id    | Integer | 节点ID |
-| - nodes[i].node_name  | String | 节点名称（仅成功） |
-| - nodes[i].features   | Object | 六项功能支持状态（仅成功） |
-| - nodes[i].error      | String | 失败原因（仅失败） |
+| - nodes[i].node_name  | String | 节点名称 |
+| - nodes[i].features   | Object | 六项功能支持状态：`retain`、`message_storage`、`session_storage`、`delayed`、`shared_subscription`、`auto_subscription` |
 
 **Examples:**
 
@@ -431,16 +280,6 @@ $ curl -i -X GET "http://localhost:6060/api/v1/features"
 {
   "consistent": false,
   "node_count": 3,
-  "failed_count": 0,
-  "partial": false,
-  "enabled": {
-    "retain": true,
-    "message_storage": false,
-    "session_storage": false,
-    "delayed": true,
-    "shared_subscription": true,
-    "auto_subscription": false
-  },
   "conflicts": [
     {
       "feature": "retain",
@@ -452,7 +291,6 @@ $ curl -i -X GET "http://localhost:6060/api/v1/features"
   ],
   "nodes": [
     {
-      "ok": true,
       "node_id": 1,
       "node_name": "1@127.0.0.1",
       "features": {
@@ -917,35 +755,6 @@ $ curl -i -X GET "http://localhost:6060/api/v1/retains?topic_filter=%2Fiot%2Fb%2
 
 > 说明：`topic_filter=#`（全量）路径由存储层分页并附带 `remaining_ttl`（剩余秒数）；指定 `topic_filter` 的过滤路径在内存分页，`remaining_ttl` 为 `null`。查询需要启用 `ferromq-retainer` 插件。
 
-同时返回 `X-Row-Count`（`items` 长度）和 `X-Truncated`（与 `has_more` 一致）。
-
-### DELETE /api/v1/retains
-
-按**精确主题**删除一条保留消息。不允许使用通配符 `#` / `+`。删除遵循 MQTT 语义（空 payload 的 retain），并广播到集群其他节点。
-
-**Query String Parameters:**
-
-| Name  | Type   | Required | Description |
-|-------|--------|----------|-------------|
-| topic | String | True     | 具体主题名，例如 `/iot/b/x` |
-
-**Responses:**
-
-| Status | Body | Description |
-|--------|------|-------------|
-| 200 | `ok`（纯文本） | 删除成功 |
-| 400 | `{ "code": 400, "message": "..." }` | 缺少 `topic`，或主题包含通配符 |
-| 404 | `{ "code": 404, "message": "..." }` | 该主题没有保留消息 |
-| 503 | `{ "code": 503, "message": "..." }` | 保留消息存储未启用或不可用 |
-
-**Examples:**
-
-```bash
-$ curl -i -X DELETE "http://localhost:6060/api/v1/retains?topic=%2Fiot%2Fb%2Fx"
-
-ok
-```
-
 ## 消息发布
 
 ### POST /api/v1/mqtt/publish
@@ -1068,7 +877,7 @@ true
 | [0].plugins.homepage  | String           | 插件主页                             |
 | [0].plugins.license   | String           | 插件许可证                            |
 | [0].plugins.repository| String           | 插件仓库                             |
-| [0].plugins.active    | Boolean          | 插件是否已启动。**没有 `running` 字段**，请使用 `active`。 |
+| [0].plugins.active    | Boolean          | 插件是否启动                           |
 | [0].plugins.inited    | Boolean          | 插件是否已经初始化                        |
 | [0].plugins.immutable | Boolean          | 插件是否不可变，不可变插件将不能被停止，不能修改配置，不能重启等 |
 | [0].plugins.attrs     | Json             | 插件其它附加属性                         |
@@ -1148,138 +957,30 @@ $ curl -i -X GET "http://localhost:6060/api/v1/plugins/1/ferromq-web-hook"
 {"active":false,"attrs":null,"descr":null,"immutable":false,"inited":false,"name":"ferromq-web-hook","version":null}
 ```
 
-插件不存在时返回 HTTP 404 和 `{"code":404,"message":"plugin not found: ..."}`（不再返回 JSON `null`）。
-
 ### GET /api/v1/plugins/{node}/{plugin}/config
 
-返回指定节点上指定插件的配置。密钥字段（`password` / `token` / `private_key` / `secret` / `jwt` 及包含这些词的键）默认替换为 `"***"`；仅当 `?reveal=1` **且** 调用者为 `admin` 时才返回明文。GET 仍是裸 JSON 对象（向后兼容）。
+返回指定节点下指定插件名称的插件配置信息。
+
+**Path Parameters:**
+
+| Name | Type | Required | Description |
+| ---- | --------- | ------------|-------------|
+| node | Integer    | True       | 节点ID，如：1    |
+| plugin | String    | True       | 插件名称        |
+
+**Success Response Body (JSON):**
+
+| Name           | Type     | Description |
+|----------------|----------|-------------|
+| {}             | Object   | 插件配置信息      |
+
+**Examples:**
 
 ```bash
-curl -sS "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config"
-# {"http_laddr":"0.0.0.0:6060","http_bearer_token":"***",...}
+$ curl -i -X GET "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config"
+
+{"http_laddr":"0.0.0.0:6060","max_row_limit":10000,"workers":1}
 ```
-
-### PUT /api/v1/plugins/{node}/{plugin}/config
-
-写入插件配置文件（operator+）。请求体可以是 JSON 对象、`{ "toml": "..." }`，或原始 TOML。原子写入 `{plugins.dir}/{plugin}.toml`，覆盖前备份到 `{plugins.dir}/.config-history/{plugin}/{version}.toml`（保留最近 `config_history_keep` 份，默认 10）。
-
-**Query：** `apply=reload`（默认）写入后调用插件 `load_config`；`apply=none` 只写文件。
-
-**`effective` 语义（不会伪装 ferromqd 热重启）：**
-
-| 模式 | 含义 |
-|------|------|
-| `hot` | 已通过插件 `load_config` 在本进程生效。**不是** `ferromqd` 进程重启。 |
-| `reload` | 文件已写入。调用 `PUT .../config/reload`（或带 `apply=reload` 再 PUT）让插件加载。 |
-| `restart_required` | 文件已写入。运行中的进程要用到新值必须重启 `ferromqd`（或不可变插件下次启动）。 |
-
-```bash
-curl -sS -X POST "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config/validate" \
-  -H 'Content-Type: application/json' \
-  -d '{"max_row_limit":5000}'
-
-curl -sS -X PUT "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config?apply=reload" \
-  -H 'Content-Type: application/json' \
-  -d '{"max_row_limit":5000,"http_laddr":"0.0.0.0:6060"}'
-
-curl -sS "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config/versions"
-curl -sS -X POST "http://localhost:6060/api/v1/plugins/1/ferromq-http-api/config/rollback/1710000000000?apply=reload"
-```
-
-审计动作：`plugin_config_update`、`plugin_config_rollback`。原有 GET / reload / load / unload 不变。
-
-### POST /api/v1/plugins/{node}/{plugin}/config/validate
-
-与 PUT 相同的请求体，只校验不落盘。
-
-### GET /api/v1/plugins/{node}/{plugin}/config/versions
-
-最近 N 份备份，最新在前。
-
-### POST /api/v1/plugins/{node}/{plugin}/config/rollback/{version}
-
-回滚到指定备份（operator+）。
-
-### Broker / listener / log（`ferromq.toml`）
-
-先提供只读总览。可写的 `mqtt` / `listener` / `log` 只改文件，**始终**返回 `effective=restart_required`，不会热重启 `ferromqd`。
-
-```bash
-curl -sS "http://localhost:6060/api/v1/broker/config"
-curl -sS -b cookie.txt -X PUT "http://localhost:6060/api/v1/broker/config/mqtt" \
-  -H 'Content-Type: application/json' \
-  -d '{"max_sessions": 10000}'
-```
-
-审计动作：`broker_config_update`、`broker_config_rollback`。
-
-## 访问控制与集成管理（P5）
-
-在 P4 插件配置写入 + `load_config` 之上的结构化 REST。`?node=` 选节点（默认本机）。写入默认 `apply=reload`（进程内 `load_config`，`effective=hot`，**不是** `ferromqd` 重启）。密钥与 URL userinfo 默认 `***`，仅 `?reveal=1` 且 admin 可见。viewer 只读，operator+ 可写。
-
-FerroMQ **没有**独立黑名单 / 连接策略插件。`GET /api/v1/blacklist` 返回 `available: false`，并指向 ACL `control=connect` 规则。
-
-### ACL（`ferromq-acl`）
-
-```bash
-curl -sS http://127.0.0.1:6060/api/v1/acl/rules
-curl -sS -X POST http://127.0.0.1:6060/api/v1/acl/rules \
-  -H 'Content-Type: application/json' \
-  -d '{"access":"deny","who":{"ipaddr":"10.1.2.3"},"control":"connect"}'
-```
-
-### Webhook（`ferromq-web-hook`）
-
-```bash
-curl -sS http://127.0.0.1:6060/api/v1/webhooks
-curl -sS -X POST http://127.0.0.1:6060/api/v1/webhooks/urls \
-  -H 'Content-Type: application/json' \
-  -d '{"url":"https://hooks.example.com/mqtt"}'
-curl -sS -X POST http://127.0.0.1:6060/api/v1/webhooks/test \
-  -H 'Content-Type: application/json' \
-  -d '{"url":"https://hooks.example.com/mqtt"}'
-```
-
-测试是 **TCP 连通性 stub**，不会发 HTTP POST（SSRF）。`file://` 可写入配置，但不能用于 test。
-
-### Bridge
-
-```bash
-curl -sS http://127.0.0.1:6060/api/v1/bridges
-curl -sS http://127.0.0.1:6060/api/v1/bridges/ferromq-bridge-egress-mqtt
-curl -sS -X PUT "http://127.0.0.1:6060/api/v1/bridges/ferromq-bridge-egress-mqtt?apply=reload" \
-  -H 'Content-Type: application/json' \
-  -d '{"bridges":[{"enable":true,"name":"b1","server":"tcp://127.0.0.1:2883"}]}'
-```
-
-状态/错误来自已加载插件的 `attrs()`，不会虚构插件没有的能力。
-
-## 诊断与集群操作（P6）
-
-只暴露 FerroMQ **实际具备** 的能力。缺口返回结构化 `available: false`（写操作为 HTTP 501），不编造数据源。viewer 只读；operator+ 可确认告警、尝试集群写入。既有 `/brokers`、`/nodes`、`/health/check`、`/features`、`/stats`、`/metrics` 保持兼容；`/brokers` 与 `/nodes` 增加附加字段 `cluster`。
-
-| 端点 | 真实性 |
-|------|--------|
-| `GET /api/v1/alarms` / `/alarms/history` | **真实（派生）。** 内存总线，来源为健康检查、功能不一致 / 部分失败、不可达节点。进程重启丢失。没有独立告警插件。 |
-| `POST /api/v1/alarms/{id}/acknowledge` | **真实。** 确认当前告警。审计：`alarm_acknowledge`。 |
-| `GET /api/v1/logs` | **缺口。** 无日志查询插件。指向 `GET /broker/config/log`。 |
-| `GET /api/v1/trace`（含写） | **缺口。** 无报文追踪插件。写入 501。 |
-| `GET /api/v1/slow-subs` | **缺口。** 无慢订阅时延统计。 |
-| `GET /api/v1/topic-metrics` | **部分。** `available: true`，`kind: route_derived`。订阅数来自主题路由（同 `/routes`）。**没有按主题的速率。** 仅当加载 `ferromq-sys-topic` 时列出 `$SYS/brokers/{id}/stats\|metrics`。 |
-| `GET /api/v1/cluster` | **真实（只读拓扑）。** `mode`：`standalone` / `raft` / `broadcast`。`membership.join` / `leave` 标明写接口是否存在。 |
-| `POST /api/v1/cluster/join` | **501。** `Raft::join` 只在 `ferromq-cluster-raft` 启动时消费（`raft_peer_addrs`）。`details.nodes` 始终为按节点结果。 |
-| `POST /api/v1/cluster/leave` | **仅 Raft。** 转发 `Plugin::send({"op":"leave"})` → `Mailbox::leave`（本节点）。broadcast / 单机为 501。始终按节点返回。审计：`cluster_leave`。 |
-
-```bash
-curl -sS http://127.0.0.1:6060/api/v1/alarms
-curl -sS http://127.0.0.1:6060/api/v1/logs
-# {"available":false,"kind":"logs",...}
-curl -sS http://127.0.0.1:6060/api/v1/cluster
-curl -sS -X POST http://127.0.0.1:6060/api/v1/cluster/join
-# HTTP 501，details.nodes 为按节点结果
-```
-
-`GET /brokers` / `GET /nodes` 增加 `cluster: { mode, plugin, leader_id, role, peers }`，不删除原有字段。
 
 ### PUT /api/v1/plugins/{node}/{plugin}/config/reload
 
