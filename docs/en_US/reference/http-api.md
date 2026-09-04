@@ -16,7 +16,8 @@ http_laddr = "0.0.0.0:6060"
 # Maximum number of rows returned in list queries
 max_row_limit = 10_000
 
-# Log HTTP requests
+# Log HTTP requests (auth bodies omitted; secrets/URL userinfo redacted;
+# Authorization / Cookie headers are never logged)
 http_request_log = false
 
 # Message expiry interval
@@ -25,17 +26,26 @@ message_expiry_interval = "5m"
 # Prometheus metrics cache interval
 prometheus_metrics_cache_interval = "5s"
 
-# Optional Bearer token authentication
+# Optional Bearer token authentication (operator / automation)
 # http_bearer_token = "your-secret-token"
+
+# Dashboard session login (P3a). First login or POST /api/v1/auth/init
+# bootstraps the admin; user/API-key hashes are persisted per node.
+# dashboard_admin_username = "admin"
+# dashboard_admin_password = "change-me"
+# dashboard_auth_file = "/var/lib/ferromq/dashboard-auth.json"
+# dashboard_allow_anonymous_admin = false # unsafe legacy opt-in
+# audit_max_events = 10000
+# audit_file = "/var/log/ferromq/http-api-audit.jsonl"
 ```
 
-### Authentication (Optional)
+### Authentication
 
-If `http_bearer_token` is set, all requests must include:
-
-```
-Authorization: Bearer <your-secret-token>
-```
+- **Session:** `POST /api/v1/auth/login` `{ username, password }` → `ferromq_session` cookie (`HttpOnly`, `SameSite=Lax`). Role is read live from the user store (deleted user → 401). Cookie-authenticated unsafe methods check `Origin`/`Referer` against `Host` when present. Reverse proxies must preserve the original public `Host` (FerroMQ does not trust `X-Forwarded-Host`). If Host is rewritten, use Bearer / API key. Also `POST /logout`, `GET /me`, `POST /change-password` (revokes other sessions), `POST /init`.
+- **Bearer:** `Authorization: Bearer <http_bearer_token>` is still a superuser admin credential (username `operator`). Created API keys also use Bearer with a bound role.
+- **Open access:** if no credential or persisted identity exists, reads stay open as anonymous `viewer`. Anonymous admin requires the unsafe `dashboard_allow_anonymous_admin = true` opt-in.
+- **Roles:** `admin` manages users / keys / audit / broker config write / `?reveal=1`; `operator` can kick / publish / plugin config write+reload; `viewer` is read-only (`403`, secrets redacted).
+- **Scope:** http-api only. MQTT client auth plugins are unchanged. User/API-key hashes are persisted per node; sessions remain process-local (use sticky sessions in a cluster).
 
 ## Base URL
 
@@ -49,7 +59,11 @@ List all available endpoints.
 
 ```
 GET /api/v1
+GET /api/v1/openapi.json
+GET /api/v1/docs
 ```
+
+`GET /api/v1/openapi.json` is the OpenAPI 3 contract (valid for `openapi-typescript` / orval). `GET /api/v1/docs` is a Swagger UI shell.
 
 ---
 
@@ -92,12 +106,85 @@ GET /api/v1/features/{id}
 Returns the supported feature state of every cluster node (`retain`, `message_storage`, `session_storage`, `delayed`, `shared_subscription`, `auto_subscription`), plus a cluster-wide consistency summary:
 
 - `consistent`: whether all reachable nodes agree on every feature flag
+- `failed_count` / `partial`: unreachable nodes (HTTP 200, structured per-node `{ ok, error }`)
+- `enabled`: OR of each flag across reachable nodes (dashboard menu gating)
 - `conflicts`: fields with inconsistent values, grouped by value with the affected node ids
-- `nodes`: per-node details; unreachable nodes appear as error strings and are excluded from the comparison
+- `nodes`: per-node `{ ok, node_id, features? / error? }`
+
+Machine-readable contract: `GET /api/v1/openapi.json` (UI: `GET /api/v1/docs`).
 
 A `features inconsistent across cluster` warning log is emitted when an inconsistency is detected.
 
 ---
+
+## 2b. Users, API keys, audit (admin)
+
+```
+GET    /api/v1/users
+POST   /api/v1/users
+POST   /api/v1/users/{username}/disable
+POST   /api/v1/users/{username}/enable
+GET    /api/v1/api-keys
+POST   /api/v1/api-keys          # secret returned once
+GET    /api/v1/api-keys/{id}
+DELETE /api/v1/api-keys/{id}
+GET    /api/v1/audit             # ?action=&username=&success=&_limit=&_offset=&format=page
+```
+
+See the full [HTTP API](../http-api.md) document for curl examples.
+
+## 2c. Broker config (P4)
+
+```
+GET    /api/v1/broker/config
+GET    /api/v1/broker/config/{mqtt|listener|log}
+PUT    /api/v1/broker/config/{mqtt|listener|log}     # admin; file only
+POST   /api/v1/broker/config/{section}/validate
+GET    /api/v1/broker/config/versions
+POST   /api/v1/broker/config/rollback/{version}      # admin
+```
+
+Always `effective=restart_required`. ferromqd is not hot-restarted.
+
+## 2d. Access control & integrations (P5)
+
+```
+GET/PUT     /api/v1/acl
+GET/POST    /api/v1/acl/rules
+PUT/DELETE  /api/v1/acl/rules/{index}
+GET         /api/v1/auth-providers
+GET/PUT     /api/v1/auth-providers/{http|jwt}
+POST        /api/v1/auth-providers/{name}/test
+GET         /api/v1/blacklist          # available=false (no plugin)
+GET/POST    /api/v1/auto-subscriptions
+PUT/DELETE  /api/v1/auto-subscriptions/{index}
+GET/POST    /api/v1/topic-rewrites
+PUT/DELETE  /api/v1/topic-rewrites/{index}
+GET/PUT     /api/v1/webhooks
+POST        /api/v1/webhooks/urls | /rules | /test
+GET         /api/v1/bridges
+GET/PUT     /api/v1/bridges/{plugin}
+PUT         /api/v1/bridges/{plugin}/load|unload
+```
+
+Writes reuse P4 plugin-config + `load_config`. Webhook/auth-http tests are TCP stubs with SSRF checks (no HTTP fetch).
+
+## 2e. Diagnostics & cluster (P6)
+
+```
+GET         /api/v1/alarms                  # derived in-memory bus (health/features/peers)
+GET         /api/v1/alarms/history
+POST        /api/v1/alarms/{id}/acknowledge
+GET         /api/v1/logs                    # available=false
+GET         /api/v1/trace                   # available=false; writes 501
+GET         /api/v1/slow-subs               # available=false
+GET         /api/v1/topic-metrics           # route-derived subscriber counts
+GET         /api/v1/cluster                 # read-only topology
+POST        /api/v1/cluster/join            # 501 (startup-only); per-node result
+POST        /api/v1/cluster/leave           # raft Plugin::send leave, else 501
+```
+
+`/brokers` and `/nodes` include an additive `cluster` object. See [HTTP API](../http-api.md#diagnostics--cluster-ops-p6) for real vs stub.
 
 ## 3. Client Management
 
@@ -212,6 +299,16 @@ Query parameters:
 
 Returns `{ "items": [...], "has_more": bool }`. The payload is base64-encoded. On the full pagination path (`topic_filter=#`) items include `remaining_ttl` (seconds); on the filter path `remaining_ttl` is `null`. Requires the `ferromq-retainer` plugin.
 
+List endpoints also set `X-Row-Count` and `X-Truncated` response headers (see the full [HTTP API](../http-api.md) document). Failed calls return JSON `{ "code", "message" }`.
+
+### Delete Retained Message
+
+```
+DELETE /api/v1/retains?topic={topic}
+```
+
+`topic` must be a concrete topic (wildcards `#` / `+` are rejected). Success body is the plain string `ok`.
+
 ---
 
 ## 6. MQTT Operations
@@ -301,7 +398,21 @@ GET /api/v1/plugins/{node}/{plugin}
 
 ```
 GET /api/v1/plugins/{node}/{plugin}/config
+GET /api/v1/plugins/{node}/{plugin}/config?reveal=1   # admin only
 ```
+
+Secrets (`password` / `token` / `private_key` / `secret` / `jwt`) are redacted unless `reveal=1` and admin. Body stays a bare JSON object.
+
+### Write / validate / version plugin config (P4)
+
+```
+PUT  /api/v1/plugins/{node}/{plugin}/config            # ?apply=reload|none
+POST /api/v1/plugins/{node}/{plugin}/config/validate
+GET  /api/v1/plugins/{node}/{plugin}/config/versions
+POST /api/v1/plugins/{node}/{plugin}/config/rollback/{version}
+```
+
+JSON object, `{ "toml": "..." }`, or raw TOML. Atomic write + last-N backups. `effective`: `hot` (applied via plugin `load_config`, not a ferromqd restart), `reload` (call PUT .../config/reload), `restart_required` (process restart). See the full [HTTP API](../http-api.md) document for curl examples.
 
 ### Reload Plugin Config
 

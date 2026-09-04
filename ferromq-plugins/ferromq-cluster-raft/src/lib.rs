@@ -466,6 +466,42 @@ impl Plugin for ClusterPlugin {
             }
         })
     }
+
+    /// Dashboard / HTTP API cluster ops (`Plugin::send`).
+    ///
+    /// * `{"op":"status"}` — current Raft mailbox status.
+    /// * `{"op":"leave"}` — `Mailbox::leave` (remove this node from the Raft group).
+    /// * `{"op":"join"}` — rejected: `Raft::join` is consumed at plugin init.
+    async fn send(&self, msg: serde_json::Value) -> Result<serde_json::Value> {
+        let Some(mailbox) = self.raft_mailbox.as_ref() else {
+            return Err(anyhow!("raft mailbox is not initialized"));
+        };
+        let op = msg.get("op").and_then(|v| v.as_str()).unwrap_or("");
+        match op {
+            "status" => {
+                let raft_status = mailbox.status().await.ok();
+                Ok(json!({
+                    "ok": true,
+                    "op": "status",
+                    "raft_status": raft_status,
+                }))
+            }
+            "leave" => {
+                mailbox.leave().await.map_err(|e| anyhow!(e))?;
+                Ok(json!({
+                    "ok": true,
+                    "op": "leave",
+                    "node_id": self.scx.node.id(),
+                    "note": "This node proposed RemoveNode. The process is not stopped.",
+                }))
+            }
+            "join" => Err(anyhow!(
+                "runtime join is not supported; a node joins at ferromq-cluster-raft init from raft_peer_addrs / --raft-peer-addrs"
+            )),
+            "" => Err(anyhow!("cluster send requires {{\"op\":\"status|leave|join\"}}")),
+            other => Err(anyhow!("unknown cluster op: {other}")),
+        }
+    }
 }
 
 /// Parse a string address into a [`SocketAddr`] with retry logic.

@@ -9,7 +9,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-default = ["ferromq-storage"]
+default = ["ferromq-storage", "redb"]
 redb = ["ferromq-storage/redb", "circuit-breaker"]
 sled = ["ferromq-storage/sled", "circuit-breaker"]
 redis = ["ferromq-storage/redis", "circuit-breaker"]
@@ -18,9 +18,10 @@ circuit-breaker = ["ferromq-storage/circuit-breaker"]
 
 [dependencies]
 ferromq = { workspace = true, features = ["plugin", "metrics", "stats", "grpc", "shared-subscription", "retain", "msgstore", "delayed", "auto-subscription"] }
+ferromq-conf.workspace = true
 tokio = { workspace = true, features = ["sync", "time" ] }
 serde = { workspace = true, features = ["derive"] }
-salvo = { version = "0.90", features = ["affix-state", "serve-static"] }
+salvo = { version = "0.90", features = ["affix-state", "serve-static", "cookie", "compression"] }
 ferromq-storage = { workspace = true, default-features = false, features = ["ttl"], optional = true}
 async-trait.workspace = true
 log.workspace = true
@@ -32,5 +33,15 @@ futures.workspace = true
 socket2.workspace = true
 prometheus.workspace = true
 postcard.workspace = true
-rust-embed = "8"
+rust-embed = { version = "8", features = ["include-exclude"] }
 lru = "0.18"
+bcrypt = "0.15"
+sha2 = "0.10"
+rand = { workspace = true }
+time = { workspace = true }
+toml = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+salvo = { version = "0.90", features = ["affix-state", "serve-static", "test", "cookie", "compression"] }

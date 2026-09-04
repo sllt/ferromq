@@ -79,6 +79,7 @@ async fn init_database() -> DefaultStorageDB {
                     path: temp_dir.to_string_lossy().to_string(),
                     ..Default::default()
                 },
+                ..Default::default()
             };
             ferromq_storage::init_db(&cfg)
                 .await
@@ -92,6 +93,7 @@ async fn init_database() -> DefaultStorageDB {
                     path: format!("{}.redb", temp_dir.to_string_lossy()),
                     ..Default::default()
                 },
+                ..Default::default()
             };
             ferromq_storage::init_db(&cfg)
                 .await
@@ -398,7 +400,7 @@ async fn offline_message_queue(db: &DefaultStorageDB) {
 
     for i in 0..10 {
         let msg = OfflineMsg {
-            topic: format!("sensor/temperature"),
+            topic: "sensor/temperature".to_string(),
             payload: format!("value={}", 20.0 + i as f64 * 0.5),
             qos: 1,
             timestamp: 1_720_000_000 + i,
