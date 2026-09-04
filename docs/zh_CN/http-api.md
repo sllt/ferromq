@@ -38,12 +38,14 @@ http_laddr = "0.0.0.0:6060"
 
 ## Dashboard 会话登录（P3a）。配置 `dashboard_admin_password` 后，首次
 ## `POST /api/v1/auth/login`（或 `POST /api/v1/auth/init`）会创建 admin，
-## 并以 bcrypt 哈希保存在内存中。原始 `http_bearer_token` 仍可作为自动化
+## 并持久化保存 bcrypt 哈希。原始 `http_bearer_token` 仍可作为自动化
 ## 超级用户/operator 凭证。
 # dashboard_admin_username = "admin"
 # dashboard_admin_password = "change-me"
 # dashboard_viewer_username = "viewer"
 # dashboard_viewer_password = "change-me-too"
+# dashboard_auth_file = "/var/lib/ferromq/dashboard-auth.json"
+# dashboard_allow_anonymous_admin = false  ## 不安全的旧兼容开关
 # dashboard_cookie_secure = false          ## 仅 HTTPS 时设为 true
 # dashboard_session_idle_timeout = "30m"
 # dashboard_session_max_age = "12h"
@@ -55,8 +57,8 @@ http_laddr = "0.0.0.0:6060"
 # audit_file = "/var/log/ferromq/http-api-audit.jsonl"
 # config_history_keep = 10
 # broker_config_file = "ferromq.toml"
-## 用户 / 会话 / API Key 仅存于本节点内存。重启后按配置重新引导。
-## 集群需粘性会话。
+## 用户和 API Key 哈希持久化；会话仍仅存于本节点内存。
+## 集群各节点使用独立认证存储，浏览器访问需粘性会话。
 
 ## Enable TCP SO_REUSEADDR on the HTTP listener.
 ## Default: true
@@ -173,7 +175,7 @@ HTTP API 接受以下凭证。**MQTT 客户端认证插件不受影响。**
 | 会话 Cookie | `POST /api/v1/auth/login` 提交 `{ "username", "password" }`，设置 `ferromq_session`（`HttpOnly` / `SameSite=Lax`）。每次请求使用用户的**当前**角色；用户删除后会话失效。带 Cookie 的非安全方法在存在 `Origin`/`Referer` 时要求与 `Host` 同源（缺省 Origin 的非浏览器客户端放行；Bearer / API Key 不受此限）。反向代理须**保留原始公网 `Host`**；FerroMQ **不信任** `X-Forwarded-Host`。若代理改写了 `Host`，非浏览器客户端请改用 Bearer / API Key。 | 用户记录上的当前 `admin` / `operator` / `viewer` |
 | 静态 Bearer | `Authorization: Bearer <http_bearer_token>` | 始终为 `admin`（用户名 `operator`） |
 | API Key Bearer | `Authorization: Bearer <fmqk_…>`（`POST /api/v1/api-keys` 创建） | 绑定的角色 |
-| 开放访问 | 未配置 bearer / API Key / `dashboard_admin_password`，且尚无用户 | 匿名 `admin` |
+| 开放访问 | 未配置 bearer / API Key / `dashboard_admin_password`，且无持久化用户 | 匿名 `viewer`（只读）；匿名管理员只能通过不安全兼容开关显式启用 |
 
 无需会话/Bearer 即可访问：`POST /auth/login`、`POST /auth/logout`、`POST /auth/init`、`GET /health/check`、`GET /openapi.json`、`GET /docs`。
 
@@ -187,7 +189,7 @@ HTTP API 接受以下凭证。**MQTT 客户端认证插件不受影响。**
 
 对插件 `ferromq-http-api` 的写入 / 校验 / 回滚 / 重载仅管理员可做（该文件可设置 `http_bearer_token`，解析为 admin）。通用插件 PUT 会对现有 TOML **深合并**：省略或值为 `***` 的密钥会保留，且不会把字面量 `***` 写入文件。
 
-密码以 **bcrypt** 哈希保存；API Key 密钥以 **SHA-256** 哈希保存。均在进程内存中。重启会清空用户 / 会话 / Key。集群需粘性会话。
+密码以 **bcrypt** 哈希保存；API Key 密钥以 **SHA-256** 哈希保存。用户和 Key 哈希写入 `dashboard_auth_file`；未配置时使用插件配置目录下的 `.ferromq-dashboard-auth.json`。会话仍保存在进程内存中；集群浏览器访问需粘性会话。
 
 ### 如何测试
 

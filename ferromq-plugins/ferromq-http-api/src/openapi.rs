@@ -131,6 +131,9 @@ mod tests {
             "SessionUser",
             "LoginRequest",
             "ChangePasswordRequest",
+            "ChangePasswordResult",
+            "InitAdminResult",
+            "OkResult",
             "ConfigWriteResult",
             "ConfigValidateResult",
             "EffectiveMode",
@@ -158,5 +161,15 @@ mod tests {
         for k in ["items", "offset", "limit", "truncated"] {
             assert!(req.contains(&k), "Page.required missing {k}");
         }
+        assert_eq!(
+            spec["paths"]["/api/v1/auth/logout"]["post"]["responses"]["200"]["content"]["application/json"]
+                ["schema"]["$ref"],
+            "#/components/schemas/OkResult"
+        );
+        assert_eq!(
+            spec["paths"]["/api/v1/auth/init"]["post"]["responses"]["200"]["content"]["application/json"]
+                ["schema"]["$ref"],
+            "#/components/schemas/InitAdminResult"
+        );
     }
 }

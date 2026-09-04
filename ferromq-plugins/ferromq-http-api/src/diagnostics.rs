@@ -517,7 +517,10 @@ pub(crate) async fn topic_metrics_get(
     };
     let requested = req.query::<usize>("_limit").or_else(|| req.query::<usize>("limit")).unwrap_or(0);
     let paging = ListPaging::from_request(req, requested, max_row_limit);
-    let routes = scx.extends.router().await.gets(paging.fetch_limit).await;
+    // Group before applying topic pagination. Fetching only offset+limit raw
+    // routes made counts incomplete and applied the offset twice.
+    let routes = scx.extends.router().await.gets(max_row_limit).await;
+    let source_truncated = routes.len() >= max_row_limit;
 
     let mut by_topic: HashMap<String, (usize, Vec<NodeId>)> = HashMap::new();
     for r in routes {
@@ -543,7 +546,8 @@ pub(crate) async fn topic_metrics_get(
         let tb = b.get("topic").and_then(|v| v.as_str()).unwrap_or("");
         ta.cmp(tb)
     });
-    let truncated = paging.fetch_limit > 0 && items.len() >= paging.fetch_limit;
+    let total = items.len();
+    let truncated = source_truncated || paging.offset.saturating_add(paging.page_size) < total;
     let page: Vec<Value> = items.into_iter().skip(paging.offset).take(paging.page_size).collect();
 
     let sys_topic = plugin_status(&scx, PLUGIN_SYS_TOPIC).await;
@@ -573,7 +577,9 @@ pub(crate) async fn topic_metrics_get(
         "items": page,
         "offset": paging.offset,
         "limit": paging.page_size,
+        "total": total,
         "truncated": truncated,
+        "source_truncated": source_truncated,
     })));
     Ok(())
 }
@@ -948,7 +954,9 @@ mod tests {
 
     async fn open_service() -> Service {
         let scx = ServerContext::new().node_id(1).busy_check_enable(false).build().await;
-        let cfg = Arc::new(RwLock::new(test_cfg()));
+        let mut cfg = test_cfg();
+        cfg.dashboard_allow_anonymous_admin = true;
+        let cfg = Arc::new(RwLock::new(cfg));
         Service::new(route(scx, cfg, None, prome::Monitor::new(), None))
     }
 
@@ -1034,6 +1042,8 @@ mod tests {
         assert_eq!(tm_body["available"], true);
         assert_eq!(tm_body["kind"], "route_derived");
         assert!(tm_body["items"].is_array());
+        assert!(tm_body["total"].is_number());
+        assert!(tm_body["source_truncated"].is_boolean());
         assert_eq!(tm_body["sys_topic"]["plugin"], PLUGIN_SYS_TOPIC);
         assert_eq!(tm_body["sys_topic"]["active"], false);
 
@@ -1170,7 +1180,9 @@ mod tests {
             })
             .await
             .unwrap();
-        let cfg = Arc::new(RwLock::new(test_cfg()));
+        let mut cfg = test_cfg();
+        cfg.dashboard_allow_anonymous_admin = true;
+        let cfg = Arc::new(RwLock::new(cfg));
         let svc = Service::new(route(scx, cfg, None, prome::Monitor::new(), None));
 
         let mut cluster = TestClient::get("http://127.0.0.1:0/api/v1/cluster").send(&svc).await;

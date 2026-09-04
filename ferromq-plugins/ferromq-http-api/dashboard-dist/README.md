@@ -11,8 +11,8 @@ Production build of the React admin console from
 | Field | Value |
 |-------|-------|
 | Repository | https://github.com/sllt/ferromq-dashboard |
-| Ref | `dev` |
-| Commit | `b38456ae71200f74eb776613b49c95c597ad2cdb` |
+| Ref | `92a5d01c7bfacb25e533f7e5b77e2aa3bbddb06b` |
+| Commit | `92a5d01c7bfacb25e533f7e5b77e2aa3bbddb06b` |
 | UI | React 19 + Vite (`base: './'`) + Hash Router (`#/overview`) |
 
 Do **not** copy `node_modules` here. Only the Vite `dist/` output
@@ -23,6 +23,10 @@ Do **not** copy `node_modules` here. Only the Vite `dist/` output
 From the FerroMQ repo root (Node 20+, pnpm 9+):
 
 ```bash
+# Reproduce the embedded commit:
+./scripts/sync-dashboard-dist.sh
+
+# Explicitly refresh from the moving development branch:
 FERROMQ_DASHBOARD_REF=dev ./scripts/sync-dashboard-dist.sh
 ```
 

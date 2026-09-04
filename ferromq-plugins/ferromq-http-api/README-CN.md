@@ -45,9 +45,11 @@ ferromq_http_api::register_named(&scx, "ferromq-http-api", true, false).await?;
 | `http_reuseport` | `bool` | `false` | 启用 `SO_REUSEPORT` socket 选项（仅 Unix） |
 | `http_bearer_token` | `string` | — | HTTP API Bearer 令牌认证（可选；视为 admin/operator） |
 | `dashboard_admin_username` | `string` | `"admin"` | 尚无 Dashboard 用户时的引导管理员用户名 |
-| `dashboard_admin_password` | `string` | — | 引导管理员密码（首次登录 / `/auth/init` 时 bcrypt 哈希，从不存明文） |
+| `dashboard_admin_password` | `string` | — | 配置中提供的引导密码；持久化认证文件只保存 bcrypt 哈希 |
 | `dashboard_viewer_username` | `string` | — | 可选引导只读用户名 |
 | `dashboard_viewer_password` | `string` | — | 可选引导只读密码 |
+| `dashboard_auth_file` | `string` | 插件配置目录下的 `.ferromq-dashboard-auth.json` | 可选的用户/API Key 哈希持久化文件 |
+| `dashboard_allow_anonymous_admin` | `bool` | `false` | 不安全的旧兼容开关；匿名访问默认只读 |
 | `dashboard_cookie_secure` | `bool` | `false` | 会话 Cookie 是否设置 `Secure`（HTTPS 时启用）。Cookie CSRF 用 Origin/Referer 对照 Host；反向代理须保留原始公网 Host（不信任 `X-Forwarded-Host`）。若 Host 被改写，请用 Bearer / API Key |
 | `dashboard_session_idle_timeout` | `string` | `"30m"` | 会话空闲过期 |
 | `dashboard_session_max_age` | `string` | `"12h"` | 会话绝对寿命 |
@@ -275,9 +277,9 @@ HTTP API 接受两种凭证（**不影响 MQTT 客户端认证插件**）：
 - **会话 Cookie** — `POST /api/v1/auth/login` 提交 `{ username, password }`。Cookie `ferromq_session` 为 `HttpOnly`、`SameSite=Lax`，`dashboard_cookie_secure` 为 true 时带 `Secure`。角色：`admin`（用户 / Key / 审计 + 写操作）、`operator`（踢人 / 发布 / 插件）、`viewer`（只读）。
 - **Bearer 令牌** — `Authorization: Bearer <http_bearer_token>` 仍是自动化用的超级用户 admin 凭证（用户名 `operator`）。
 - **API Key** — `POST /api/v1/api-keys`（admin）。密钥以 SHA-256 哈希保存，明文只返回一次；用 `Authorization: Bearer <secret>` 认证，角色随 Key 绑定。
-- **开放访问** — 未配置 bearer 与 `dashboard_admin_password`（且尚无用户/Key）时保持开放（匿名 admin）。
+- **开放访问** — 未配置凭证且没有持久化用户时，只读接口以匿名 `viewer` 开放。匿名 admin 必须显式设置不安全的 `dashboard_allow_anonymous_admin = true`。
 
-引导：尚无用户时，首次匹配的登录或 `POST /api/v1/auth/init` 会创建配置中的 admin（及可选 viewer）。密码以 bcrypt 哈希保存在**进程内存**（重启丢失；集群节点不共享会话，需粘性会话）。健康检查、OpenAPI、login/logout/init 保持公开。仅 admin：`GET/POST /users`、`GET/POST/DELETE /api-keys`、`GET /audit`。
+引导：尚无用户时，首次匹配的登录或 `POST /api/v1/auth/init` 会创建配置中的 admin（及可选 viewer）。用户密码哈希和 API Key 哈希持久化到 `dashboard_auth_file`；未配置时使用插件配置目录下的 `.ferromq-dashboard-auth.json`。会话仍仅存于进程内存，集群浏览器访问需粘性会话。健康检查、OpenAPI、login/logout/init 保持公开。仅 admin：`GET/POST /users`、`GET/POST/DELETE /api-keys`、`GET /audit`。
 
 ## Dashboard
 

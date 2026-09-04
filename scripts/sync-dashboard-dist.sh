@@ -7,7 +7,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$ROOT/ferromq-plugins/ferromq-http-api/dashboard-dist"
 REPO="${FERROMQ_DASHBOARD_REPO:-https://github.com/sllt/ferromq-dashboard}"
-REF="${FERROMQ_DASHBOARD_REF:-dev}"
+PINNED_REF=""
+if [ -f "$DEST/COMMIT" ]; then
+  PINNED_REF="$(tr -d '[:space:]' < "$DEST/COMMIT")"
+fi
+# No override means reproduce the currently embedded commit. To refresh from
+# the moving development branch, pass FERROMQ_DASHBOARD_REF=dev explicitly.
+REF="${FERROMQ_DASHBOARD_REF:-${PINNED_REF:-dev}}"
 WORKDIR="${TMPDIR:-/tmp}/ferromq-dashboard-sync-$$"
 
 if ! command -v pnpm >/dev/null 2>&1; then
@@ -24,8 +30,11 @@ fi
 cleanup() { rm -rf "$WORKDIR"; }
 trap cleanup EXIT
 
-echo "Cloning $REPO @ $REF ..."
-git clone --depth 1 --branch "$REF" "$REPO" "$WORKDIR"
+echo "Fetching $REPO @ $REF ..."
+git init -q "$WORKDIR"
+git -C "$WORKDIR" remote add origin "$REPO"
+git -C "$WORKDIR" fetch --depth 1 origin "$REF"
+git -C "$WORKDIR" checkout -q --detach FETCH_HEAD
 SHA="$(git -C "$WORKDIR" rev-parse HEAD)"
 echo "Source commit: $SHA"
 
@@ -39,6 +48,7 @@ mkdir -p "$DEST"
 # Replace built files but keep this README regenerated below.
 find "$DEST" -mindepth 1 -maxdepth 1 ! -name README.md -exec rm -rf {} +
 cp -a "$WORKDIR/dist/." "$DEST/"
+cp "$WORKDIR/LICENSE" "$DEST/THIRD_PARTY_NOTICES.txt"
 
 cat > "$DEST/README.md" <<EOF
 # Embedded Dashboard assets (\`dashboard-dist/\`)
@@ -66,6 +76,10 @@ Do **not** copy \`node_modules\` here. Only the Vite \`dist/\` output
 From the FerroMQ repo root (Node 20+, pnpm 9+):
 
 \`\`\`bash
+# Reproduce the embedded commit:
+./scripts/sync-dashboard-dist.sh
+
+# Explicitly refresh from the moving development branch:
 FERROMQ_DASHBOARD_REF=dev ./scripts/sync-dashboard-dist.sh
 \`\`\`
 

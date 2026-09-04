@@ -20,9 +20,9 @@ use ferromq::Result;
 
 use super::audit;
 use super::config_mgmt::{
-    assign_object_preserving_secrets, deny_reveal_if_needed, json_to_toml, local_write_plugin_lenient,
-    merge_plugin_patch, parse_apply, read_local_plugin_file_json, redact_secrets, toml_to_json, wants_reveal,
-    WriteResult,
+    assign_object_preserving_secrets, config_write_guard, deny_reveal_if_needed, json_to_toml,
+    local_write_plugin_lenient, merge_plugin_patch, parse_apply, read_local_plugin_file_json, redact_secrets,
+    toml_to_json, wants_reveal, WriteResult,
 };
 use super::plugin;
 use super::response::{
@@ -111,31 +111,49 @@ fn wants_allow_private(req: &Request) -> bool {
         .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
 }
 
-fn plugin_reloadable(scx: &ServerContext, name: &str) -> Option<bool> {
-    scx.plugins.get(name).map(|entry| !entry.immutable() && entry.inited())
+fn plugin_reloadable(info: Option<&Value>) -> Option<bool> {
+    let info = info?;
+    Some(
+        !info.get("immutable").and_then(Value::as_bool).unwrap_or(false)
+            && info.get("inited").and_then(Value::as_bool).unwrap_or(false),
+    )
 }
 
-async fn plugin_info_json(scx: &ServerContext, name: &str) -> Option<Value> {
-    plugin::get_plugin(scx, name).await.ok().flatten().and_then(|p| p.to_json().ok())
+async fn plugin_info_json(
+    scx: &ServerContext,
+    node_id: NodeId,
+    name: &str,
+    message_type: u64,
+) -> Result<Option<Value>> {
+    crate::api::_node_plugin_info(scx, node_id, name, message_type).await
 }
 
 /// Whether a host/IP is unsafe for server-side fetch (SSRF).
 pub(crate) fn is_blocked_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v) => {
+            let octets = v.octets();
             v.is_private()
                 || v.is_loopback()
                 || v.is_link_local()
                 || v.is_unspecified()
                 || v.is_broadcast()
-                || v.octets() == [169, 254, 169, 254]
-                || v.octets()[0] == 0
+                || v.is_multicast()
+                || octets[0] == 0
+                || (octets[0] == 100 && (64..=127).contains(&octets[1])) // shared/CGNAT, incl. cloud metadata
+                || (octets[0] == 192 && octets[1] == 0 && (octets[2] == 0 || octets[2] == 2))
+                || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19))
+                || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+                || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+                || octets[0] >= 240
         }
         IpAddr::V6(v) => {
             v.is_loopback()
                 || v.is_unspecified()
                 || v.is_unique_local()
+                || v.is_multicast()
                 || (v.segments()[0] & 0xffc0) == 0xfe80
+                || (v.segments()[0] == 0x2001 && v.segments()[1] == 0x0db8)
                 || v.to_ipv4_mapped().is_some_and(|m| is_blocked_ip(IpAddr::V4(m)))
         }
     }
@@ -317,30 +335,6 @@ async fn tcp_probe(
         Ok(Err(e)) => (false, Some(start.elapsed().as_millis() as u64), Some(e.to_string())),
         Err(_) => (false, Some(timeout.as_millis() as u64), Some("tcp connect timed out".into())),
     }
-}
-
-fn unbalanced_regex_parens(re: &str) -> bool {
-    let mut depth = 0i32;
-    let mut escaped = false;
-    for c in re.chars() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if c == '\\' {
-            escaped = true;
-            continue;
-        }
-        if c == '(' {
-            depth += 1;
-        } else if c == ')' {
-            depth -= 1;
-            if depth < 0 {
-                return true;
-            }
-        }
-    }
-    depth != 0
 }
 
 async fn read_plugin_json(
@@ -564,7 +558,7 @@ fn validate_acl_topics(topics: &Value) -> std::result::Result<(), String> {
         match t {
             Value::String(s) if !s.is_empty() => {}
             Value::Object(m) => {
-                if !m.get("eq").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()) {
+                if m.get("eq").and_then(|v| v.as_str()).is_none_or(|s| s.is_empty()) {
                     return Err("topic object must be { \"eq\": \"<topic>\" }".into());
                 }
             }
@@ -609,17 +603,16 @@ async fn acl_doc(scx: &ServerContext, node_id: NodeId, message_type: u64) -> Res
     }
 }
 
-fn acl_envelope(scx: &ServerContext, node_id: NodeId, doc: &Value, reveal: bool) -> Value {
+fn acl_envelope(node_id: NodeId, doc: &Value, info: Option<&Value>, reveal: bool) -> Value {
     let rules = doc.get("rules").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let views: Vec<Value> = rules.iter().enumerate().map(|(i, r)| acl_rule_view(r, i)).collect();
-    let info = futures_placeholder_info(scx, PLUGIN_ACL);
     let mut body = json!({
         "plugin": PLUGIN_ACL,
         "node": node_id,
-        "available": info.0 || doc.get("rules").is_some(),
-        "active": info.1,
-        "inited": info.2,
-        "reloadable": plugin_reloadable(scx, PLUGIN_ACL),
+        "available": info.is_some(),
+        "active": info.and_then(|v| v.get("active")).and_then(Value::as_bool).unwrap_or(false),
+        "inited": info.and_then(|v| v.get("inited")).and_then(Value::as_bool).unwrap_or(false),
+        "reloadable": plugin_reloadable(info),
         "disconnect_if_pub_rejected": doc.get("disconnect_if_pub_rejected").cloned().unwrap_or(json!(true)),
         "priority": doc.get("priority").cloned().unwrap_or(json!(10)),
         "rules": views,
@@ -627,13 +620,6 @@ fn acl_envelope(scx: &ServerContext, node_id: NodeId, doc: &Value, reveal: bool)
     });
     body = prepare_body(body, reveal);
     body
-}
-
-fn futures_placeholder_info(scx: &ServerContext, name: &str) -> (bool, bool, bool) {
-    match scx.plugins.get(name) {
-        Some(e) => (true, e.active(), e.inited()),
-        None => (false, false, false),
-    }
 }
 
 #[handler]
@@ -655,7 +641,10 @@ pub(crate) async fn acl_get(
     };
     let message_type = cfg.read().await.message_type;
     match acl_doc(&scx, node_id, message_type).await {
-        Ok(doc) => res.render(Json(acl_envelope(&scx, node_id, &doc, wants_reveal(req)))),
+        Ok(doc) => {
+            let info = plugin_info_json(&scx, node_id, PLUGIN_ACL, message_type).await.ok().flatten();
+            res.render(Json(acl_envelope(node_id, &doc, info.as_ref(), wants_reveal(req))));
+        }
         Err(e) => render_api_error(res, status_for_plugin_error(&e), e.to_string()),
     }
     Ok(())
@@ -817,6 +806,7 @@ async fn mutate_doc<F>(
 where
     F: FnOnce(&mut Value, &Value) -> std::result::Result<Value, String>,
 {
+    let _write_guard = config_write_guard().await;
     let (scx, cfg) = scx_cfg(depot)?;
     let node_id = match resolve_node(req, &scx) {
         Ok(n) => n,
@@ -887,7 +877,10 @@ where
                 Some(json!({"effective": r.effective, "applied": r.applied, "diff": r.diff})),
             )
             .await;
-            res.render(Json(wrap_write(r, extra)));
+            // Mutation responses must never turn an operator-level write into
+            // a secret-reveal side channel (for example ACL who.password or
+            // webhook URL userinfo restored from the existing config).
+            res.render(Json(prepare_body(wrap_write(r, extra), false)));
         }
         Err(e) => {
             audit::record(
@@ -925,7 +918,7 @@ pub(crate) async fn auth_providers_list(
     depot: &mut Depot,
     res: &mut Response,
 ) -> std::result::Result<(), salvo::Error> {
-    let (scx, _cfg) = scx_cfg(depot)?;
+    let (scx, cfg) = scx_cfg(depot)?;
     let node_id = match resolve_node(req, &scx) {
         Ok(n) => n,
         Err(e) => {
@@ -933,10 +926,11 @@ pub(crate) async fn auth_providers_list(
             return Ok(());
         }
     };
+    let message_type = cfg.read().await.message_type;
     let mut providers = Vec::new();
     for (name, kind) in AUTH_PROVIDERS {
-        let info = plugin_info_json(&scx, name).await;
-        let (available, active, inited, attrs) = match info {
+        let info = plugin_info_json(&scx, node_id, name, message_type).await.ok().flatten();
+        let (available, active, inited, attrs) = match info.as_ref() {
             Some(v) => (
                 true,
                 v.get("active").and_then(|x| x.as_bool()).unwrap_or(false),
@@ -952,7 +946,7 @@ pub(crate) async fn auth_providers_list(
             "available": available,
             "active": active,
             "inited": inited,
-            "reloadable": plugin_reloadable(&scx, name),
+            "reloadable": plugin_reloadable(info.as_ref()),
             "attrs": attrs,
         }));
     }
@@ -999,7 +993,7 @@ pub(crate) async fn auth_provider_get(
             return Ok(());
         }
     };
-    let info = plugin_info_json(&scx, &name).await;
+    let info = plugin_info_json(&scx, node_id, &name, message_type).await.ok().flatten();
     let mut body = json!({
         "name": name,
         "kind": auth_kind(&name),
@@ -1007,7 +1001,7 @@ pub(crate) async fn auth_provider_get(
         "available": info.is_some(),
         "active": info.as_ref().and_then(|v| v.get("active")).cloned().unwrap_or(json!(false)),
         "inited": info.as_ref().and_then(|v| v.get("inited")).cloned().unwrap_or(json!(false)),
-        "reloadable": plugin_reloadable(&scx, &name),
+        "reloadable": plugin_reloadable(info.as_ref()),
         "attrs": info.as_ref().and_then(|v| v.get("attrs")).cloned().unwrap_or(Value::Null),
         "config": doc,
         "note": "PUT writes the plugin TOML via P4 and hot-applies with load_config when possible.",
@@ -1399,9 +1393,7 @@ pub(crate) fn normalize_rewrite(input: &Value) -> std::result::Result<Value, Str
     });
     if let Some(re) = input.get("regex").and_then(|v| v.as_str()) {
         if !re.is_empty() {
-            if unbalanced_regex_parens(re) {
-                return Err("invalid regex: unbalanced parentheses".into());
-            }
+            regex::Regex::new(re).map_err(|e| format!("invalid regex: {e}"))?;
             out["regex"] = json!(re);
         }
     }
@@ -1518,14 +1510,14 @@ async fn list_plugin_array(
             if !wants_reveal(req) {
                 items = items.into_iter().map(|v| prepare_body(v, false)).collect();
             }
-            let info = futures_placeholder_info(&scx, plugin);
+            let info = plugin_info_json(&scx, node_id, plugin, message_type).await.ok().flatten();
             let body = json!({
                 "plugin": plugin,
                 "node": node_id,
-                "available": info.0,
-                "active": info.1,
-                "inited": info.2,
-                "reloadable": plugin_reloadable(&scx, plugin),
+                "available": info.is_some(),
+                "active": info.as_ref().and_then(|v| v.get("active")).and_then(Value::as_bool).unwrap_or(false),
+                "inited": info.as_ref().and_then(|v| v.get("inited")).and_then(Value::as_bool).unwrap_or(false),
+                "reloadable": plugin_reloadable(info.as_ref()),
                 "items": items,
             });
             res.render(Json(prepare_body(body, wants_reveal(req))));
@@ -1654,14 +1646,14 @@ pub(crate) async fn webhooks_get(
     let message_type = cfg.read().await.message_type;
     match read_plugin_json(&scx, node_id, PLUGIN_WEBHOOK, message_type).await {
         Ok(doc) => {
-            let info = plugin_info_json(&scx, PLUGIN_WEBHOOK).await;
+            let info = plugin_info_json(&scx, node_id, PLUGIN_WEBHOOK, message_type).await.ok().flatten();
             let mut body = json!({
                 "plugin": PLUGIN_WEBHOOK,
                 "node": node_id,
                 "available": info.is_some(),
                 "active": info.as_ref().and_then(|v| v.get("active")).cloned().unwrap_or(json!(false)),
                 "inited": info.as_ref().and_then(|v| v.get("inited")).cloned().unwrap_or(json!(false)),
-                "reloadable": plugin_reloadable(&scx, PLUGIN_WEBHOOK),
+                "reloadable": plugin_reloadable(info.as_ref()),
                 "attrs": info.as_ref().and_then(|v| v.get("attrs")).cloned().unwrap_or(Value::Null),
                 "queue_capacity": doc.get("queue_capacity"),
                 "concurrency_limit": doc.get("concurrency_limit"),
@@ -1970,23 +1962,27 @@ pub(crate) fn bridge_kind(name: &str) -> Value {
     json!({"direction": direction, "transport": transport})
 }
 
-async fn collect_bridge_names(scx: &ServerContext) -> Vec<String> {
+async fn collect_bridge_names(scx: &ServerContext, node_id: NodeId, message_type: u64) -> Vec<String> {
     let mut names: Vec<String> = KNOWN_BRIDGES.iter().map(|s| (*s).to_string()).collect();
-    if let Ok(list) = plugin::get_plugins(scx).await {
+    if let Ok(list) = crate::api::_node_plugins(scx, node_id, message_type).await {
         for p in list {
-            if is_bridge_plugin(&p.name) && !names.iter().any(|n| n == &p.name) {
-                names.push(p.name);
+            if let Some(name) = p.get("name").and_then(Value::as_str) {
+                if is_bridge_plugin(name) && !names.iter().any(|n| n == name) {
+                    names.push(name.to_string());
+                }
             }
         }
     }
-    if let Ok(dir) = scx.plugins.config_dir().ok_or(()) {
-        if let Ok(rd) = std::fs::read_dir(dir) {
-            for ent in rd.flatten() {
-                let fname = ent.file_name();
-                let fname = fname.to_string_lossy();
-                if let Some(stem) = fname.strip_suffix(".toml") {
-                    if is_bridge_plugin(stem) && !names.iter().any(|n| n == stem) {
-                        names.push(stem.to_string());
+    if node_id == scx.node.id() {
+        if let Ok(dir) = scx.plugins.config_dir().ok_or(()) {
+            if let Ok(rd) = std::fs::read_dir(dir) {
+                for ent in rd.flatten() {
+                    let fname = ent.file_name();
+                    let fname = fname.to_string_lossy();
+                    if let Some(stem) = fname.strip_suffix(".toml") {
+                        if is_bridge_plugin(stem) && !names.iter().any(|n| n == stem) {
+                            names.push(stem.to_string());
+                        }
                     }
                 }
             }
@@ -2002,7 +1998,7 @@ pub(crate) async fn bridges_list(
     depot: &mut Depot,
     res: &mut Response,
 ) -> std::result::Result<(), salvo::Error> {
-    let (scx, _cfg) = scx_cfg(depot)?;
+    let (scx, cfg) = scx_cfg(depot)?;
     let node_id = match resolve_node(req, &scx) {
         Ok(n) => n,
         Err(e) => {
@@ -2010,10 +2006,11 @@ pub(crate) async fn bridges_list(
             return Ok(());
         }
     };
-    let names = collect_bridge_names(&scx).await;
+    let message_type = cfg.read().await.message_type;
+    let names = collect_bridge_names(&scx, node_id, message_type).await;
     let mut items = Vec::new();
     for name in names {
-        let info = plugin_info_json(&scx, &name).await;
+        let info = plugin_info_json(&scx, node_id, &name, message_type).await.ok().flatten();
         items.push(json!({
             "name": name,
             "kind": bridge_kind(&name),
@@ -2022,7 +2019,7 @@ pub(crate) async fn bridges_list(
             "active": info.as_ref().and_then(|v| v.get("active")).cloned().unwrap_or(json!(false)),
             "inited": info.as_ref().and_then(|v| v.get("inited")).cloned().unwrap_or(json!(false)),
             "immutable": info.as_ref().and_then(|v| v.get("immutable")).cloned().unwrap_or(json!(false)),
-            "reloadable": plugin_reloadable(&scx, &name),
+            "reloadable": plugin_reloadable(info.as_ref()),
             "attrs": info.as_ref().and_then(|v| v.get("attrs")).cloned().unwrap_or(Value::Null),
         }));
     }
@@ -2060,7 +2057,7 @@ pub(crate) async fn bridge_get(
         }
     };
     let message_type = cfg.read().await.message_type;
-    let info = plugin_info_json(&scx, &name).await;
+    let info = plugin_info_json(&scx, node_id, &name, message_type).await.ok().flatten();
     let doc = match read_plugin_json(&scx, node_id, &name, message_type).await {
         Ok(v) => Some(v),
         Err(e) if e.to_string().contains("not found") => None,
@@ -2081,7 +2078,7 @@ pub(crate) async fn bridge_get(
         "active": info.as_ref().and_then(|v| v.get("active")).cloned().unwrap_or(json!(false)),
         "inited": info.as_ref().and_then(|v| v.get("inited")).cloned().unwrap_or(json!(false)),
         "immutable": info.as_ref().and_then(|v| v.get("immutable")).cloned().unwrap_or(json!(false)),
-        "reloadable": plugin_reloadable(&scx, &name),
+        "reloadable": plugin_reloadable(info.as_ref()),
         "attrs": info.as_ref().and_then(|v| v.get("attrs")).cloned().unwrap_or(Value::Null),
         "config": doc.unwrap_or(json!({})),
         "note": "PUT writes {plugin}.toml via P4. load/unload call the existing plugin start/stop hooks.",
@@ -2257,6 +2254,8 @@ mod tests {
         assert!(validate_callback_url("file:///etc/passwd", false).is_err());
         assert!(validate_callback_url("http://127.0.0.1:8080/x", true).is_ok());
         assert!(is_blocked_ip("192.168.1.1".parse().unwrap()));
+        assert!(is_blocked_ip("100.100.100.200".parse().unwrap()));
+        assert!(is_blocked_ip("198.18.0.1".parse().unwrap()));
         assert!(!is_blocked_ip("1.1.1.1".parse().unwrap()));
         // tcp_probe: lookup_host → reject_blocked_resolved_ips → TcpStream::connect.
         // Unit-test the resolve-then-check helper (no live DNS).
@@ -2342,5 +2341,35 @@ mod tests {
         let r = prepare_body(v, false);
         assert_eq!(r["who"]["password"], "***");
         assert!(!r["urls"][0].as_str().unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn mutation_response_never_reveals_restored_secrets() {
+        let result = WriteResult {
+            ok: true,
+            written: true,
+            applied: true,
+            effective: super::super::config_mgmt::EffectiveMode::Hot,
+            diff: Default::default(),
+            backup: None,
+            apply_error: None,
+            plugin: Some(PLUGIN_ACL.into()),
+            node: Some(1),
+            section: None,
+            note: None,
+        };
+        let body = prepare_body(
+            wrap_write(
+                result,
+                json!({
+                    "removed": ["allow", {"user":"u", "password":"s3cret"}],
+                    "url": "https://user:hunter2@example.com/h",
+                }),
+            ),
+            false,
+        );
+        let rendered = body.to_string();
+        assert!(!rendered.contains("s3cret"));
+        assert!(!rendered.contains("hunter2"));
     }
 }

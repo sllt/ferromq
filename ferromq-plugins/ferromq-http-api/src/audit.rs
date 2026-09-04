@@ -138,12 +138,7 @@ fn request_id_from_depot(depot: &Depot) -> String {
 }
 
 fn client_ip(req: &Request) -> String {
-    let addr = req.remote_addr().to_string();
-    if addr.is_empty() || addr == "unknown" {
-        "unknown".into()
-    } else {
-        addr
-    }
+    req.remote_addr().ip().map(|ip| ip.to_string()).unwrap_or_else(|| "unknown".into())
 }
 
 fn audit_log(depot: &Depot) -> Option<Arc<AuditLog>> {

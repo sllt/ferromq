@@ -18,6 +18,7 @@ circuit-breaker = ["ferromq-storage/circuit-breaker"]
 
 [dependencies]
 ferromq = { workspace = true, features = ["plugin", "metrics", "stats", "grpc", "shared-subscription", "retain", "msgstore", "delayed", "auto-subscription"] }
+ferromq-conf.workspace = true
 tokio = { workspace = true, features = ["sync", "time" ] }
 serde = { workspace = true, features = ["derive"] }
 salvo = { version = "0.90", features = ["affix-state", "serve-static", "cookie", "compression"] }
@@ -39,6 +40,7 @@ sha2 = "0.10"
 rand = { workspace = true }
 time = { workspace = true }
 toml = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }

@@ -30,9 +30,11 @@ prometheus_metrics_cache_interval = "5s"
 # http_bearer_token = "your-secret-token"
 
 # Dashboard session login (P3a). First login or POST /api/v1/auth/init
-# bootstraps the admin (bcrypt, in-memory).
+# bootstraps the admin; user/API-key hashes are persisted per node.
 # dashboard_admin_username = "admin"
 # dashboard_admin_password = "change-me"
+# dashboard_auth_file = "/var/lib/ferromq/dashboard-auth.json"
+# dashboard_allow_anonymous_admin = false # unsafe legacy opt-in
 # audit_max_events = 10000
 # audit_file = "/var/log/ferromq/http-api-audit.jsonl"
 ```
@@ -41,9 +43,9 @@ prometheus_metrics_cache_interval = "5s"
 
 - **Session:** `POST /api/v1/auth/login` `{ username, password }` → `ferromq_session` cookie (`HttpOnly`, `SameSite=Lax`). Role is read live from the user store (deleted user → 401). Cookie-authenticated unsafe methods check `Origin`/`Referer` against `Host` when present. Reverse proxies must preserve the original public `Host` (FerroMQ does not trust `X-Forwarded-Host`). If Host is rewritten, use Bearer / API key. Also `POST /logout`, `GET /me`, `POST /change-password` (revokes other sessions), `POST /init`.
 - **Bearer:** `Authorization: Bearer <http_bearer_token>` is still a superuser admin credential (username `operator`). Created API keys also use Bearer with a bound role.
-- **Open access:** if neither token nor `dashboard_admin_password` is set (and no users/keys), the API stays open.
+- **Open access:** if no credential or persisted identity exists, reads stay open as anonymous `viewer`. Anonymous admin requires the unsafe `dashboard_allow_anonymous_admin = true` opt-in.
 - **Roles:** `admin` manages users / keys / audit / broker config write / `?reveal=1`; `operator` can kick / publish / plugin config write+reload; `viewer` is read-only (`403`, secrets redacted).
-- **Scope:** http-api only. MQTT client auth plugins are unchanged. Users/sessions/keys are in-memory (sticky sessions in a cluster).
+- **Scope:** http-api only. MQTT client auth plugins are unchanged. User/API-key hashes are persisted per node; sessions remain process-local (use sticky sessions in a cluster).
 
 ## Base URL
 

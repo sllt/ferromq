@@ -54,6 +54,18 @@ pub struct PluginConfig {
     #[serde(default)]
     pub dashboard_viewer_password: Option<String>,
 
+    /// Optional persistent dashboard auth store. When unset, production
+    /// derives `.ferromq-dashboard-auth.json` from the plugin config dir.
+    /// The file contains password/API-key hashes, never plaintext secrets.
+    #[serde(default)]
+    pub dashboard_auth_file: Option<String>,
+
+    /// Unsafe legacy compatibility: grant anonymous callers the admin role
+    /// when no authentication is configured. Default is false (anonymous is
+    /// read-only). Do not enable on a network-accessible listener.
+    #[serde(default)]
+    pub dashboard_allow_anonymous_admin: bool,
+
     /// Session cookie name. Default: `ferromq_session`.
     #[serde(default = "PluginConfig::dashboard_cookie_name_default")]
     pub dashboard_cookie_name: String,
@@ -285,6 +297,8 @@ impl PluginConfig {
             || self.dashboard_admin_password != other.dashboard_admin_password
             || self.dashboard_viewer_username != other.dashboard_viewer_username
             || self.dashboard_viewer_password != other.dashboard_viewer_password
+            || self.dashboard_auth_file != other.dashboard_auth_file
+            || self.dashboard_allow_anonymous_admin != other.dashboard_allow_anonymous_admin
             || self.dashboard_cookie_name != other.dashboard_cookie_name
             || self.dashboard_cookie_secure != other.dashboard_cookie_secure
             || self.dashboard_session_idle_timeout != other.dashboard_session_idle_timeout
@@ -305,6 +319,7 @@ impl PluginConfig {
     pub fn restart_enable(&self, other: &Self) -> bool {
         self.http_laddr != other.http_laddr
             || self.dashboard_static_dir != other.dashboard_static_dir
+            || self.dashboard_auth_file != other.dashboard_auth_file
             || self.http_reuseaddr != other.http_reuseaddr
             || self.http_reuseport != other.http_reuseport
     }
@@ -312,7 +327,7 @@ impl PluginConfig {
     /// One-line summary safe for logs: secrets are never included.
     pub fn log_summary(&self) -> String {
         format!(
-            "http_laddr={} auth_bearer={} dashboard_admin_password={} users_bootstrap={} max_row_limit={}",
+            "http_laddr={} auth_bearer={} dashboard_admin_password={} users_bootstrap={} anonymous_role={} auth_store={} max_row_limit={}",
             self.http_laddr,
             if self.http_bearer_token.as_deref().is_some_and(|s| !s.is_empty()) { "set" } else { "unset" },
             if self.dashboard_admin_password.as_deref().is_some_and(|s| !s.is_empty()) {
@@ -321,6 +336,8 @@ impl PluginConfig {
                 "unset"
             },
             self.dashboard_admin_username,
+            if self.dashboard_allow_anonymous_admin { "admin" } else { "viewer" },
+            self.dashboard_auth_file.as_deref().unwrap_or("plugin-config-dir/.ferromq-dashboard-auth.json"),
             self.max_row_limit
         )
     }
@@ -336,6 +353,8 @@ impl fmt::Debug for PluginConfig {
             .field("dashboard_admin_password", &redacted_opt(&self.dashboard_admin_password))
             .field("dashboard_viewer_username", &self.dashboard_viewer_username)
             .field("dashboard_viewer_password", &redacted_opt(&self.dashboard_viewer_password))
+            .field("dashboard_auth_file", &self.dashboard_auth_file)
+            .field("dashboard_allow_anonymous_admin", &self.dashboard_allow_anonymous_admin)
             .field("dashboard_cookie_name", &self.dashboard_cookie_name)
             .field("dashboard_cookie_secure", &self.dashboard_cookie_secure)
             .field("http_request_log", &self.http_request_log)

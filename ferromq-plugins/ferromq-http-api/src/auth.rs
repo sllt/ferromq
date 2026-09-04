@@ -1,8 +1,8 @@
 //! Dashboard session authentication for the HTTP API plugin.
 //!
 //! P3a: username/password login with an HttpOnly session cookie, bcrypt
-//! password hashes, in-memory user + session stores, idle/absolute expiry,
-//! and a simple per-IP login rate limit.
+//! password hashes, durable user/API-key state, process-local sessions,
+//! idle/absolute expiry, and a simple per-IP login rate limit.
 //!
 //! P3b: hashed API keys (Bearer), admin user CRUD, and three roles
 //! (`admin` / `operator` / `viewer`). Compatibility:
@@ -10,11 +10,13 @@
 //! credential (username `operator`, role `admin`). MQTT client auth
 //! plugins are not involved — this module is scoped to http-api only.
 //!
-//! Cluster limitation: users, sessions, and API keys live in process
-//! memory on this node. Restarting the HTTP server drops them (bootstrap
-//! from config again). A load-balanced cluster needs sticky sessions.
+//! Cluster limitation: each node has its own durable user/API-key file and
+//! process-local sessions. A load-balanced cluster still needs sticky sessions.
 
 use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -144,7 +146,7 @@ impl AuthIdentity {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct DashboardUser {
     username: String,
     password_hash: String,
@@ -168,7 +170,7 @@ struct LoginWindow {
     count: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ApiKeyRecord {
     id: String,
     name: String,
@@ -179,27 +181,83 @@ struct ApiKeyRecord {
     last_used_at: Option<i64>,
 }
 
-/// In-memory user + session + API-key + login-rate store (single-node).
+/// Durable dashboard identities. Browser sessions and rate-limit windows stay
+/// process-local; users and API keys must survive an HTTP server restart.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct PersistentAuthData {
+    #[serde(default)]
+    users: HashMap<String, DashboardUser>,
+    #[serde(default)]
+    api_keys: HashMap<String, ApiKeyRecord>,
+}
+
+/// Durable user/API-key state plus process-local sessions and login-rate state.
 pub(crate) struct AuthState {
-    /// Bearer token snapshotted when the HTTP server started. Live config is
-    /// also consulted so a hot-reload of `http_bearer_token` is honoured.
+    /// Optional fallback used by the test/router compatibility constructor.
+    /// Production passes `None` and always consults live PluginConfig, so
+    /// removing `http_bearer_token` revokes it without a server restart.
     bearer_token: Option<String>,
-    users: RwLock<HashMap<String, DashboardUser>>,
+    persistent: RwLock<PersistentAuthData>,
+    state_file: Option<PathBuf>,
     sessions: RwLock<HashMap<String, SessionRecord>>,
     login_attempts: RwLock<HashMap<String, LoginWindow>>,
-    api_keys: RwLock<HashMap<String, ApiKeyRecord>>,
 }
 
 impl AuthState {
+    #[cfg(test)]
     pub(crate) fn new(bearer_token: Option<String>) -> Self {
+        Self::from_data(bearer_token, None, PersistentAuthData::default())
+    }
+
+    fn from_data(
+        bearer_token: Option<String>,
+        state_file: Option<PathBuf>,
+        persistent: PersistentAuthData,
+    ) -> Self {
         let bearer_token = bearer_token.filter(|s| !s.is_empty());
         Self {
             bearer_token,
-            users: RwLock::new(HashMap::new()),
+            persistent: RwLock::new(persistent),
+            state_file,
             sessions: RwLock::new(HashMap::new()),
             login_attempts: RwLock::new(HashMap::new()),
-            api_keys: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Load the durable user/API-key store. Invalid persisted state is a hard
+    /// startup error so a corrupt auth file can never downgrade to open access.
+    pub(crate) fn load(bearer_token: Option<String>, state_file: Option<PathBuf>) -> Result<Self, String> {
+        let persistent = match state_file.as_deref() {
+            Some(path) if path.exists() => {
+                let raw = fs::read(path)
+                    .map_err(|e| format!("read dashboard auth store {}: {e}", path.display()))?;
+                serde_json::from_slice::<PersistentAuthData>(&raw)
+                    .map_err(|e| format!("parse dashboard auth store {}: {e}", path.display()))?
+            }
+            _ => PersistentAuthData::default(),
+        };
+        Ok(Self::from_data(bearer_token, state_file, persistent))
+    }
+
+    fn persist_locked(&self, data: &PersistentAuthData) -> Result<(), String> {
+        let Some(path) = self.state_file.as_deref() else {
+            return Ok(());
+        };
+        persist_auth_file(path, data)
+    }
+
+    async fn mutate_persistent<T>(
+        &self,
+        mutate: impl FnOnce(&mut PersistentAuthData) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut data = self.persistent.write().await;
+        let before = data.clone();
+        let result = mutate(&mut data)?;
+        if let Err(e) = self.persist_locked(&data) {
+            *data = before;
+            return Err(e);
+        }
+        Ok(result)
     }
 
     pub(crate) fn bearer_token<'a>(&'a self, cfg: &'a PluginConfig) -> Option<&'a str> {
@@ -207,11 +265,11 @@ impl AuthState {
     }
 
     pub(crate) async fn has_users(&self) -> bool {
-        !self.users.read().await.is_empty()
+        !self.persistent.read().await.users.is_empty()
     }
 
     async fn has_api_keys(&self) -> bool {
-        !self.api_keys.read().await.is_empty()
+        !self.persistent.read().await.api_keys.is_empty()
     }
 
     /// Auth is required when a bearer token is configured, a bootstrap
@@ -226,26 +284,36 @@ impl AuthState {
     #[cfg(test)]
     pub(crate) async fn insert_user(&self, username: &str, password: &str, role: Role) -> Result<(), String> {
         let hash = hash_password(password)?;
-        self.users.write().await.insert(
-            username.to_string(),
-            DashboardUser { username: username.to_string(), password_hash: hash, role, enabled: true },
-        );
-        Ok(())
+        self.mutate_persistent(|data| {
+            data.users.insert(
+                username.to_string(),
+                DashboardUser { username: username.to_string(), password_hash: hash, role, enabled: true },
+            );
+            Ok(())
+        })
+        .await
     }
 
     async fn get_user(&self, username: &str) -> Option<DashboardUser> {
-        self.users.read().await.get(username).cloned()
+        self.persistent.read().await.users.get(username).cloned()
     }
 
-    async fn upsert_user(&self, username: String, password_hash: String, role: Role, enabled: bool) {
-        self.users
-            .write()
-            .await
-            .insert(username.clone(), DashboardUser { username, password_hash, role, enabled });
+    async fn upsert_user(
+        &self,
+        username: String,
+        password_hash: String,
+        role: Role,
+        enabled: bool,
+    ) -> Result<(), String> {
+        self.mutate_persistent(|data| {
+            data.users.insert(username.clone(), DashboardUser { username, password_hash, role, enabled });
+            Ok(())
+        })
+        .await
     }
 
     async fn list_users(&self) -> Vec<DashboardUser> {
-        let mut users: Vec<_> = self.users.read().await.values().cloned().collect();
+        let mut users: Vec<_> = self.persistent.read().await.users.values().cloned().collect();
         users.sort_by_key(|a| a.username.clone());
         users
     }
@@ -256,32 +324,38 @@ impl AuthState {
         password: &str,
         role: Role,
     ) -> Result<DashboardUser, String> {
-        if self.users.read().await.contains_key(&username) {
-            return Err("exists".into());
-        }
         let hash = hash_password(password)?;
         let user = DashboardUser { username: username.clone(), password_hash: hash, role, enabled: true };
-        self.users.write().await.insert(username, user.clone());
-        Ok(user)
+        self.mutate_persistent(|data| {
+            if data.users.contains_key(&username) {
+                return Err("exists".into());
+            }
+            data.users.insert(username, user.clone());
+            Ok(user)
+        })
+        .await
     }
 
     async fn set_user_enabled(&self, username: &str, enabled: bool) -> Result<DashboardUser, String> {
-        let mut users = self.users.write().await;
-        if !users.contains_key(username) {
-            return Err("not_found".into());
-        }
-        if users.get(username).is_some_and(|u| u.role == Role::Admin) && !enabled {
-            let other_admins = users
-                .values()
-                .filter(|u| u.role == Role::Admin && u.enabled && u.username != username)
-                .count();
-            if other_admins == 0 {
-                return Err("last_admin".into());
+        self.mutate_persistent(|data| {
+            if !data.users.contains_key(username) {
+                return Err("not_found".into());
             }
-        }
-        let user = users.get_mut(username).expect("user exists");
-        user.enabled = enabled;
-        Ok(user.clone())
+            if data.users.get(username).is_some_and(|u| u.role == Role::Admin) && !enabled {
+                let other_admins = data
+                    .users
+                    .values()
+                    .filter(|u| u.role == Role::Admin && u.enabled && u.username != username)
+                    .count();
+                if other_admins == 0 {
+                    return Err("last_admin".into());
+                }
+            }
+            let user = data.users.get_mut(username).expect("user exists");
+            user.enabled = enabled;
+            Ok(user.clone())
+        })
+        .await
     }
 
     async fn revoke_sessions_for(&self, username: &str) {
@@ -290,20 +364,27 @@ impl AuthState {
 
     #[cfg(test)]
     async fn enabled_admin_count(&self) -> usize {
-        self.users.read().await.values().filter(|u| u.role == Role::Admin && u.enabled).count()
+        self.persistent.read().await.users.values().filter(|u| u.role == Role::Admin && u.enabled).count()
     }
 
     #[cfg(test)]
     pub(crate) async fn set_user_role(&self, username: &str, role: Role) -> Result<(), String> {
-        let mut users = self.users.write().await;
-        let user = users.get_mut(username).ok_or_else(|| "not_found".to_string())?;
-        user.role = role;
-        Ok(())
+        self.mutate_persistent(|data| {
+            let user = data.users.get_mut(username).ok_or_else(|| "not_found".to_string())?;
+            user.role = role;
+            Ok(())
+        })
+        .await
     }
 
     #[cfg(test)]
     pub(crate) async fn remove_user(&self, username: &str) {
-        self.users.write().await.remove(username);
+        let _ = self
+            .mutate_persistent(|data| {
+                data.users.remove(username);
+                Ok(())
+            })
+            .await;
     }
 
     async fn create_session(&self, username: String, role: Role) -> String {
@@ -342,16 +423,21 @@ impl AuthState {
     }
 
     async fn list_api_keys(&self) -> Vec<ApiKeyRecord> {
-        let mut keys: Vec<_> = self.api_keys.read().await.values().cloned().collect();
+        let mut keys: Vec<_> = self.persistent.read().await.api_keys.values().cloned().collect();
         keys.sort_by_key(|a| std::cmp::Reverse(a.created_at));
         keys
     }
 
     async fn get_api_key(&self, id: &str) -> Option<ApiKeyRecord> {
-        self.api_keys.read().await.get(id).cloned()
+        self.persistent.read().await.api_keys.get(id).cloned()
     }
 
-    async fn create_api_key(&self, name: String, role: Role, created_by: String) -> (ApiKeyRecord, String) {
+    async fn create_api_key(
+        &self,
+        name: String,
+        role: Role,
+        created_by: String,
+    ) -> Result<(ApiKeyRecord, String), String> {
         let id = new_key_id();
         let secret = format!("{API_KEY_PREFIX}{id}_{}", random_hex(16));
         let rec = ApiKeyRecord {
@@ -363,19 +449,22 @@ impl AuthState {
             created_by,
             last_used_at: None,
         };
-        self.api_keys.write().await.insert(id, rec.clone());
-        (rec, secret)
+        self.mutate_persistent(|data| {
+            data.api_keys.insert(id, rec.clone());
+            Ok((rec, secret))
+        })
+        .await
     }
 
-    async fn delete_api_key(&self, id: &str) -> bool {
-        self.api_keys.write().await.remove(id).is_some()
+    async fn delete_api_key(&self, id: &str) -> Result<bool, String> {
+        self.mutate_persistent(|data| Ok(data.api_keys.remove(id).is_some())).await
     }
 
     async fn lookup_api_key(&self, secret: &str) -> Option<ApiKeyRecord> {
         let hash = hash_api_key(secret);
-        let mut keys = self.api_keys.write().await;
-        let id = keys.values().find(|k| k.secret_hash == hash).map(|k| k.id.clone())?;
-        if let Some(rec) = keys.get_mut(&id) {
+        let mut data = self.persistent.write().await;
+        let id = data.api_keys.values().find(|k| k.secret_hash == hash).map(|k| k.id.clone())?;
+        if let Some(rec) = data.api_keys.get_mut(&id) {
             rec.last_used_at = Some(now_millis());
             return Some(rec.clone());
         }
@@ -402,6 +491,38 @@ impl AuthState {
         entry.count = entry.count.saturating_add(1);
         true
     }
+}
+
+fn persist_auth_file(path: &Path, data: &PersistentAuthData) -> Result<(), String> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("create dashboard auth directory {}: {e}", parent.display()))?;
+    }
+    let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    let bytes =
+        serde_json::to_vec_pretty(data).map_err(|e| format!("serialize dashboard auth store: {e}"))?;
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = File::create(&tmp)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        file.write_all(&bytes)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        #[cfg(windows)]
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+        fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if let Err(e) = write_result {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("write dashboard auth store {}: {e}", path.display()));
+    }
+    Ok(())
 }
 
 fn now_millis() -> i64 {
@@ -485,12 +606,7 @@ fn normalize_username(raw: &str) -> Option<String> {
 }
 
 fn client_ip(req: &Request) -> String {
-    let addr = req.remote_addr().to_string();
-    if addr.is_empty() || addr == "unknown" {
-        "unknown".into()
-    } else {
-        addr
-    }
+    req.remote_addr().ip().map(|ip| ip.to_string()).unwrap_or_else(|| "unknown".into())
 }
 
 fn cookie_from_request(req: &Request, name: &str) -> Option<String> {
@@ -649,9 +765,8 @@ async fn resolve_identity(req: &Request, state: &AuthState, cfg: &PluginConfig) 
 
 /// Authenticate every request on the protected `/api/v1` subtree.
 ///
-/// When neither bearer nor dashboard auth is configured, the request is
-/// treated as an anonymous admin so existing open-access deployments keep
-/// working.
+/// When neither bearer nor dashboard auth is configured, reads use an
+/// anonymous viewer. Legacy anonymous admin requires an explicit unsafe opt-in.
 pub(crate) struct AuthGuard {
     state: Arc<AuthState>,
 }
@@ -697,7 +812,7 @@ impl Handler for AuthGuard {
             AUTH_IDENTITY,
             AuthIdentity {
                 username: ANONYMOUS_USERNAME.into(),
-                role: Role::Admin,
+                role: if cfg.dashboard_allow_anonymous_admin { Role::Admin } else { Role::Viewer },
                 source: AuthSource::Anonymous,
                 expires_in: None,
                 key_id: None,
@@ -799,15 +914,14 @@ async fn bootstrap_user_if_needed(
     if admin_configured {
         if admin_user == username && admin_pass == password {
             let hash = hash_password(password)?;
-            state.upsert_user(username.to_string(), hash, Role::Admin, true).await;
+            state.upsert_user(username.to_string(), hash, Role::Admin, true).await?;
             if let (Some(vuser), Some(vpass)) =
                 (cfg.dashboard_viewer_username.as_deref(), cfg.dashboard_viewer_password.as_deref())
             {
                 let vuser = vuser.trim();
                 if !vuser.is_empty() && !vpass.is_empty() && vuser != username {
-                    if let Ok(vhash) = hash_password(vpass) {
-                        state.upsert_user(vuser.to_string(), vhash, Role::Viewer, true).await;
-                    }
+                    let vhash = hash_password(vpass)?;
+                    state.upsert_user(vuser.to_string(), vhash, Role::Viewer, true).await?;
                 }
             }
             return Ok(Some(Role::Admin));
@@ -822,7 +936,7 @@ async fn bootstrap_user_if_needed(
         && cfg.dashboard_viewer_password.as_deref().is_some_and(|p| p == password)
     {
         let hash = hash_password(password)?;
-        state.upsert_user(username.to_string(), hash, Role::Viewer, true).await;
+        state.upsert_user(username.to_string(), hash, Role::Viewer, true).await?;
         return Ok(Some(Role::Viewer));
     }
     Ok(None)
@@ -1094,12 +1208,22 @@ pub(crate) async fn auth_change_password(req: &mut Request, depot: &mut Depot, r
     };
     match hash_password(&body.new_password) {
         Ok(hash) => {
-            state.upsert_user(user.username.clone(), hash, user.role, user.enabled).await;
+            if let Err(e) = state.upsert_user(user.username.clone(), hash, user.role, user.enabled).await {
+                render_api_error(res, StatusCode::INTERNAL_SERVER_ERROR, e);
+                return;
+            }
             state.revoke_sessions_for(&user.username).await;
             let session_id = state.create_session(user.username.clone(), user.role).await;
             set_session_cookie(res, &cfg, &session_id);
             audit::record(req, depot, "change_password", Some(user.username), true, None).await;
-            res.render(Json(json!({ "ok": true, "session_rotated": true })));
+            res.render(Json(json!({
+                "ok": true,
+                "session_rotated": true,
+                "username": id.username,
+                "role": id.role.as_str(),
+                "auth": "session",
+                "expires_in": cfg.dashboard_session_idle_timeout.as_secs(),
+            })));
         }
         Err(e) => render_api_error(res, StatusCode::INTERNAL_SERVER_ERROR, e),
     }
@@ -1263,7 +1387,13 @@ pub(crate) async fn create_api_key(req: &mut Request, depot: &mut Depot, res: &m
     };
     let created_by =
         identity_from_depot(depot).map(|id| id.username).unwrap_or_else(|| ANONYMOUS_USERNAME.into());
-    let (rec, secret) = state.create_api_key(name.clone(), role, created_by).await;
+    let (rec, secret) = match state.create_api_key(name.clone(), role, created_by).await {
+        Ok(created) => created,
+        Err(e) => {
+            render_api_error(res, StatusCode::INTERNAL_SERVER_ERROR, e);
+            return;
+        }
+    };
     audit::record(
         req,
         depot,
@@ -1305,11 +1435,13 @@ pub(crate) async fn delete_api_key(req: &mut Request, depot: &mut Depot, res: &m
         render_api_error(res, StatusCode::BAD_REQUEST, "id required");
         return;
     };
-    if state.delete_api_key(&id).await {
-        audit::record(req, depot, "api_key_delete", Some(id), true, None).await;
-        res.render(Json(json!({ "ok": true })));
-    } else {
-        render_api_error(res, StatusCode::NOT_FOUND, "api key not found");
+    match state.delete_api_key(&id).await {
+        Ok(true) => {
+            audit::record(req, depot, "api_key_delete", Some(id), true, None).await;
+            res.render(Json(json!({ "ok": true })));
+        }
+        Ok(false) => render_api_error(res, StatusCode::NOT_FOUND, "api key not found"),
+        Err(e) => render_api_error(res, StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
@@ -1334,6 +1466,16 @@ mod tests {
         assert!(!hash.contains("secret"));
         assert_eq!(hash, hash_api_key(secret));
         assert_ne!(hash, hash_api_key("other"));
+    }
+
+    #[test]
+    fn production_style_live_bearer_can_be_revoked() {
+        let state = AuthState::new(None);
+        let mut cfg: PluginConfig =
+            serde_json::from_value(serde_json::json!({"http_bearer_token": "first"})).unwrap();
+        assert_eq!(state.bearer_token(&cfg), Some("first"));
+        cfg.http_bearer_token = None;
+        assert_eq!(state.bearer_token(&cfg), None);
     }
 
     #[test]
@@ -1382,6 +1524,13 @@ mod tests {
         assert!(state.allow_login_attempt("5.6.7.8", 3, window).await);
     }
 
+    #[test]
+    fn login_rate_key_uses_ip_without_ephemeral_port() {
+        let mut req = Request::new();
+        *req.remote_addr_mut() = "192.0.2.10:49152".parse::<std::net::SocketAddr>().unwrap().into();
+        assert_eq!(client_ip(&req), "192.0.2.10");
+    }
+
     #[tokio::test]
     async fn cannot_disable_last_admin() {
         let state = AuthState::new(None);
@@ -1393,13 +1542,54 @@ mod tests {
     #[tokio::test]
     async fn api_key_lookup_matches_created_secret() {
         let state = AuthState::new(None);
-        let (rec, secret) = state.create_api_key("ci".into(), Role::Operator, "admin".into()).await;
+        let (rec, secret) = state.create_api_key("ci".into(), Role::Operator, "admin".into()).await.unwrap();
         assert!(secret.starts_with(API_KEY_PREFIX));
         assert!(!secret.is_empty());
         let found = state.lookup_api_key(&secret).await.expect("lookup");
         assert_eq!(found.id, rec.id);
         assert_eq!(found.role, Role::Operator);
         assert!(state.lookup_api_key("fmqk_nope").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn users_and_api_keys_survive_state_reload() {
+        let dir =
+            std::env::temp_dir().join(format!("ferromq-auth-store-{}-{}", std::process::id(), now_millis()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth.json");
+
+        let state = AuthState::load(None, Some(path.clone())).unwrap();
+        state.insert_user("admin", "admin-secret", Role::Admin).await.unwrap();
+        let (_, secret) = state.create_api_key("ci".into(), Role::Operator, "admin".into()).await.unwrap();
+        drop(state);
+
+        let loaded = AuthState::load(None, Some(path.clone())).unwrap();
+        let user = loaded.get_user("admin").await.expect("persisted user");
+        assert!(verify_password("admin-secret", &user.password_hash));
+        assert_eq!(loaded.lookup_api_key(&secret).await.expect("persisted key").role, Role::Operator);
+        let cfg: PluginConfig =
+            serde_json::from_value(serde_json::json!({"http_bearer_token": null})).unwrap();
+        assert!(loaded.auth_required(&cfg).await, "persisted identities must keep auth fail-closed");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn corrupt_persistent_store_fails_closed() {
+        let dir = std::env::temp_dir().join(format!(
+            "ferromq-auth-corrupt-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth.json");
+        std::fs::write(&path, b"not json").unwrap();
+        assert!(AuthState::load(None, Some(path)).is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

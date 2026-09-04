@@ -38,12 +38,14 @@ http_laddr = "0.0.0.0:6060"
 
 ## Dashboard session login (P3a). When `dashboard_admin_password` is set,
 ## the first `POST /api/v1/auth/login` (or `POST /api/v1/auth/init`) creates
-## an admin user and stores a bcrypt hash in memory. The raw `http_bearer_token`
+## an admin user and stores a durable bcrypt hash. The raw `http_bearer_token`
 ## remains a superuser/operator credential for automation.
 # dashboard_admin_username = "admin"
 # dashboard_admin_password = "change-me"
 # dashboard_viewer_username = "viewer"
 # dashboard_viewer_password = "change-me-too"
+# dashboard_auth_file = "/var/lib/ferromq/dashboard-auth.json"
+# dashboard_allow_anonymous_admin = false  ## unsafe legacy opt-in
 # dashboard_cookie_secure = false          ## set true when serving HTTPS
 # dashboard_session_idle_timeout = "30m"
 # dashboard_session_max_age = "12h"
@@ -57,8 +59,8 @@ http_laddr = "0.0.0.0:6060"
 # audit_file = "/var/log/ferromq/http-api-audit.jsonl"
 # config_history_keep = 10
 # broker_config_file = "ferromq.toml"
-## Users/sessions/API keys are in-memory (single node). Restart re-bootstraps from config.
-## Cluster: use sticky sessions.
+## Users/API-key hashes are persisted; sessions remain process-local.
+## Cluster: each node has its own auth store and needs sticky sessions.
 
 ## Enable TCP SO_REUSEADDR on the HTTP listener.
 ## Default: true
@@ -175,7 +177,7 @@ Credentials accepted on the HTTP API. **MQTT client auth plugins are unchanged.*
 | Session cookie | `POST /api/v1/auth/login` with `{ "username", "password" }` sets `ferromq_session` (`HttpOnly`, `SameSite=Lax`, `Secure` when `dashboard_cookie_secure`). Each request uses the **live** user role (and `enabled`); a deleted user invalidates the session. Cookie-authenticated `POST`/`PUT`/`PATCH`/`DELETE` require `Origin`/`Referer` to match `Host` when those headers are present (missing Origin is allowed for non-browser clients). Bearer / API keys skip this check. Reverse proxies must **preserve the original public `Host`**; FerroMQ does **not** trust `X-Forwarded-Host`. If the proxy rewrites `Host`, use Bearer / API key for non-browser clients. | `admin`, `operator`, or `viewer` from the **current** user record |
 | Static Bearer | `Authorization: Bearer <http_bearer_token>` | Always `admin` (username `operator`) for automation |
 | API key Bearer | `Authorization: Bearer <fmqk_…>` created via `POST /api/v1/api-keys` | Bound role (`admin` / `operator` / `viewer`) |
-| Open access | Neither bearer, API keys, nor `dashboard_admin_password` is set, and no users exist yet | Anonymous `admin` (backward compatible) |
+| Open access | Neither bearer, API keys, nor `dashboard_admin_password` is set, and no persisted users exist | Anonymous `viewer` (read-only). Anonymous admin requires the unsafe compatibility option |
 
 Public without a session/bearer: `POST /auth/login`, `POST /auth/logout`, `POST /auth/init`, `GET /health/check`, `GET /openapi.json`, `GET /docs`.
 
@@ -189,7 +191,7 @@ Public without a session/bearer: `POST /auth/login`, `POST /auth/logout`, `POST 
 
 `PUT`/`POST` of plugin `ferromq-http-api` (including validate / rollback / reload) is **admin-only**: that file can set `http_bearer_token`, which authenticates as admin. Generic plugin PUTs **deep-merge** into the existing TOML so omitted or `***` secrets (`hmac_secret`, `password`, …) are preserved and never written as the literal `***`.
 
-Passwords are **bcrypt** hashes; API key secrets are **SHA-256** hashes. Both stay in process memory (never plaintext). Restart drops users/sessions/keys; the next login/init re-creates the configured admin. In a cluster, each node has its own store — use sticky sessions.
+Passwords are **bcrypt** hashes; API key secrets are **SHA-256** hashes. User/key hashes are stored in `dashboard_auth_file`, or `.ferromq-dashboard-auth.json` under the plugin config directory when unset. Sessions remain process-local. Each cluster node has its own auth store, so use sticky sessions for browser traffic.
 
 ### How to test
 

@@ -45,9 +45,11 @@ File: `ferromq-http-api.toml` (in the plugin config directory). Loaded via `scx.
 | `http_reuseport` | `bool` | `false` | Enable `SO_REUSEPORT` socket option (Unix only) |
 | `http_bearer_token` | `string` | — | Bearer token for HTTP API authentication (optional; treated as admin/operator) |
 | `dashboard_admin_username` | `string` | `"admin"` | Bootstrap admin username when no dashboard users exist |
-| `dashboard_admin_password` | `string` | — | Bootstrap admin password (hashed with bcrypt on first login / `/auth/init`; never stored as plaintext) |
+| `dashboard_admin_password` | `string` | — | Bootstrap password supplied by config; only its bcrypt hash is written to the persistent auth store |
 | `dashboard_viewer_username` | `string` | — | Optional bootstrap viewer username |
 | `dashboard_viewer_password` | `string` | — | Optional bootstrap viewer password |
+| `dashboard_auth_file` | `string` | `.ferromq-dashboard-auth.json` in plugin config dir | Optional persistent user/API-key hash store path |
+| `dashboard_allow_anonymous_admin` | `bool` | `false` | Unsafe legacy opt-in; anonymous access is read-only by default |
 | `dashboard_cookie_secure` | `bool` | `false` | Set `Secure` on the session cookie (enable behind HTTPS). Cookie CSRF compares `Origin`/`Referer` to `Host`; reverse proxies must preserve the original public Host (`X-Forwarded-Host` is not trusted). Use Bearer / API key if Host is rewritten |
 | `dashboard_session_idle_timeout` | `string` | `"30m"` | Idle session expiry |
 | `dashboard_session_max_age` | `string` | `"12h"` | Absolute session lifetime |
@@ -275,9 +277,9 @@ Two credentials are accepted (MQTT client auth plugins are not involved):
 - **Session cookie** — `POST /api/v1/auth/login` with `{ username, password }`. Cookie `ferromq_session` is `HttpOnly`, `SameSite=Lax`, and `Secure` when `dashboard_cookie_secure` is true. Roles: `admin` (users / keys / audit + writes), `operator` (kick / publish / plugins), `viewer` (read-only).
 - **Bearer token** — `Authorization: Bearer <http_bearer_token>` remains a superuser admin credential for automation (username `operator`).
 - **API keys** — `POST /api/v1/api-keys` (admin). Secret is SHA-256 hashed and shown once; authenticate as `Authorization: Bearer <secret>` with the bound role.
-- **Open access** — if neither a bearer token nor `dashboard_admin_password` is set (and no users/keys exist yet), the API stays open (anonymous admin).
+- **Open access** — if no credential is configured and no persisted identity exists, reads stay open as anonymous `viewer`. Anonymous admin requires the explicit unsafe `dashboard_allow_anonymous_admin = true` opt-in.
 
-Bootstrap: when no dashboard users exist, the first matching login or `POST /api/v1/auth/init` creates the configured admin (and optional viewer). Passwords are bcrypt hashes in **process memory** (lost on restart; cluster nodes do not share sessions — use sticky sessions). Health, OpenAPI, login, logout, and init stay public. Admin-only: `GET/POST /users`, `GET/POST/DELETE /api-keys`, `GET /audit`. Operator+ can acknowledge alarms and call cluster join/leave (leave only when the raft plugin is active).
+Bootstrap: when no dashboard users exist, the first matching login or `POST /api/v1/auth/init` creates the configured admin (and optional viewer). User password hashes and API-key hashes are persisted in `dashboard_auth_file` (or `.ferromq-dashboard-auth.json` under the plugin config directory); sessions remain process-local, so clustered HTTP access needs sticky sessions. Health, OpenAPI, login, logout, and init stay public. Admin-only: `GET/POST /users`, `GET/POST/DELETE /api-keys`, `GET /audit`. Operator+ can acknowledge alarms and call cluster join/leave (leave only when the raft plugin is active).
 
 ## Dashboard
 

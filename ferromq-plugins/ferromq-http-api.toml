@@ -14,14 +14,20 @@ http_laddr = "0.0.0.0:6060"
 #http_bearer_token = "public"
 
 ## Dashboard session login (P3a) + API keys / audit (P3b).
-## First login or POST /api/v1/auth/init creates the admin (bcrypt in memory).
+## First login or POST /api/v1/auth/init creates the admin (durable bcrypt hash).
 ## Bearer token remains a superuser admin credential. API keys are hashed
 ## (SHA-256) and authenticate as Bearer with a bound role.
-## Users/sessions/keys are per-node (sticky sessions in a cluster).
+## User/key hashes are persisted per node; sessions are process-local
+## (sticky sessions in a cluster).
 # dashboard_admin_username = "admin"
 # dashboard_admin_password = "change-me"
 # dashboard_viewer_username = "viewer"
 # dashboard_viewer_password = "change-me-too"
+# Persisted hash store. Defaults to `.ferromq-dashboard-auth.json` inside
+# the configured plugin directory.
+# dashboard_auth_file = "/var/lib/ferromq/dashboard-auth.json"
+# Unsafe legacy opt-in. Default anonymous access is read-only.
+# dashboard_allow_anonymous_admin = false
 # dashboard_cookie_secure = false
 # dashboard_session_idle_timeout = "30m"
 # dashboard_session_max_age = "12h"

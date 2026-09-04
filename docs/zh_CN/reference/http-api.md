@@ -19,7 +19,11 @@ prometheus_metrics_cache_interval = "5s"
 # http_bearer_token = "your-secret-token"
 # dashboard_admin_username = "admin"
 # dashboard_admin_password = "change-me"
+# dashboard_auth_file = "/var/lib/ferromq/dashboard-auth.json"
+# dashboard_allow_anonymous_admin = false # 不安全的旧兼容开关
 ```
+
+未配置凭证且不存在持久化用户/API Key 时，只读接口以匿名 `viewer` 开放；匿名 admin 必须显式启用 `dashboard_allow_anonymous_admin`。用户与 API Key 哈希按节点持久化，会话仍保存在进程内存中。
 
 ## 端点速查
 

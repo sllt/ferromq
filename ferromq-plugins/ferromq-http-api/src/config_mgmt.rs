@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::anyhow;
@@ -33,6 +34,14 @@ const DEFAULT_HISTORY_KEEP: usize = 10;
 const BROKER_WRITABLE: &[&str] = &["mqtt", "listener", "log"];
 /// Well-known name of this plugin. Writes can change `http_bearer_token`.
 pub(crate) const HTTP_API_PLUGIN: &str = "ferromq-http-api";
+
+static CONFIG_WRITE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+/// Serialize config read/modify/write transactions in this process. Remote
+/// nodes take their own lock when handling the forwarded gRPC write.
+pub(crate) async fn config_write_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    CONFIG_WRITE_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
+}
 
 /// How a written (or validated) config becomes effective.
 ///
@@ -341,11 +350,25 @@ fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("toml.tmp");
+    let tmp = path.with_extension(format!("toml.tmp-{}", std::process::id()));
+    let existing_permissions = fs::metadata(path).ok().map(|m| m.permissions());
     {
         let mut f = File::create(&tmp)?;
+        if let Some(perms) = existing_permissions {
+            f.set_permissions(perms)?;
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                f.set_permissions(fs::Permissions::from_mode(0o600))?;
+            }
+        }
         f.write_all(contents.as_bytes())?;
         f.sync_all()?;
+    }
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(path)?;
     }
     fs::rename(&tmp, path)?;
     Ok(())
@@ -509,22 +532,50 @@ pub(crate) async fn local_write_plugin(
     apply: bool,
     keep: usize,
 ) -> Result<WriteResult> {
+    let _guard = config_write_guard().await;
+    local_write_plugin_unlocked(scx, name, json, _toml_text, apply, keep).await
+}
+
+async fn local_write_plugin_unlocked(
+    scx: &ServerContext,
+    name: &str,
+    json: &Value,
+    _toml_text: &str,
+    apply: bool,
+    keep: usize,
+) -> Result<WriteResult> {
     sanitize_name(name)?;
     let reloadable = plugin_reloadable(scx, name)?;
     let dir = plugin_config_dir(scx)?;
     let path = plugin_toml_path(dir, name);
     let hist = history_dir(dir, name);
+    let old_text = fs::read_to_string(&path).ok();
     let old = read_file_json(&path)?.unwrap_or(Value::Object(Default::default()));
     let (merged, merged_toml) = prepare_merged_plugin_write(&old, json)?;
     let backup = backup_current(&path, &hist, keep)?;
     atomic_write(&path, &merged_toml)?;
 
     let mut applied = false;
-    let mut apply_error = None;
+    let apply_error = None;
     if apply && reloadable {
         match scx.plugins.load_config(name).await {
             Ok(()) => applied = true,
-            Err(e) => apply_error = Some(e.to_string()),
+            Err(e) => {
+                let restore = match old_text {
+                    Some(ref text) => atomic_write(&path, text),
+                    None => fs::remove_file(&path).map_err(anyhow::Error::from),
+                };
+                if let Err(restore_err) = restore {
+                    return Err(anyhow!(
+                        "plugin config apply failed: {e}; restoring {} also failed: {restore_err}",
+                        path.display()
+                    ));
+                }
+                // Best effort: put the runtime snapshot back in sync with the
+                // restored file if the failed loader partially mutated state.
+                let _ = scx.plugins.load_config(name).await;
+                return Err(anyhow!("plugin config apply failed and the previous file was restored: {e}"));
+            }
         }
     }
     let effective = after_write_effective(reloadable, apply, applied);
@@ -564,6 +615,7 @@ pub(crate) async fn local_rollback_plugin(
     apply: bool,
     keep: usize,
 ) -> Result<WriteResult> {
+    let _guard = config_write_guard().await;
     sanitize_name(name)?;
     if version.is_empty()
         || version.contains('/')
@@ -583,16 +635,30 @@ pub(crate) async fn local_rollback_plugin(
     }
     let toml_text = fs::read_to_string(&src)?;
     let json = toml_to_json(&toml_text)?;
+    let previous_text = fs::read_to_string(&path).ok();
     let old = read_file_json(&path)?.unwrap_or(Value::Object(Default::default()));
     let backup = backup_current(&path, &hist, keep)?;
     atomic_write(&path, &toml_text)?;
 
     let mut applied = false;
-    let mut apply_error = None;
+    let apply_error = None;
     if apply && reloadable {
         match scx.plugins.load_config(name).await {
             Ok(()) => applied = true,
-            Err(e) => apply_error = Some(e.to_string()),
+            Err(e) => {
+                let restore = match previous_text {
+                    Some(ref text) => atomic_write(&path, text),
+                    None => fs::remove_file(&path).map_err(anyhow::Error::from),
+                };
+                if let Err(restore_err) = restore {
+                    return Err(anyhow!(
+                        "plugin rollback apply failed: {e}; restoring {} also failed: {restore_err}",
+                        path.display()
+                    ));
+                }
+                let _ = scx.plugins.load_config(name).await;
+                return Err(anyhow!("plugin rollback apply failed and the previous file was restored: {e}"));
+            }
         }
     }
     let effective = after_write_effective(reloadable, apply, applied);
@@ -703,6 +769,13 @@ fn validate_broker_section(section: &str, value: &Value) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+fn validated_broker_toml(doc: &Value) -> Result<String> {
+    let toml_text = json_to_toml(doc)?;
+    toml::from_str::<ferromq_conf::Inner>(&toml_text)
+        .map_err(|e| anyhow!("invalid broker configuration: {e}"))?;
+    Ok(toml_text)
 }
 
 fn merge_object(base: Value, patch: Value) -> Value {
@@ -868,7 +941,7 @@ fn write_broker_section(path: &Path, section: &str, patch: &Value, keep: usize) 
         path.file_stem().and_then(|s| s.to_str()).unwrap_or("ferromq"),
     );
     let backup = backup_current(path, &hist, keep)?;
-    let toml_text = json_to_toml(&new_doc)?;
+    let toml_text = validated_broker_toml(&new_doc)?;
     atomic_write(path, &toml_text)?;
     Ok(WriteResult {
         ok: true,
@@ -1328,6 +1401,7 @@ pub(crate) async fn broker_config_section_put(
     depot: &mut Depot,
     res: &mut Response,
 ) -> std::result::Result<(), salvo::Error> {
+    let _guard = config_write_guard().await;
     let section = match req.param::<String>("section") {
         Some(s) => s,
         None => {
@@ -1433,6 +1507,9 @@ pub(crate) async fn broker_config_section_validate(
         };
         let new_sec = merge_object(old.clone(), json);
         validate_broker_section(key, &new_sec)?;
+        let mut new_doc = if path.is_file() { read_broker_doc(&path)? } else { json!({}) };
+        new_doc[key] = new_sec.clone();
+        let _ = validated_broker_toml(&new_doc)?;
         Ok(ValidateResult {
             ok: true,
             valid: true,
@@ -1493,6 +1570,7 @@ pub(crate) async fn broker_config_rollback(
     depot: &mut Depot,
     res: &mut Response,
 ) -> std::result::Result<(), salvo::Error> {
+    let _guard = config_write_guard().await;
     let version = match req.param::<String>("version") {
         Some(v) => v,
         None => {
@@ -1526,6 +1604,7 @@ pub(crate) async fn broker_config_rollback(
     match (|| -> Result<WriteResult> {
         let toml_text = fs::read_to_string(&src)?;
         let new_doc = toml_to_json(&toml_text)?;
+        let _ = validated_broker_toml(&new_doc)?;
         let old_doc = if path.is_file() { read_broker_doc(&path)? } else { json!({}) };
         let backup = backup_current(&path, &hist, keep)?;
         atomic_write(&path, &toml_text)?;
@@ -1624,6 +1703,7 @@ pub(crate) fn grpc_read_plugin_file(scx: &ServerContext, name: &str) -> Result<S
 }
 
 /// Write a plugin config even when the plugin is not registered (file only).
+/// Caller holds [`config_write_guard`] across the structured read/modify/write.
 pub(crate) async fn local_write_plugin_lenient(
     scx: &ServerContext,
     name: &str,
@@ -1633,7 +1713,7 @@ pub(crate) async fn local_write_plugin_lenient(
     keep: usize,
 ) -> Result<WriteResult> {
     match plugin_reloadable(scx, name) {
-        Ok(_) => local_write_plugin(scx, name, json, toml_text, apply, keep).await,
+        Ok(_) => local_write_plugin_unlocked(scx, name, json, toml_text, apply, keep).await,
         Err(_) => {
             sanitize_name(name)?;
             let dir = plugin_config_dir(scx)?;

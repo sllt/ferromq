@@ -122,7 +122,7 @@ pub(crate) fn route_with_auth(
                 .push(Router::with_path("{id}").get(check_health)),
         );
 
-    // Session cookie or Bearer token (or anonymous admin when auth is unset).
+    // Session cookie or Bearer token (or anonymous viewer by default when auth is unset).
     let protected = Router::new()
         .hoop(AuthGuard::new(auth_state))
         .get(list_apis)
@@ -413,15 +413,48 @@ pub(crate) async fn listen_and_serve(
     rx: oneshot::Receiver<()>,
     started_tx: oneshot::Sender<()>,
 ) -> Result<()> {
-    let (reuseaddr, reuseport, http_bearer_token, dashboard_static_dir) = {
+    let (reuseaddr, reuseport, dashboard_static_dir, dashboard_auth_file) = {
         let cfg = cfg.read().await;
         (
             cfg.http_reuseaddr,
             cfg.http_reuseport,
-            cfg.http_bearer_token.clone(),
             cfg.dashboard_static_dir.clone(),
+            cfg.dashboard_auth_file
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    scx.plugins
+                        .config_dir()
+                        .map(|dir| std::path::Path::new(dir).join(".ferromq-dashboard-auth.json"))
+                }),
         )
     };
+    let auth_state = Arc::new(
+        // Production authorization always reads the live PluginConfig token.
+        // No snapshot fallback: removing a bearer via load_config revokes it.
+        AuthState::load(None, dashboard_auth_file).map_err(|e| anyhow!("dashboard auth store: {e}"))?,
+    );
+    {
+        let cfg_snap = cfg.read().await.clone();
+        if !auth_state.auth_required(&cfg_snap).await {
+            let role = if cfg_snap.dashboard_allow_anonymous_admin {
+                "admin (unsafe compatibility mode)"
+            } else {
+                "viewer"
+            };
+            log::warn!(
+                "HTTP API authentication is not configured (no http_bearer_token, dashboard password, users, or API keys). Requests are anonymous {role}. Set http_bearer_token or dashboard_admin_password to require authentication."
+            );
+        }
+    }
+    let monitor = prome::Monitor::new();
+    let api_router = route_with_auth(scx, cfg, auth_state, monitor, history_caches);
+    let mut root_router = Router::new().push(api_router);
+    // Prefer dashboard_static_dir when it exists; otherwise rust-embed dashboard-dist/.
+    root_router = mount_dashboard(root_router, dashboard_static_dir.as_deref());
+
     log::info!("HTTP API Listening on {laddr}, reuseaddr: {reuseaddr}, reuseport: {reuseport}");
 
     let listen = tokio::net::TcpListener::from_std(bind(laddr, 128, reuseaddr, reuseport)?)?;
@@ -434,21 +467,6 @@ pub(crate) async fn listen_and_serve(
         handler.stop_graceful(None);
     });
     let _ = started_tx.send(());
-    let monitor = prome::Monitor::new();
-    let auth_state = Arc::new(AuthState::new(http_bearer_token));
-    {
-        let cfg_snap = cfg.read().await.clone();
-        if !auth_state.auth_required(&cfg_snap).await {
-            log::warn!(
-                "HTTP API authentication is not configured (no http_bearer_token, dashboard password, users, or API keys). Requests are treated as anonymous admin. Set http_bearer_token or dashboard_admin_password to require authentication."
-            );
-        }
-    }
-    let api_router = route_with_auth(scx, cfg, auth_state, monitor, history_caches);
-
-    let mut root_router = Router::new().push(api_router);
-    // Prefer dashboard_static_dir when it exists; otherwise rust-embed dashboard-dist/.
-    root_router = mount_dashboard(root_router, dashboard_static_dir.as_deref());
 
     server.try_serve(root_router).await?;
     Ok(())
@@ -2723,7 +2741,7 @@ async fn node_plugins(
     Ok(())
 }
 
-async fn _node_plugins(
+pub(crate) async fn _node_plugins(
     scx: &ServerContext,
     node_id: NodeId,
     message_type: MessageType,
@@ -2784,7 +2802,7 @@ async fn node_plugin_info(
     Ok(())
 }
 
-async fn _node_plugin_info(
+pub(crate) async fn _node_plugin_info(
     scx: &ServerContext,
     node_id: NodeId,
     name: &str,
@@ -4211,7 +4229,11 @@ mod tests {
 
     async fn test_service() -> Service {
         let scx = ServerContext::new().node_id(1).busy_check_enable(false).build().await;
-        let cfg = Arc::new(RwLock::new(test_cfg()));
+        let mut cfg = test_cfg();
+        // Most legacy API tests exercise write handlers without configuring
+        // credentials. Opt in explicitly; production defaults to read-only.
+        cfg.dashboard_allow_anonymous_admin = true;
+        let cfg = Arc::new(RwLock::new(cfg));
         let router = route(scx, cfg, None, prome::Monitor::new(), None);
         Service::new(router)
     }
@@ -4486,6 +4508,10 @@ mod tests {
         assert_eq!(changed.status_code, Some(StatusCode::OK));
         let changed_body: serde_json::Value = changed.take_json().await.unwrap();
         assert_eq!(changed_body["ok"], true);
+        assert_eq!(changed_body["session_rotated"], true);
+        assert_eq!(changed_body["username"], "admin");
+        assert_eq!(changed_body["role"], "admin");
+        assert_eq!(changed_body["auth"], "session");
         let rotated = session_cookie(&changed);
 
         let me_stale = TestClient::get("http://127.0.0.1:0/api/v1/auth/me")
@@ -4542,13 +4568,45 @@ mod tests {
 
     #[tokio::test]
     async fn me_anonymous_when_auth_disabled() {
-        let svc = test_service().await;
+        let scx = ServerContext::new().node_id(1).busy_check_enable(false).build().await;
+        let cfg = Arc::new(RwLock::new(test_cfg()));
+        let svc = Service::new(route(scx, cfg, None, prome::Monitor::new(), None));
         let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/auth/me").send(&svc).await;
         assert_eq!(resp.status_code, Some(StatusCode::OK));
         let body: serde_json::Value = resp.take_json().await.unwrap();
         assert_eq!(body["username"], "anonymous");
-        assert_eq!(body["role"], "admin");
+        assert_eq!(body["role"], "viewer");
         assert_eq!(body["auth"], "anonymous");
+
+        let denied = TestClient::post("http://127.0.0.1:0/api/v1/users")
+            .json(&json!({"username":"attacker","password":"attacker-pass","role":"admin"}))
+            .send(&svc)
+            .await;
+        assert_eq!(denied.status_code, Some(StatusCode::FORBIDDEN));
+
+        let reveal = TestClient::get("http://127.0.0.1:0/api/v1/plugins/1/ferromq-http-api/config?reveal=1")
+            .send(&svc)
+            .await;
+        assert_eq!(reveal.status_code, Some(StatusCode::FORBIDDEN));
+
+        let private_probe = TestClient::post("http://127.0.0.1:0/api/v1/webhooks/test?allow_private=1")
+            .json(&json!({"url":"http://127.0.0.1:80"}))
+            .send(&svc)
+            .await;
+        assert_eq!(private_probe.status_code, Some(StatusCode::FORBIDDEN));
+    }
+
+    #[tokio::test]
+    async fn anonymous_admin_requires_explicit_unsafe_opt_in() {
+        let scx = ServerContext::new().node_id(1).busy_check_enable(false).build().await;
+        let mut cfg = test_cfg();
+        cfg.dashboard_allow_anonymous_admin = true;
+        let cfg = Arc::new(RwLock::new(cfg));
+        let svc = Service::new(route(scx, cfg, None, prome::Monitor::new(), None));
+        let mut resp = TestClient::get("http://127.0.0.1:0/api/v1/auth/me").send(&svc).await;
+        assert_eq!(resp.status_code, Some(StatusCode::OK));
+        let body: serde_json::Value = resp.take_json().await.unwrap();
+        assert_eq!(body["role"], "admin");
     }
 
     #[tokio::test]
@@ -4990,6 +5048,25 @@ mod tests {
         cfg: serde_json::Value,
     }
 
+    struct P4FailPlugin;
+
+    impl ferromq::plugin::PackageInfo for P4FailPlugin {
+        fn name(&self) -> &str {
+            "p4-fail"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ferromq::plugin::Plugin for P4FailPlugin {
+        async fn get_config(&self) -> Result<serde_json::Value> {
+            Ok(json!({"value": 1}))
+        }
+
+        async fn load_config(&mut self) -> Result<()> {
+            Err(anyhow!("intentional config rejection"))
+        }
+    }
+
     impl ferromq::plugin::PackageInfo for P4DemoPlugin {
         fn name(&self) -> &str {
             &self.name
@@ -5047,6 +5124,7 @@ listener.tcp.external.addr = "0.0.0.0:1883"
             "http_laddr = \"0.0.0.0:6060\"\nhttp_bearer_token = \"file-secret\"\nmax_row_limit = 1000\n",
         )
         .expect("plugin toml");
+        std::fs::write(dir.join("p4-fail.toml"), "value = 1\n").expect("failing plugin toml");
 
         let scx = ServerContext::new()
             .node_id(1)
@@ -5069,6 +5147,12 @@ listener.tcp.external.addr = "0.0.0.0:1883"
             })
             .await
             .expect("register p4-demo");
+        scx.plugins
+            .register("p4-fail", true, false, || {
+                Box::pin(async { Ok(Box::new(P4FailPlugin) as ferromq::plugin::DynPlugin) })
+            })
+            .await
+            .expect("register p4-fail");
 
         let mut cfg = cfg;
         cfg.broker_config_file = Some(dir.join("ferromq.toml").display().to_string());
@@ -5120,7 +5204,9 @@ listener.tcp.external.addr = "0.0.0.0:1883"
 
     #[tokio::test]
     async fn plugin_config_validate_put_versions_rollback_and_reload_stay_compatible() {
-        let env = p4_env(test_cfg()).await;
+        let mut cfg = test_cfg();
+        cfg.dashboard_allow_anonymous_admin = true;
+        let env = p4_env(cfg).await;
 
         let mut bad = TestClient::post("http://127.0.0.1:0/api/v1/plugins/1/p4-demo/config/validate")
             .json(&json!([1, 2, 3]))
@@ -5203,6 +5289,23 @@ listener.tcp.external.addr = "0.0.0.0:1883"
             .send(&env.svc)
             .await;
         assert_eq!(missing.status_code, Some(StatusCode::NOT_FOUND));
+    }
+
+    #[tokio::test]
+    async fn failed_plugin_apply_restores_previous_file() {
+        let mut cfg = test_cfg();
+        cfg.dashboard_allow_anonymous_admin = true;
+        let env = p4_env(cfg).await;
+        let before = std::fs::read_to_string(env.dir.join("p4-fail.toml")).unwrap();
+
+        let mut resp = TestClient::put("http://127.0.0.1:0/api/v1/plugins/1/p4-fail/config")
+            .json(&json!({"value": 2}))
+            .send(&env.svc)
+            .await;
+        assert_eq!(resp.status_code, Some(StatusCode::SERVICE_UNAVAILABLE));
+        let body: serde_json::Value = resp.take_json().await.unwrap();
+        assert!(body["message"].as_str().unwrap_or_default().contains("previous file was restored"));
+        assert_eq!(std::fs::read_to_string(env.dir.join("p4-fail.toml")).unwrap(), before);
     }
 
     #[tokio::test]
