@@ -173,6 +173,24 @@ impl Plugin for ClusterPlugin {
             "grpc_clients": nodes,
         })
     }
+
+    /// Dashboard cluster ops. Broadcast clustering has no runtime join/leave.
+    async fn send(&self, msg: serde_json::Value) -> Result<serde_json::Value> {
+        let op = msg.get("op").and_then(|v| v.as_str()).unwrap_or("");
+        match op {
+            "status" => Ok(json!({
+                "ok": true,
+                "op": "status",
+                "mode": "broadcast",
+                "attrs": self.attrs().await,
+            })),
+            "leave" | "join" => Err(anyhow::anyhow!(
+                "ferromq-cluster-broadcast has no runtime membership API; peers are configured via node_grpc_addrs at startup"
+            )),
+            "" => Err(anyhow::anyhow!("cluster send requires {{\"op\":\"status|leave|join\"}}")),
+            other => Err(anyhow::anyhow!("unknown cluster op: {other}")),
+        }
+    }
 }
 
 #[inline]

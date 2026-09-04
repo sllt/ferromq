@@ -99,6 +99,18 @@ ferromqd --id 1 --plugins-default-startups "ferromq-cluster-raft" \
 | `raft.batch_append` | boolean | `false` | 启用批量追加 |
 | `raft.priority` | integer | `0` | 选举优先级 |
 
+## 运行时成员变更（`Plugin::send`）
+
+HTTP API 通过 `plugins.send` 调用本插件：
+
+| `op` | 作用 |
+|------|------|
+| `status` | 当前 `Mailbox::status()` |
+| `leave` | `Mailbox::leave()` — 对本节点提出 `RemoveNode` |
+| `join` | **拒绝。** `Raft::join` 在插件启动时消费（`raft_peer_addrs`）。请用这些地址启动新节点。 |
+
+`ferromq-cluster-broadcast` 没有成员变更 API。
+
 ## 依赖
 
 `ferromq`（features：`plugin`、`grpc`、`stats`、`msgstore`）、`ferromq-raft`、`tokio`、`serde`

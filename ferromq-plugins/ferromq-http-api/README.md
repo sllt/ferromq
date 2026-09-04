@@ -40,14 +40,30 @@ File: `ferromq-http-api.toml` (in the plugin config directory). Loaded via `scx.
 |--------|------|---------|-------------|
 | `max_row_limit` | `usize` | `10000` | Maximum number of rows returned by list endpoints |
 | `http_laddr` | `string` | `"0.0.0.0:6060"` | HTTP server listen address |
-| `http_request_log` | `bool` | `false` | Whether to print HTTP request logs |
+| `http_request_log` | `bool` | `false` | Log method/path (auth bodies omitted; JSON/TOML secrets and URL userinfo redacted; Authorization / Cookie headers are never logged) |
 | `http_reuseaddr` | `bool` | `true` | Enable `SO_REUSEADDR` socket option (Unix only) |
 | `http_reuseport` | `bool` | `false` | Enable `SO_REUSEPORT` socket option (Unix only) |
-| `http_bearer_token` | `string` | — | Bearer token for HTTP API authentication (optional) |
+| `http_bearer_token` | `string` | — | Bearer token for HTTP API authentication (optional; treated as admin/operator) |
+| `dashboard_admin_username` | `string` | `"admin"` | Bootstrap admin username when no dashboard users exist |
+| `dashboard_admin_password` | `string` | — | Bootstrap password supplied by config; only its bcrypt hash is written to the persistent auth store |
+| `dashboard_viewer_username` | `string` | — | Optional bootstrap viewer username |
+| `dashboard_viewer_password` | `string` | — | Optional bootstrap viewer password |
+| `dashboard_auth_file` | `string` | `.ferromq-dashboard-auth.json` in plugin config dir | Optional persistent user/API-key hash store path |
+| `dashboard_allow_anonymous_admin` | `bool` | `false` | Unsafe legacy opt-in; anonymous access is read-only by default |
+| `dashboard_cookie_secure` | `bool` | `false` | Set `Secure` on the session cookie (enable behind HTTPS). Cookie CSRF compares `Origin`/`Referer` to `Host`; reverse proxies must preserve the original public Host (`X-Forwarded-Host` is not trusted). Use Bearer / API key if Host is rewritten |
+| `dashboard_session_idle_timeout` | `string` | `"30m"` | Idle session expiry |
+| `dashboard_session_max_age` | `string` | `"12h"` | Absolute session lifetime |
+| `dashboard_login_rate_limit` | `u32` | `10` | Max login attempts per IP per window |
+| `dashboard_login_rate_window` | `string` | `"1m"` | Login rate-limit window |
+| `audit_max_events` | `usize` | `10000` | In-memory audit ring-buffer size |
+| `audit_file` | `string` | — | Optional JSONL file for durable audit events |
+| `config_history_keep` | `usize` | `10` | Last-N backups kept when writing plugin or `ferromq.toml` config |
+| `broker_config_file` | `string` | — | Path to this node's `ferromq.toml` for `/api/v1/broker/config` |
 | `message_type` | `u8` | `99` | gRPC message type identifier for plugin communication |
 | `message_expiry_interval` | `string` | `"5m"` | Default message expiration interval for publish operations |
 | `metrics_sample_interval` | `string` | `"5s"` | Metrics sampling interval |
 | `prometheus_metrics_cache_interval` | `string` | `"5s"` | Prometheus metrics data caching interval |
+| `dashboard_static_dir` | `string` | — | Optional filesystem `dist/` for the React console. When set and the path exists, served at `/dashboard/` instead of the rust-embed `dashboard-dist/` assets |
 | `storage` | `object` | — | History data storage config (optional; omit to disable history) |
 | `flush_interval` | `string` | `"5s"` | History flush interval |
 | `history_retention` | `string` | `"7d"` | History data retention. During warmup, each data point's timestamp is checked against this duration — expired entries are discarded from the cache and removed from storage. |
@@ -78,6 +94,13 @@ All endpoints are prefixed with `/api/v1`.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | List all available API endpoints |
+| POST | `/auth/login` | Dashboard login; sets `ferromq_session` cookie |
+| POST | `/auth/logout` | Clear the session cookie |
+| GET | `/auth/me` | Current user (`session` / `bearer` / `anonymous`) |
+| POST | `/auth/change-password` | Change the current session user's password |
+| POST | `/auth/init` | One-time bootstrap of the configured admin |
+| GET | `/openapi.json` | OpenAPI 3 document for `/api/v1` |
+| GET | `/docs` | Swagger UI for the OpenAPI document |
 | **Brokers** | | |
 | GET | `/brokers` | Return basic information of all nodes in the cluster |
 | GET | `/brokers/{id}` | Return basic information of a specific node |
@@ -105,6 +128,7 @@ All endpoints are prefixed with `/api/v1`.
 | GET | `/routes/{topic}` | Get routing information for a specific topic |
 | **Retained Messages** | | |
 | GET | `/retains` | Query retained messages with `topic_filter` / `offset` / `limit` params |
+| DELETE | `/retains?topic=` | Delete a retained message by exact topic |
 | **MQTT Operations** | | |
 | POST | `/mqtt/publish` | Publish an MQTT message |
 | POST | `/mqtt/subscribe` | Subscribe to an MQTT topic for a session |
@@ -113,8 +137,31 @@ All endpoints are prefixed with `/api/v1`.
 | GET | `/plugins` | Returns information of all plugins in the cluster |
 | GET | `/plugins/{node}` | Returns plugin information for a specific node |
 | GET | `/plugins/{node}/{plugin}` | Get a specific plugin's info |
-| GET | `/plugins/{node}/{plugin}/config` | Get a plugin's configuration |
+| GET | `/plugins/{node}/{plugin}/config` | Get a plugin's configuration (secrets redacted unless `?reveal=1` + admin) |
+| PUT | `/plugins/{node}/{plugin}/config` | Write a plugin config (`?apply=reload\|none`); returns diff + `effective` |
+| POST | `/plugins/{node}/{plugin}/config/validate` | Dry-run validate a plugin config |
+| GET | `/plugins/{node}/{plugin}/config/versions` | List last-N plugin config backups |
+| POST | `/plugins/{node}/{plugin}/config/rollback/{version}` | Restore a plugin config backup |
 | PUT | `/plugins/{node}/{plugin}/config/reload` | Reload a plugin's configuration |
+| GET | `/broker/config` | Read-only `ferromq.toml` overview (mqtt/listener/log) |
+| PUT | `/broker/config/{mqtt\|listener\|log}` | Write a broker section (admin; always `restart_required`) |
+| GET/POST | `/acl/rules` | Structured `ferromq-acl` rules (hot apply via `load_config`) |
+| GET | `/auth-providers` | MQTT client auth plugins (`http` / `jwt`) |
+| GET | `/blacklist` | Honest gap: no blacklist plugin |
+| GET/POST | `/auto-subscriptions` | `ferromq-auto-subscription` items |
+| GET/POST | `/topic-rewrites` | `ferromq-topic-rewrite` rules |
+| GET/POST | `/webhooks` | `ferromq-web-hook` urls/rules; `POST /webhooks/test` is a TCP stub |
+| GET/PUT | `/bridges/{plugin}` | Bridge status/attrs + P4 config write + load/unload |
+| GET | `/alarms` | Current alarms derived from health/features/unreachable peers (in-memory) |
+| GET | `/alarms/history` | Cleared alarms (process memory) |
+| POST | `/alarms/{id}/acknowledge` | Acknowledge a current alarm (operator+) |
+| GET | `/logs` | Honest gap: no log collector (`available: false`) |
+| GET | `/trace` | Honest gap: no packet-trace plugin |
+| GET | `/slow-subs` | Honest gap: no slow-subscription tracker |
+| GET | `/topic-metrics` | Route-derived subscriber counts; no per-topic rates |
+| GET | `/cluster` | Read-only topology (`standalone` / `raft` / `broadcast`) |
+| POST | `/cluster/join` | Always 501 (startup-only join); per-node result |
+| POST | `/cluster/leave` | `ferromq-cluster-raft` `Plugin::send` leave, else 501; per-node result |
 | PUT | `/plugins/{node}/{plugin}/load` | Load/start a plugin on a node |
 | PUT | `/plugins/{node}/{plugin}/unload` | Unload/stop a plugin on a node |
 | **Statistics** | | |
@@ -204,13 +251,46 @@ Response example:
 ```
 
 - `consistent`: whether all reachable nodes report identical feature flags; `false` indicates config drift or a partially-failed plugin on some node
+- `failed_count` / `partial`: unreachable nodes (HTTP 200 with structured `{ ok, error }` entries)
+- `enabled`: OR of each flag across reachable nodes — use this for dashboard menu gating
 - `conflicts`: feature fields whose values differ, grouped by value with node lists (empty when `consistent` is `true`)
-- `nodes`: per-node details; unreachable nodes appear as error strings and are excluded from the consistency check
+- `nodes`: per-node `{ ok, node_id, features? / error? }` (no bare error strings)
 - A `features inconsistent across cluster` warning log is emitted when an inconsistency is detected
+
+### Diagnostics & cluster (P6)
+
+| Surface | Real vs stub |
+|---------|----------------|
+| Alarms | Real **derived** bus (health / features / unreachable peers). No native alarm plugin; not persisted. |
+| Logs / Trace / Slow sub | `available: false` (no collector plugins). |
+| Topic metrics | Real **route-derived** subscriber counts. No per-topic rates. `$SYS` listed only if `ferromq-sys-topic` is loaded. |
+| Cluster GET | Real topology. `/brokers` and `/nodes` get an additive `cluster` object. |
+| Cluster join | **501** — `Raft::join` is startup-only (`raft_peer_addrs`). |
+| Cluster leave | Real when `ferromq-cluster-raft` is active (`Plugin::send` → `Mailbox::leave`); otherwise 501. Writes always return per-node results. |
+
+OpenAPI 3: `GET /api/v1/openapi.json`. Optional list envelope: `?format=page` → `{ items, offset, limit, truncated, total? }` (default remains a bare array). Errors: `{ code, message, details?, request_id }`.
 
 ### Authentication
 
-If `http_bearer_token` is configured, all API requests (except health check) require an `Authorization: Bearer <token>` header.
+Two credentials are accepted (MQTT client auth plugins are not involved):
+
+- **Session cookie** — `POST /api/v1/auth/login` with `{ username, password }`. Cookie `ferromq_session` is `HttpOnly`, `SameSite=Lax`, and `Secure` when `dashboard_cookie_secure` is true. Roles: `admin` (users / keys / audit + writes), `operator` (kick / publish / plugins), `viewer` (read-only).
+- **Bearer token** — `Authorization: Bearer <http_bearer_token>` remains a superuser admin credential for automation (username `operator`).
+- **API keys** — `POST /api/v1/api-keys` (admin). Secret is SHA-256 hashed and shown once; authenticate as `Authorization: Bearer <secret>` with the bound role.
+- **Open access** — if no credential is configured and no persisted identity exists, reads stay open as anonymous `viewer`. Anonymous admin requires the explicit unsafe `dashboard_allow_anonymous_admin = true` opt-in.
+
+Bootstrap: when no dashboard users exist, the first matching login or `POST /api/v1/auth/init` creates the configured admin (and optional viewer). User password hashes and API-key hashes are persisted in `dashboard_auth_file` (or `.ferromq-dashboard-auth.json` under the plugin config directory); sessions remain process-local, so clustered HTTP access needs sticky sessions. Health, OpenAPI, login, logout, and init stay public. Admin-only: `GET/POST /users`, `GET/POST/DELETE /api-keys`, `GET /audit`. Operator+ can acknowledge alarms and call cluster join/leave (leave only when the raft plugin is active).
+
+## Dashboard
+
+Default UI is the React console from [`sllt/ferromq-dashboard`](https://github.com/sllt/ferromq-dashboard), vendored as `dashboard-dist/` and rust-embedded (Hash Router, `base: './'`). Open `http://<host>:6060/dashboard/`.
+
+- **Embedded (default):** no extra files. Rebuild with `./scripts/sync-dashboard-dist.sh` then `cargo build -p ferromq-http-api`.
+- **Override:** set `dashboard_static_dir` to a Vite `dist/` that exists on disk (resolved from the process cwd). Missing path logs a warning and falls back to the embed.
+- **Dev HMR:** run `pnpm dev` in the dashboard repo; do not point `dashboard_static_dir` at the source tree.
+- **Verify:** `curl -sI http://127.0.0.1:6060/dashboard/` (`no-cache`, `nosniff`, `DENY`); hashed `/dashboard/assets/*.js` is `immutable`. `/api/v1/openapi.json` and `/api/v1/docs` stay on the API router.
+
+See [docs/en_US/dashboard.md](../../docs/en_US/dashboard.md).
 
 ## Dependencies
 

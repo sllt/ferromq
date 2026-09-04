@@ -1,0 +1,2852 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "FerroMQ HTTP API",
+    "description": "Management API for FerroMQ (`/api/v1`). Default list responses remain bare JSON arrays; pass `?format=page` for `{ items, offset, limit, truncated, total? }`. 4xx/5xx bodies are `{ code, message, details?, request_id }`. Cluster-aggregating endpoints return HTTP 200 with per-node `{ ok, error? }` instead of a single boolean when some nodes fail. Authentication: `Authorization: Bearer <http_bearer_token>` remains a static superuser (username `operator`, role `admin`). Dashboard login is `POST /api/v1/auth/login` (HttpOnly cookie `ferromq_session`). Created API keys also authenticate as `Authorization: Bearer <secret>` with a bound role. Roles: `admin` (users / keys / audit / broker config write / `?reveal=1` + writes), `operator` (kick / publish / plugin config write+reload / P5 integrations write / P6 alarm ack and cluster writes), `viewer` (read-only, secrets redacted). When no credential or persisted identity exists, reads stay open as anonymous viewer. Anonymous admin requires the explicit unsafe `dashboard_allow_anonymous_admin` option. P4 config `effective` is `hot` (already applied via plugin load_config; not a ferromqd restart), `reload` (file written; call PUT .../config/reload), or `restart_required` (file written; process restart needed). ferromqd is never claimed to hot-restart. P5 adds structured ACL / auth-provider / auto-subscription / topic-rewrite / webhook / bridge APIs on top of P4 plugin-config write. There is no blacklist plugin; GET /api/v1/blacklist documents the gap. P6 diagnostics: alarms are an in-memory bus derived from health/features/unreachable peers (not a native alarm plugin). GET /logs, /trace, /slow-subs return available=false. GET /topic-metrics is route-derived subscriber counts (no per-topic rates). GET /cluster is read-only topology; POST /cluster/join is always 501 (startup-only); POST /cluster/leave works only when ferromq-cluster-raft is active. Cluster write responses always include per-node results.",
+    "version": "0.24.0",
+    "license": { "name": "MIT OR Apache-2.0" }
+  },
+  "servers": [
+    { "url": "http://localhost:6060", "description": "Default plugin listener" }
+  ],
+  "tags": [
+    { "name": "Auth", "description": "Dashboard session login, users, API keys (P3a/P3b)." },
+    { "name": "Users", "description": "Dashboard user list/create/disable (admin)." },
+    { "name": "API Keys", "description": "Hashed API keys; secret shown once on create (admin)." },
+    { "name": "Audit", "description": "Write-operation audit log (admin)." },
+    { "name": "Discovery" },
+    { "name": "Brokers" },
+    { "name": "Nodes" },
+    { "name": "Features" },
+    { "name": "Health" },
+    { "name": "Clients" },
+    { "name": "Subscriptions" },
+    { "name": "Routes" },
+    { "name": "Retains" },
+    { "name": "MQTT" },
+    { "name": "Plugins" },
+    { "name": "Config", "description": "P4 online configuration: plugin config write/validate/versions and read-first broker mqtt/listener/log." },
+    { "name": "ACL", "description": "P5 structured ferromq-acl rules (hot-applied via load_config)." },
+    { "name": "Auth providers", "description": "P5 MQTT client auth plugins (http / jwt), not dashboard login." },
+    { "name": "Blacklist", "description": "Honest gap: FerroMQ has no blacklist plugin." },
+    { "name": "Auto-subscriptions", "description": "P5 ferromq-auto-subscription config." },
+    { "name": "Topic rewrites", "description": "P5 ferromq-topic-rewrite rules." },
+    { "name": "Webhooks", "description": "P5 ferromq-web-hook urls/rules; test is a TCP stub with SSRF checks." },
+    { "name": "Bridges", "description": "P5 bridge plugins: status/attrs + P4 config write + load/unload." },
+    { "name": "Alarms", "description": "P6 in-memory alarm bus derived from health/features/unreachable peers. Not a native alarm plugin; lost on restart." },
+    { "name": "Logs", "description": "P6 gap: no log collector. GET returns available=false." },
+    { "name": "Trace", "description": "P6 gap: no packet-trace plugin." },
+    { "name": "Slow subscriptions", "description": "P6 gap: no slow-subscription tracker." },
+    { "name": "Topic metrics", "description": "P6 route-derived subscriber counts. Per-topic rates are not collected." },
+    { "name": "Cluster", "description": "P6 topology + membership. Join/leave only if ferromq-cluster-raft Plugin::send exists; otherwise 501 with per-node results." },
+    { "name": "Stats" },
+    { "name": "Metrics" }
+  ],
+  "security": [
+    { "bearerAuth": [] },
+    { "sessionCookie": [] }
+  ],
+  "paths": {
+    "/api/v1": {
+      "get": {
+        "operationId": "listApis",
+        "tags": ["Discovery"],
+        "summary": "List documented HTTP endpoints",
+        "responses": {
+          "200": {
+            "description": "Endpoint catalog",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/ApiEndpoint" } }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/openapi.json": {
+      "get": {
+        "operationId": "getOpenApi",
+        "tags": ["Discovery"],
+        "summary": "OpenAPI 3 document for /api/v1",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.0.3 JSON",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          }
+        }
+      }
+    },
+    "/api/v1/docs": {
+      "get": {
+        "operationId": "getDocs",
+        "tags": ["Discovery"],
+        "summary": "Swagger UI for the OpenAPI document",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "HTML docs page",
+            "content": { "text/html": { "schema": { "type": "string" } } }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/login": {
+      "post": {
+        "operationId": "authLogin",
+        "tags": ["Auth"],
+        "summary": "Dashboard login",
+        "description": "Verifies username/password (bcrypt). If no users exist yet and the credentials match `dashboard_admin_*` (or viewer) config, the first login bootstraps that user. Sets `ferromq_session` (HttpOnly, SameSite=Lax, Secure when `dashboard_cookie_secure`). User/API-key hashes are persisted per node; sessions remain process-local.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Session established",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionUser" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" }
+        }
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "operationId": "authLogout",
+        "tags": ["Auth"],
+        "summary": "Clear the dashboard session cookie",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Cookie cleared",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OkResult" } } }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/me": {
+      "get": {
+        "operationId": "authMe",
+        "tags": ["Auth"],
+        "summary": "Current user",
+        "description": "Session cookie, bearer/API key, or anonymous viewer when auth is not configured. Anonymous admin requires dashboard_allow_anonymous_admin=true.",
+        "responses": {
+          "200": {
+            "description": "Identity",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionUser" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/auth/change-password": {
+      "post": {
+        "operationId": "authChangePassword",
+        "tags": ["Auth"],
+        "summary": "Change the current session user's password",
+        "description": "Requires a dashboard session (not bearer/anonymous). New password is stored as a bcrypt hash.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChangePasswordRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated; session cookie is rotated",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChangePasswordResult" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/auth/init": {
+      "post": {
+        "operationId": "authInit",
+        "tags": ["Auth"],
+        "summary": "One-time bootstrap from config",
+        "description": "Creates the configured `dashboard_admin_username` (and optional viewer) when no users exist. Does not accept a caller-chosen password.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Created the configured admin user. Does not start a session.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InitAdminResult" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/v1/users": {
+      "get": {
+        "operationId": "listUsers",
+        "tags": ["Users"],
+        "summary": "List dashboard users",
+        "description": "Admin only. Passwords are never returned.",
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/FormatPage" }
+        ],
+        "responses": {
+          "200": {
+            "description": "User list",
+            "headers": { "X-Row-Count": { "$ref": "#/components/headers/XRowCount" }, "X-Truncated": { "$ref": "#/components/headers/XTruncated" } },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    { "type": "array", "items": { "$ref": "#/components/schemas/DashboardUser" } },
+                    { "$ref": "#/components/schemas/Page" }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      },
+      "post": {
+        "operationId": "createUser",
+        "tags": ["Users"],
+        "summary": "Create a dashboard user",
+        "description": "Admin only. Password is stored as a bcrypt hash.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateUserRequest" } } }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DashboardUser" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/v1/users/{username}/disable": {
+      "post": {
+        "operationId": "disableUser",
+        "tags": ["Users"],
+        "summary": "Disable a dashboard user",
+        "description": "Admin only. Sessions for the user are revoked. Cannot disable the last enabled admin or the current user.",
+        "parameters": [{ "name": "username", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DashboardUser" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/v1/users/{username}/enable": {
+      "post": {
+        "operationId": "enableUser",
+        "tags": ["Users"],
+        "summary": "Re-enable a dashboard user",
+        "parameters": [{ "name": "username", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DashboardUser" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/api-keys": {
+      "get": {
+        "operationId": "listApiKeys",
+        "tags": ["API Keys"],
+        "summary": "List API keys",
+        "description": "Admin only. Secrets are never listed.",
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/FormatPage" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key metadata",
+            "headers": { "X-Row-Count": { "$ref": "#/components/headers/XRowCount" }, "X-Truncated": { "$ref": "#/components/headers/XTruncated" } },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    { "type": "array", "items": { "$ref": "#/components/schemas/ApiKey" } },
+                    { "$ref": "#/components/schemas/Page" }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      },
+      "post": {
+        "operationId": "createApiKey",
+        "tags": ["API Keys"],
+        "summary": "Create an API key",
+        "description": "Admin only. The plaintext secret (`fmqk_<id>_<random>`) is returned **once**. It is stored as SHA-256. Use `Authorization: Bearer <secret>` on `/api/v1`. Role defaults to `operator`.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateApiKeyRequest" } } }
+        },
+        "responses": {
+          "201": {
+            "description": "Created; includes `secret` once",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiKeyCreated" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/v1/api-keys/{id}": {
+      "get": {
+        "operationId": "getApiKey",
+        "tags": ["API Keys"],
+        "summary": "Get one API key (no secret)",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": {
+            "description": "Key metadata",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiKey" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "delete": {
+        "operationId": "deleteApiKey",
+        "tags": ["API Keys"],
+        "summary": "Revoke an API key",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "ok": { "type": "boolean" } } } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/audit": {
+      "get": {
+        "operationId": "listAudit",
+        "tags": ["Audit"],
+        "summary": "List audit events",
+        "description": "Admin only. Newest first. In-memory ring buffer; optional JSONL file via `audit_file`. Filters: `action`, `username`, `success`.",
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/FormatPage" },
+          { "name": "action", "in": "query", "schema": { "type": "string" }, "description": "Exact action filter (login, login_failed, kick_client, publish, plugin_load, api_key_create, ...)" },
+          { "name": "username", "in": "query", "schema": { "type": "string" } },
+          { "name": "success", "in": "query", "schema": { "type": "string", "enum": ["true", "false", "1", "0"] } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Audit events",
+            "headers": { "X-Row-Count": { "$ref": "#/components/headers/XRowCount" }, "X-Truncated": { "$ref": "#/components/headers/XTruncated" } },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    { "type": "array", "items": { "$ref": "#/components/schemas/AuditEvent" } },
+                    { "$ref": "#/components/schemas/Page" }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/v1/brokers": {
+      "get": {
+        "operationId": "getBrokers",
+        "tags": ["Brokers"],
+        "summary": "Basic information of every cluster node",
+        "responses": {
+          "200": {
+            "description": "Per-node broker objects; failed peers are ClusterNodeError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "oneOf": [
+                      { "$ref": "#/components/schemas/BrokerInfo" },
+                      { "$ref": "#/components/schemas/ClusterNodeError" }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/brokers/{id}": {
+      "get": {
+        "operationId": "getBroker",
+        "tags": ["Brokers"],
+        "summary": "Basic information of one node",
+        "parameters": [{ "$ref": "#/components/parameters/NodeId" }],
+        "responses": {
+          "200": {
+            "description": "Broker info",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BrokerInfo" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/nodes": {
+      "get": {
+        "operationId": "getNodes",
+        "tags": ["Nodes"],
+        "summary": "Status of every cluster node",
+        "responses": {
+          "200": {
+            "description": "Per-node status; failed peers are ClusterNodeError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "oneOf": [
+                      { "$ref": "#/components/schemas/NodeInfo" },
+                      { "$ref": "#/components/schemas/ClusterNodeError" }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/nodes/{id}": {
+      "get": {
+        "operationId": "getNode",
+        "tags": ["Nodes"],
+        "summary": "Status of one node",
+        "parameters": [{ "$ref": "#/components/parameters/NodeId" }],
+        "responses": {
+          "200": {
+            "description": "Node status",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NodeInfo" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/features": {
+      "get": {
+        "operationId": "getFeatures",
+        "tags": ["Features"],
+        "summary": "Cluster feature flags plus consistency summary (menu gating)",
+        "description": "`enabled` is the OR of each flag across reachable nodes and is intended for dashboard menu gating. `nodes[]` uses structured `{ ok, error? }` rather than a bare error string. Unreachable nodes increment `failed_count` and set `partial: true`.",
+        "responses": {
+          "200": {
+            "description": "Features summary",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FeaturesSummary" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/features/{id}": {
+      "get": {
+        "operationId": "getFeature",
+        "tags": ["Features"],
+        "summary": "Feature flags of one node",
+        "parameters": [{ "$ref": "#/components/parameters/NodeId" }],
+        "responses": {
+          "200": {
+            "description": "Single-node features",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FeaturesInfo" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/health/check": {
+      "get": {
+        "operationId": "checkHealth",
+        "tags": ["Health"],
+        "summary": "Cluster health check",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Health status",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HealthStatus" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/health/check/{id}": {
+      "get": {
+        "operationId": "checkHealthNode",
+        "tags": ["Health"],
+        "summary": "Health check for one node",
+        "security": [],
+        "parameters": [{ "$ref": "#/components/parameters/NodeId" }],
+        "responses": {
+          "200": {
+            "description": "Health status",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HealthStatus" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/clients": {
+      "get": {
+        "operationId": "searchClients",
+        "tags": ["Clients"],
+        "summary": "Search clients in the cluster",
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/LimitAlias" },
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/OffsetAlias" },
+          { "$ref": "#/components/parameters/FormatPage" },
+          { "name": "clientid", "in": "query", "schema": { "type": "string" } },
+          { "name": "username", "in": "query", "schema": { "type": "string" } },
+          { "name": "ip_address", "in": "query", "schema": { "type": "string" } },
+          { "name": "connected", "in": "query", "schema": { "type": "boolean" } },
+          { "name": "clean_start", "in": "query", "schema": { "type": "boolean" } },
+          { "name": "session_present", "in": "query", "schema": { "type": "boolean" } },
+          { "name": "proto_ver", "in": "query", "schema": { "type": "integer" } },
+          { "name": "_like_clientid", "in": "query", "schema": { "type": "string" } },
+          { "name": "_like_username", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/ClientList" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/clients/offlines": {
+      "get": {
+        "operationId": "searchOfflines",
+        "tags": ["Clients"],
+        "summary": "Search offline clients",
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/LimitAlias" },
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/OffsetAlias" },
+          { "$ref": "#/components/parameters/FormatPage" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/ClientList" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "delete": {
+        "operationId": "kickOfflines",
+        "tags": ["Clients"],
+        "summary": "Kick matching offline clients",
+        "responses": {
+          "200": {
+            "description": "Kick count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["count"],
+                  "properties": { "count": { "type": "integer" } }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/v1/clients/{clientid}": {
+      "get": {
+        "operationId": "getClient",
+        "tags": ["Clients"],
+        "summary": "Get one client",
+        "parameters": [{ "$ref": "#/components/parameters/ClientId" }],
+        "responses": {
+          "200": {
+            "description": "Client",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClientSearchResult" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "delete": {
+        "operationId": "kickClient",
+        "tags": ["Clients"],
+        "summary": "Kick a client",
+        "parameters": [{ "$ref": "#/components/parameters/ClientId" }],
+        "responses": {
+          "200": {
+            "description": "Kicked session id",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/clients/{clientid}/online": {
+      "get": {
+        "operationId": "checkOnline",
+        "tags": ["Clients"],
+        "summary": "Whether a client is online",
+        "parameters": [{ "$ref": "#/components/parameters/ClientId" }],
+        "responses": {
+          "200": {
+            "description": "Online flag",
+            "content": { "application/json": { "schema": { "type": "boolean" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/subscriptions": {
+      "get": {
+        "operationId": "querySubscriptions",
+        "tags": ["Subscriptions"],
+        "summary": "Query subscriptions",
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/LimitAlias" },
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/OffsetAlias" },
+          { "$ref": "#/components/parameters/FormatPage" },
+          { "name": "clientid", "in": "query", "schema": { "type": "string" } },
+          { "name": "topic", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/SubscriptionList" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/subscriptions/{clientid}": {
+      "get": {
+        "operationId": "getClientSubscriptions",
+        "tags": ["Subscriptions"],
+        "summary": "Subscriptions of one client",
+        "parameters": [
+          { "$ref": "#/components/parameters/ClientId" },
+          { "$ref": "#/components/parameters/FormatPage" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/SubscriptionList" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/routes": {
+      "get": {
+        "operationId": "getRoutes",
+        "tags": ["Routes"],
+        "summary": "Routing table snapshot",
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/LimitAlias" },
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/OffsetAlias" },
+          { "$ref": "#/components/parameters/FormatPage" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/RouteList" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/routes/{topic}": {
+      "get": {
+        "operationId": "getRoute",
+        "tags": ["Routes"],
+        "summary": "Routes for one topic filter",
+        "parameters": [
+          { "name": "topic", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "$ref": "#/components/parameters/FormatPage" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/RouteList" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/retains": {
+      "get": {
+        "operationId": "getRetains",
+        "tags": ["Retains"],
+        "summary": "Query retained messages",
+        "description": "Default body is `{ items, has_more }`. `?format=page` adds `offset`, `limit`, `truncated`, and optional `total`.",
+        "parameters": [
+          { "name": "topic_filter", "in": "query", "schema": { "type": "string", "default": "#" } },
+          { "name": "offset", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 0 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 0 } },
+          { "$ref": "#/components/parameters/FormatPage" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Retained page",
+            "headers": { "X-Row-Count": { "$ref": "#/components/headers/XRowCount" }, "X-Truncated": { "$ref": "#/components/headers/XTruncated" } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RetainPage" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "delete": {
+        "operationId": "deleteRetain",
+        "tags": ["Retains"],
+        "summary": "Delete a retained message by exact topic",
+        "parameters": [
+          { "name": "topic", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": { "text/plain": { "schema": { "type": "string", "example": "ok" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/mqtt/publish": {
+      "post": {
+        "operationId": "mqttPublish",
+        "tags": ["MQTT"],
+        "summary": "Publish an MQTT message",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublishParams" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Published",
+            "content": { "text/plain": { "schema": { "type": "string", "example": "ok" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/mqtt/subscribe": {
+      "post": {
+        "operationId": "mqttSubscribe",
+        "tags": ["MQTT"],
+        "summary": "Subscribe a session to topics",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SubscribeParams" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Per-topic results",
+            "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/mqtt/unsubscribe": {
+      "post": {
+        "operationId": "mqttUnsubscribe",
+        "tags": ["MQTT"],
+        "summary": "Unsubscribe a session from a topic",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UnsubscribeParams" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Unsubscribed",
+            "content": { "text/plain": { "schema": { "type": "string", "example": "ok" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/plugins": {
+      "get": {
+        "operationId": "allPlugins",
+        "tags": ["Plugins"],
+        "summary": "Plugins on every cluster node",
+        "description": "Default: array of `{ ok, node, plugins }` (or `{ ok: false, node, plugins: [], error }`). `?format=page` wraps the array.",
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/LimitAlias" },
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/OffsetAlias" },
+          { "$ref": "#/components/parameters/FormatPage" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-node plugin groups",
+            "headers": { "X-Row-Count": { "$ref": "#/components/headers/XRowCount" }, "X-Truncated": { "$ref": "#/components/headers/XTruncated" } },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    { "type": "array", "items": { "$ref": "#/components/schemas/PluginNodeGroup" } },
+                    { "$ref": "#/components/schemas/Page" }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/plugins/{node}": {
+      "get": {
+        "operationId": "nodePlugins",
+        "tags": ["Plugins"],
+        "summary": "Plugins on one node",
+        "parameters": [
+          { "$ref": "#/components/parameters/PluginNode" },
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/LimitAlias" },
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/OffsetAlias" },
+          { "$ref": "#/components/parameters/FormatPage" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/PluginList" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/plugins/{node}/{plugin}": {
+      "get": {
+        "operationId": "nodePluginInfo",
+        "tags": ["Plugins"],
+        "summary": "One plugin on one node",
+        "parameters": [
+          { "$ref": "#/components/parameters/PluginNode" },
+          { "$ref": "#/components/parameters/PluginName" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Plugin info",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PluginInfo" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/plugins/{node}/{plugin}/config": {
+      "get": {
+        "operationId": "nodePluginConfig",
+        "tags": ["Plugins", "Config"],
+        "summary": "Read a plugin config (secrets redacted unless reveal=1 and admin)",
+        "parameters": [
+          { "$ref": "#/components/parameters/PluginNode" },
+          { "$ref": "#/components/parameters/PluginName" },
+          { "$ref": "#/components/parameters/RevealSecrets" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Plugin config JSON (password/token/private_key/secret/jwt keys redacted by default)",
+            "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "put": {
+        "operationId": "nodePluginConfigUpdate",
+        "tags": ["Plugins", "Config"],
+        "summary": "Write a plugin config file (operator+)",
+        "description": "Accepts a JSON object, `{ \"toml\": \"...\" }`, or raw TOML. Atomically writes `{plugins.dir}/{plugin}.toml`, keeps last N backups, optionally applies via plugin `load_config` (`?apply=reload`, default). Returns a diff and `effective`: `hot` (already applied in-process via load_config — not a ferromqd restart), `reload` (call PUT .../config/reload), or `restart_required` (immutable / load_config failed / not initialized).",
+        "parameters": [
+          { "$ref": "#/components/parameters/PluginNode" },
+          { "$ref": "#/components/parameters/PluginName" },
+          { "$ref": "#/components/parameters/ApplyMode" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteBody" } },
+            "application/toml": { "schema": { "type": "string" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Written",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/plugins/{node}/{plugin}/config/validate": {
+      "post": {
+        "operationId": "nodePluginConfigValidate",
+        "tags": ["Plugins", "Config"],
+        "summary": "Dry-run validate a plugin config without writing",
+        "parameters": [
+          { "$ref": "#/components/parameters/PluginNode" },
+          { "$ref": "#/components/parameters/PluginName" },
+          { "$ref": "#/components/parameters/ApplyMode" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteBody" } },
+            "application/toml": { "schema": { "type": "string" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Valid",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigValidateResult" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/plugins/{node}/{plugin}/config/versions": {
+      "get": {
+        "operationId": "nodePluginConfigVersions",
+        "tags": ["Plugins", "Config"],
+        "summary": "List last-N plugin config backups",
+        "parameters": [
+          { "$ref": "#/components/parameters/PluginNode" },
+          { "$ref": "#/components/parameters/PluginName" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Newest first",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/ConfigVersion" } } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/plugins/{node}/{plugin}/config/rollback/{version}": {
+      "post": {
+        "operationId": "nodePluginConfigRollback",
+        "tags": ["Plugins", "Config"],
+        "summary": "Restore a plugin config backup (operator+)",
+        "parameters": [
+          { "$ref": "#/components/parameters/PluginNode" },
+          { "$ref": "#/components/parameters/PluginName" },
+          { "$ref": "#/components/parameters/ConfigVersionId" },
+          { "$ref": "#/components/parameters/ApplyMode" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rolled back",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/broker/config": {
+      "get": {
+        "operationId": "getBrokerConfig",
+        "tags": ["Config"],
+        "summary": "Read-only ferromq.toml overview (mqtt/listener/log)",
+        "description": "Reads this node's ferromq.toml. Secrets are redacted unless `?reveal=1` and admin. Writing mqtt/listener/log never hot-restarts ferromqd (`effective` is always `restart_required`).",
+        "parameters": [
+          { "$ref": "#/components/parameters/RevealSecrets" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Overview",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BrokerConfigOverview" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/broker/config/{section}": {
+      "get": {
+        "operationId": "getBrokerConfigSection",
+        "tags": ["Config"],
+        "summary": "Read one ferromq.toml section (mqtt / listener / log)",
+        "parameters": [
+          { "$ref": "#/components/parameters/BrokerSection" },
+          { "$ref": "#/components/parameters/RevealSecrets" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Section",
+            "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "put": {
+        "operationId": "putBrokerConfigSection",
+        "tags": ["Config"],
+        "summary": "Write mqtt/listener/log to ferromq.toml (admin)",
+        "description": "Merges the JSON/TOML body into that section of ferromq.toml. Always returns `effective=restart_required`. Does not claim a hot restart of ferromqd.",
+        "parameters": [
+          { "$ref": "#/components/parameters/BrokerSection" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteBody" } },
+            "application/toml": { "schema": { "type": "string" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Written to disk only",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/broker/config/{section}/validate": {
+      "post": {
+        "operationId": "validateBrokerConfigSection",
+        "tags": ["Config"],
+        "summary": "Dry-run validate a mqtt/listener/log patch (admin)",
+        "parameters": [
+          { "$ref": "#/components/parameters/BrokerSection" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteBody" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Valid",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigValidateResult" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/v1/broker/config/versions": {
+      "get": {
+        "operationId": "listBrokerConfigVersions",
+        "tags": ["Config"],
+        "summary": "List ferromq.toml backups",
+        "responses": {
+          "200": {
+            "description": "Newest first",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/ConfigVersion" } } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/broker/config/rollback/{version}": {
+      "post": {
+        "operationId": "rollbackBrokerConfig",
+        "tags": ["Config"],
+        "summary": "Restore a ferromq.toml backup (admin). Still restart_required.",
+        "parameters": [
+          { "$ref": "#/components/parameters/ConfigVersionId" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rolled back on disk",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/plugins/{node}/{plugin}/config/reload": {
+      "put": {
+        "operationId": "nodePluginConfigReload",
+        "tags": ["Plugins"],
+        "summary": "Reload a plugin config from disk",
+        "parameters": [
+          { "$ref": "#/components/parameters/PluginNode" },
+          { "$ref": "#/components/parameters/PluginName" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reloaded",
+            "content": { "text/plain": { "schema": { "type": "string", "example": "ok" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/plugins/{node}/{plugin}/load": {
+      "put": {
+        "operationId": "nodePluginLoad",
+        "tags": ["Plugins"],
+        "summary": "Load / start a plugin on a node",
+        "parameters": [
+          { "$ref": "#/components/parameters/PluginNode" },
+          { "$ref": "#/components/parameters/PluginName" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Loaded",
+            "content": { "text/plain": { "schema": { "type": "string", "example": "ok" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/plugins/{node}/{plugin}/unload": {
+      "put": {
+        "operationId": "nodePluginUnload",
+        "tags": ["Plugins"],
+        "summary": "Unload / stop a plugin on a node",
+        "parameters": [
+          { "$ref": "#/components/parameters/PluginNode" },
+          { "$ref": "#/components/parameters/PluginName" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Unloaded",
+            "content": { "application/json": { "schema": { "type": "boolean" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/stats": {
+      "get": {
+        "operationId": "getStats",
+        "tags": ["Stats"],
+        "summary": "Per-node stats for the cluster",
+        "description": "Array of `{ ok: true, node, stats }` or `{ ok: false, node, error }`.",
+        "responses": {
+          "200": {
+            "description": "Per-node stats",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/StatsNode" } }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/stats/sum": {
+      "get": {
+        "operationId": "getStatsSum",
+        "tags": ["Stats"],
+        "summary": "Aggregated cluster stats",
+        "responses": {
+          "200": {
+            "description": "Sum object (`nodes` map + `stats`)",
+            "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/stats/{id}": {
+      "get": {
+        "operationId": "getStatsNode",
+        "tags": ["Stats"],
+        "summary": "Stats for one node",
+        "parameters": [{ "$ref": "#/components/parameters/NodeId" }],
+        "responses": {
+          "200": {
+            "description": "Node stats",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StatsNode" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/stats/sys": {
+      "get": {
+        "operationId": "getSysStats",
+        "tags": ["Stats"],
+        "summary": "Per-node system stats",
+        "responses": {
+          "200": {
+            "description": "Per-node system stats",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/StatsNode" } }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/stats/sys/sum": {
+      "get": {
+        "operationId": "getSysStatsSum",
+        "tags": ["Stats"],
+        "summary": "Aggregated system stats",
+        "responses": {
+          "200": {
+            "description": "Sum object",
+            "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/stats/sys/{id}": {
+      "get": {
+        "operationId": "getSysStatsNode",
+        "tags": ["Stats"],
+        "summary": "System stats for one node",
+        "parameters": [{ "$ref": "#/components/parameters/NodeId" }],
+        "responses": {
+          "200": {
+            "description": "Node system stats",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StatsNode" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/stats/history": {
+      "get": {
+        "operationId": "getStatsHistory",
+        "tags": ["Stats"],
+        "summary": "Historical stats (all nodes)",
+        "parameters": [{ "$ref": "#/components/parameters/HistoryFrom" }, { "$ref": "#/components/parameters/HistoryTo" }, { "$ref": "#/components/parameters/HistoryLimit" }],
+        "responses": {
+          "200": {
+            "description": "History series",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/HistoryData" } } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/stats/history/sum": {
+      "get": {
+        "operationId": "getStatsHistorySum",
+        "tags": ["Stats"],
+        "summary": "Aggregated historical stats",
+        "parameters": [{ "$ref": "#/components/parameters/HistoryFrom" }, { "$ref": "#/components/parameters/HistoryTo" }, { "$ref": "#/components/parameters/HistoryLimit" }],
+        "responses": {
+          "200": {
+            "description": "Aggregated history",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HistoryData" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/stats/history/{id}": {
+      "get": {
+        "operationId": "getStatsHistoryNode",
+        "tags": ["Stats"],
+        "summary": "Historical stats for one node",
+        "parameters": [
+          { "$ref": "#/components/parameters/NodeId" },
+          { "$ref": "#/components/parameters/HistoryFrom" },
+          { "$ref": "#/components/parameters/HistoryTo" },
+          { "$ref": "#/components/parameters/HistoryLimit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "History",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HistoryData" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/metrics": {
+      "get": {
+        "operationId": "getMetrics",
+        "tags": ["Metrics"],
+        "summary": "Per-node metrics for the cluster",
+        "responses": {
+          "200": {
+            "description": "Per-node metrics; failed peers use `{ ok: false, node, error }`",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/MetricsNode" } }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/metrics/sum": {
+      "get": {
+        "operationId": "getMetricsSum",
+        "tags": ["Metrics"],
+        "summary": "Aggregated cluster metrics",
+        "responses": {
+          "200": {
+            "description": "Sum object",
+            "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/metrics/{id}": {
+      "get": {
+        "operationId": "getMetricsNode",
+        "tags": ["Metrics"],
+        "summary": "Metrics for one node",
+        "parameters": [{ "$ref": "#/components/parameters/NodeId" }],
+        "responses": {
+          "200": {
+            "description": "Node metrics",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MetricsNode" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/metrics/prometheus": {
+      "get": {
+        "operationId": "getPrometheusMetrics",
+        "tags": ["Metrics"],
+        "summary": "Prometheus text exposition (all nodes)",
+        "responses": {
+          "200": {
+            "description": "Prometheus text",
+            "content": { "text/plain": { "schema": { "type": "string" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/metrics/prometheus/sum": {
+      "get": {
+        "operationId": "getPrometheusMetricsSum",
+        "tags": ["Metrics"],
+        "summary": "Aggregated Prometheus text",
+        "responses": {
+          "200": {
+            "description": "Prometheus text",
+            "content": { "text/plain": { "schema": { "type": "string" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/metrics/prometheus/{id}": {
+      "get": {
+        "operationId": "getPrometheusMetricsNode",
+        "tags": ["Metrics"],
+        "summary": "Prometheus text for one node",
+        "parameters": [{ "$ref": "#/components/parameters/NodeId" }],
+        "responses": {
+          "200": {
+            "description": "Prometheus text",
+            "content": { "text/plain": { "schema": { "type": "string" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/metrics/history": {
+      "get": {
+        "operationId": "getMetricsHistory",
+        "tags": ["Metrics"],
+        "summary": "Historical metrics (all nodes)",
+        "parameters": [{ "$ref": "#/components/parameters/HistoryFrom" }, { "$ref": "#/components/parameters/HistoryTo" }, { "$ref": "#/components/parameters/HistoryLimit" }],
+        "responses": {
+          "200": {
+            "description": "History series",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/HistoryData" } } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/metrics/history/sum": {
+      "get": {
+        "operationId": "getMetricsHistorySum",
+        "tags": ["Metrics"],
+        "summary": "Aggregated historical metrics",
+        "parameters": [{ "$ref": "#/components/parameters/HistoryFrom" }, { "$ref": "#/components/parameters/HistoryTo" }, { "$ref": "#/components/parameters/HistoryLimit" }],
+        "responses": {
+          "200": {
+            "description": "Aggregated history",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HistoryData" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/metrics/history/{id}": {
+      "get": {
+        "operationId": "getMetricsHistoryNode",
+        "tags": ["Metrics"],
+        "summary": "Historical metrics for one node",
+        "parameters": [
+          { "$ref": "#/components/parameters/NodeId" },
+          { "$ref": "#/components/parameters/HistoryFrom" },
+          { "$ref": "#/components/parameters/HistoryTo" },
+          { "$ref": "#/components/parameters/HistoryLimit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "History",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HistoryData" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/acl": {
+      "get": {
+        "operationId": "getAcl",
+        "tags": ["ACL"],
+        "summary": "ACL settings and structured rules",
+        "description": "Reads ferromq-acl.toml. Passwords in who objects are `***` unless `?reveal=1` and admin.",
+        "parameters": [{ "$ref": "#/components/parameters/Reveal" }, { "$ref": "#/components/parameters/NodeQuery" }],
+        "responses": {
+          "200": { "description": "ACL overview", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AclOverview" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "put": {
+        "operationId": "putAcl",
+        "tags": ["ACL"],
+        "summary": "Update ACL settings and/or replace rules",
+        "description": "Writes ferromq-acl.toml and applies via plugin load_config when possible (`effective=hot`).",
+        "parameters": [{ "$ref": "#/components/parameters/Apply" }, { "$ref": "#/components/parameters/NodeQuery" }],
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AclWriteBody" } } } },
+        "responses": {
+          "200": { "description": "Write result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } } },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/v1/acl/rules": {
+      "get": {
+        "operationId": "listAclRules",
+        "tags": ["ACL"],
+        "summary": "List ACL rules",
+        "parameters": [{ "$ref": "#/components/parameters/Reveal" }, { "$ref": "#/components/parameters/NodeQuery" }, { "$ref": "#/components/parameters/Format" }],
+        "responses": {
+          "200": { "description": "Rules", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/AclRule" } } } } }
+        }
+      },
+      "post": {
+        "operationId": "addAclRule",
+        "tags": ["ACL"],
+        "summary": "Add an ACL rule",
+        "parameters": [{ "$ref": "#/components/parameters/Apply" }, { "$ref": "#/components/parameters/NodeQuery" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AclRuleInput" } } } },
+        "responses": {
+          "200": { "description": "Added", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/v1/acl/rules/{index}": {
+      "put": {
+        "operationId": "updateAclRule",
+        "tags": ["ACL"],
+        "summary": "Replace an ACL rule by index",
+        "parameters": [{ "$ref": "#/components/parameters/Index" }, { "$ref": "#/components/parameters/Apply" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AclRuleInput" } } } },
+        "responses": {
+          "200": { "description": "Updated", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "delete": {
+        "operationId": "deleteAclRule",
+        "tags": ["ACL"],
+        "summary": "Delete an ACL rule by index",
+        "parameters": [{ "$ref": "#/components/parameters/Index" }, { "$ref": "#/components/parameters/Apply" }],
+        "responses": {
+          "200": { "description": "Deleted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/auth-providers": {
+      "get": {
+        "operationId": "listAuthProviders",
+        "tags": ["Auth providers"],
+        "summary": "List MQTT client auth plugins",
+        "description": "ferromq-auth-http and ferromq-auth-jwt only. Not dashboard login.",
+        "responses": {
+          "200": { "description": "Providers", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuthProviderList" } } } }
+        }
+      }
+    },
+    "/api/v1/auth-providers/{name}": {
+      "get": {
+        "operationId": "getAuthProvider",
+        "tags": ["Auth providers"],
+        "summary": "Get auth-http or auth-jwt config",
+        "parameters": [{ "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/Reveal" }],
+        "responses": {
+          "200": { "description": "Config (secrets redacted)", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "put": {
+        "operationId": "putAuthProvider",
+        "tags": ["Auth providers"],
+        "summary": "Write auth provider config via P4",
+        "parameters": [{ "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/Apply" }],
+        "responses": {
+          "200": { "description": "Write result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } } }
+        }
+      }
+    },
+    "/api/v1/auth-providers/{name}/test": {
+      "post": {
+        "operationId": "testAuthProvider",
+        "tags": ["Auth providers"],
+        "summary": "Connectivity / config test stub",
+        "description": "http: TCP connect after SSRF checks (no HTTP request). jwt: local hmac_secret / public_key file check. Not a live IdP probe.",
+        "parameters": [{ "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/AllowPrivate" }],
+        "responses": {
+          "200": { "description": "Test result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConnectivityTest" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/api/v1/blacklist": {
+      "get": {
+        "operationId": "getBlacklist",
+        "tags": ["Blacklist"],
+        "summary": "Blacklist availability (gap)",
+        "description": "FerroMQ does not ship a blacklist plugin. Returns available=false and ACL connect-rule alternatives.",
+        "responses": {
+          "200": { "description": "Gap document", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BlacklistGap" } } } }
+        }
+      },
+      "post": {
+        "operationId": "addBlacklist",
+        "tags": ["Blacklist"],
+        "summary": "Not implemented (no plugin)",
+        "responses": { "501": { "description": "No blacklist plugin" } }
+      }
+    },
+    "/api/v1/auto-subscriptions": {
+      "get": {
+        "operationId": "listAutoSubscriptions",
+        "tags": ["Auto-subscriptions"],
+        "summary": "List auto-subscription topic filters",
+        "responses": { "200": { "description": "Items", "content": { "application/json": { "schema": { "type": "object" } } } } }
+      },
+      "post": {
+        "operationId": "addAutoSubscription",
+        "tags": ["Auto-subscriptions"],
+        "summary": "Add an auto-subscription",
+        "responses": { "200": { "description": "Write result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } } } }
+      }
+    },
+    "/api/v1/auto-subscriptions/{index}": {
+      "put": {
+        "operationId": "updateAutoSubscription",
+        "tags": ["Auto-subscriptions"],
+        "parameters": [{ "$ref": "#/components/parameters/Index" }],
+        "responses": { "200": { "description": "Updated" } }
+      },
+      "delete": {
+        "operationId": "deleteAutoSubscription",
+        "tags": ["Auto-subscriptions"],
+        "parameters": [{ "$ref": "#/components/parameters/Index" }],
+        "responses": { "200": { "description": "Deleted" } }
+      }
+    },
+    "/api/v1/topic-rewrites": {
+      "get": {
+        "operationId": "listTopicRewrites",
+        "tags": ["Topic rewrites"],
+        "summary": "List topic-rewrite rules",
+        "responses": { "200": { "description": "Items" } }
+      },
+      "post": {
+        "operationId": "addTopicRewrite",
+        "tags": ["Topic rewrites"],
+        "summary": "Add a rewrite rule",
+        "responses": { "200": { "description": "Write result" } }
+      }
+    },
+    "/api/v1/topic-rewrites/{index}": {
+      "put": { "operationId": "updateTopicRewrite", "tags": ["Topic rewrites"], "parameters": [{ "$ref": "#/components/parameters/Index" }], "responses": { "200": { "description": "Updated" } } },
+      "delete": { "operationId": "deleteTopicRewrite", "tags": ["Topic rewrites"], "parameters": [{ "$ref": "#/components/parameters/Index" }], "responses": { "200": { "description": "Deleted" } } }
+    },
+    "/api/v1/webhooks": {
+      "get": {
+        "operationId": "getWebhooks",
+        "tags": ["Webhooks"],
+        "summary": "Webhook urls, rules, and plugin attrs",
+        "description": "URL userinfo is redacted unless reveal=1 and admin. queue_capacity / concurrency_limit need a plugin restart (plugin docs).",
+        "parameters": [{ "$ref": "#/components/parameters/Reveal" }],
+        "responses": { "200": { "description": "Webhook config" } }
+      },
+      "put": {
+        "operationId": "putWebhooks",
+        "tags": ["Webhooks"],
+        "summary": "Update webhook settings / default urls",
+        "responses": { "200": { "description": "Write result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } } } }
+      }
+    },
+    "/api/v1/webhooks/urls": {
+      "post": {
+        "operationId": "addWebhookUrl",
+        "tags": ["Webhooks"],
+        "summary": "Append a default webhook URL",
+        "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] } } } },
+        "responses": { "200": { "description": "Added" } }
+      }
+    },
+    "/api/v1/webhooks/urls/{index}": {
+      "delete": { "operationId": "deleteWebhookUrl", "tags": ["Webhooks"], "parameters": [{ "$ref": "#/components/parameters/Index" }], "responses": { "200": { "description": "Deleted" } } }
+    },
+    "/api/v1/webhooks/rules": {
+      "post": {
+        "operationId": "addWebhookRule",
+        "tags": ["Webhooks"],
+        "summary": "Add a hook rule",
+        "responses": { "200": { "description": "Added" } }
+      }
+    },
+    "/api/v1/webhooks/rules/{hook}/{index}": {
+      "put": { "operationId": "updateWebhookRule", "tags": ["Webhooks"], "responses": { "200": { "description": "Updated" } } },
+      "delete": { "operationId": "deleteWebhookRule", "tags": ["Webhooks"], "responses": { "200": { "description": "Deleted" } } }
+    },
+    "/api/v1/webhooks/test": {
+      "post": {
+        "operationId": "testWebhook",
+        "tags": ["Webhooks"],
+        "summary": "TCP connectivity stub (no HTTP POST)",
+        "description": "SSRF: only http/https; blocks loopback/private/metadata unless allow_private=1 and admin.",
+        "parameters": [{ "$ref": "#/components/parameters/AllowPrivate" }],
+        "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "url": { "type": "string" } } } } } },
+        "responses": {
+          "200": { "description": "Probe result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConnectivityTest" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/api/v1/bridges": {
+      "get": {
+        "operationId": "listBridges",
+        "tags": ["Bridges"],
+        "summary": "List bridge plugins and attrs",
+        "responses": { "200": { "description": "Bridge list" } }
+      }
+    },
+    "/api/v1/bridges/{plugin}": {
+      "get": {
+        "operationId": "getBridge",
+        "tags": ["Bridges"],
+        "summary": "Bridge config + plugin attrs",
+        "parameters": [{ "name": "plugin", "in": "path", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/Reveal" }],
+        "responses": { "200": { "description": "Bridge" }, "404": { "$ref": "#/components/responses/NotFound" } }
+      },
+      "put": {
+        "operationId": "putBridge",
+        "tags": ["Bridges"],
+        "summary": "Write bridge config via P4",
+        "parameters": [{ "name": "plugin", "in": "path", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/Apply" }],
+        "responses": { "200": { "description": "Write result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigWriteResult" } } } } }
+      }
+    },
+    "/api/v1/bridges/{plugin}/load": {
+      "put": { "operationId": "loadBridge", "tags": ["Bridges"], "summary": "Start/load a bridge plugin", "responses": { "200": { "description": "Loaded" } } }
+    },
+    "/api/v1/bridges/{plugin}/unload": {
+      "put": { "operationId": "unloadBridge", "tags": ["Bridges"], "summary": "Stop/unload a bridge plugin", "responses": { "200": { "description": "Unloaded" } } }
+    },
+    "/api/v1/alarms": {
+      "get": {
+        "operationId": "listAlarms",
+        "tags": ["Alarms"],
+        "summary": "Current derived alarms",
+        "description": "In-memory bus refreshed from health, features, and node reachability. available=true means the bus exists, not that FerroMQ has a native alarm plugin.",
+        "responses": {
+          "200": { "description": "Alarm list", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AlarmList" } } } }
+        }
+      }
+    },
+    "/api/v1/alarms/history": {
+      "get": {
+        "operationId": "listAlarmHistory",
+        "tags": ["Alarms"],
+        "summary": "Cleared alarms (process memory)",
+        "responses": {
+          "200": { "description": "History", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AlarmList" } } } }
+        }
+      }
+    },
+    "/api/v1/alarms/{id}/acknowledge": {
+      "post": {
+        "operationId": "acknowledgeAlarm",
+        "tags": ["Alarms"],
+        "summary": "Acknowledge a current alarm (operator+)",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "Acknowledged" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/v1/logs": {
+      "get": {
+        "operationId": "getLogs",
+        "tags": ["Logs"],
+        "summary": "Log query availability (gap)",
+        "description": "No log collector. Returns available=false and points at GET /broker/config/log.",
+        "responses": { "200": { "description": "Gap document", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CapabilityGap" } } } } }
+      }
+    },
+    "/api/v1/trace": {
+      "get": {
+        "operationId": "getTrace",
+        "tags": ["Trace"],
+        "summary": "Packet-trace availability (gap)",
+        "responses": { "200": { "description": "Gap document", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CapabilityGap" } } } } }
+      },
+      "post": {
+        "operationId": "startTrace",
+        "tags": ["Trace"],
+        "summary": "Not implemented (no plugin)",
+        "responses": { "501": { "description": "No trace plugin; details.nodes not used (local gap)" } }
+      }
+    },
+    "/api/v1/slow-subs": {
+      "get": {
+        "operationId": "getSlowSubs",
+        "tags": ["Slow subscriptions"],
+        "summary": "Slow-subscription availability (gap)",
+        "responses": { "200": { "description": "Gap document", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CapabilityGap" } } } } }
+      }
+    },
+    "/api/v1/topic-metrics": {
+      "get": {
+        "operationId": "getTopicMetrics",
+        "tags": ["Topic metrics"],
+        "summary": "Route-derived subscriber counts",
+        "description": "available=true with kind=route_derived. Per-topic publish/deliver rates are not collected. $SYS topics are listed only when ferromq-sys-topic is loaded.",
+        "responses": { "200": { "description": "Topic metrics", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TopicMetrics" } } } } }
+      }
+    },
+    "/api/v1/cluster": {
+      "get": {
+        "operationId": "getCluster",
+        "tags": ["Cluster"],
+        "summary": "Read-only cluster topology",
+        "description": "mode is standalone | raft | broadcast. membership.join/leave say whether write APIs exist. GET /brokers and GET /nodes also include an additive cluster object.",
+        "responses": { "200": { "description": "Topology", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClusterTopology" } } } } }
+      }
+    },
+    "/api/v1/cluster/join": {
+      "post": {
+        "operationId": "clusterJoin",
+        "tags": ["Cluster"],
+        "summary": "Runtime join is not supported",
+        "description": "Always 501. Raft::join is consumed at ferromq-cluster-raft init from raft_peer_addrs. Response details.nodes is a per-node result array.",
+        "responses": {
+          "501": { "description": "Not implemented", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClusterWriteResult" } } } },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/v1/cluster/leave": {
+      "post": {
+        "operationId": "clusterLeave",
+        "tags": ["Cluster"],
+        "summary": "Leave when ferromq-cluster-raft is active",
+        "description": "Calls Plugin::send({op:leave}) → Mailbox::leave on the local node. Otherwise 501. Always returns per-node results.",
+        "responses": {
+          "200": { "description": "Per-node leave result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClusterWriteResult" } } } },
+          "501": { "description": "No runtime leave API", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClusterWriteResult" } } } },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "NodeId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "integer", "format": "int64", "minimum": 0 }
+      },
+      "ClientId": {
+        "name": "clientid",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      },
+      "PluginNode": {
+        "name": "node",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "integer", "format": "int64", "minimum": 0 }
+      },
+      "PluginName": {
+        "name": "plugin",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      },
+      "RevealSecrets": {
+        "name": "reveal",
+        "in": "query",
+        "required": false,
+        "description": "If `1`/`true`, return unredacted secrets. Admin only; others get 403.",
+        "schema": { "type": "string", "enum": ["1", "true", "yes", "on"] }
+      },
+      "ApplyMode": {
+        "name": "apply",
+        "in": "query",
+        "required": false,
+        "description": "`reload` (default) calls plugin `load_config` after write. `none` writes the file only.",
+        "schema": { "type": "string", "enum": ["reload", "none"], "default": "reload" }
+      },
+      "ConfigVersionId": {
+        "name": "version",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      },
+      "BrokerSection": {
+        "name": "section",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "enum": ["mqtt", "listener", "listeners", "log"] }
+      },
+      "Limit": {
+        "name": "_limit",
+        "in": "query",
+        "description": "Max rows. `0` or omitted uses plugin `max_row_limit` (default 10000).",
+        "schema": { "type": "integer", "minimum": 0 }
+      },
+      "LimitAlias": {
+        "name": "limit",
+        "in": "query",
+        "description": "Alias of `_limit` (used by `/retains` as the canonical name).",
+        "schema": { "type": "integer", "minimum": 0 }
+      },
+      "Offset": {
+        "name": "_offset",
+        "in": "query",
+        "description": "Rows to skip after the backend fetch.",
+        "schema": { "type": "integer", "minimum": 0, "default": 0 }
+      },
+      "OffsetAlias": {
+        "name": "offset",
+        "in": "query",
+        "description": "Alias of `_offset`.",
+        "schema": { "type": "integer", "minimum": 0, "default": 0 }
+      },
+      "FormatPage": {
+        "name": "format",
+        "in": "query",
+        "description": "Set to `page` to wrap a list as `{ items, offset, limit, truncated, total? }` instead of a bare array. Default is the historical array body.",
+        "schema": { "type": "string", "enum": ["page"] }
+      },
+      "HistoryFrom": {
+        "name": "from",
+        "in": "query",
+        "schema": { "type": "integer", "format": "int64" },
+        "description": "Start timestamp (milliseconds, inclusive)"
+      },
+      "HistoryTo": {
+        "name": "to",
+        "in": "query",
+        "schema": { "type": "integer", "format": "int64" },
+        "description": "End timestamp (milliseconds, inclusive)"
+      },
+      "HistoryLimit": {
+        "name": "limit",
+        "in": "query",
+        "schema": { "type": "integer", "minimum": 0 }
+      },
+      "Reveal": {
+        "name": "reveal",
+        "in": "query",
+        "required": false,
+        "description": "If `1`/`true`, return unredacted secrets. Admin only; others get 403.",
+        "schema": { "type": "string", "enum": ["1", "true", "yes", "on"] }
+      },
+      "Apply": {
+        "name": "apply",
+        "in": "query",
+        "required": false,
+        "description": "`reload` (default) calls plugin `load_config` after write. `none` writes the file only.",
+        "schema": { "type": "string", "enum": ["reload", "none"], "default": "reload" }
+      },
+      "Format": {
+        "name": "format",
+        "in": "query",
+        "description": "Set to `page` to wrap a list.",
+        "schema": { "type": "string", "enum": ["page"] }
+      },
+      "NodeQuery": {
+        "name": "node",
+        "in": "query",
+        "required": false,
+        "description": "Target node id. Defaults to the HTTP API local node.",
+        "schema": { "type": "integer", "format": "int64" }
+      },
+      "Index": {
+        "name": "index",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "integer", "minimum": 0 }
+      },
+      "AllowPrivate": {
+        "name": "allow_private",
+        "in": "query",
+        "required": false,
+        "description": "Allow loopback/private IPs on connectivity tests. Admin only.",
+        "schema": { "type": "string", "enum": ["1", "true", "yes", "on"] }
+      }
+    },
+    "headers": {
+      "XRowCount": {
+        "description": "Number of rows in this response (`items.length` for page / retains).",
+        "schema": { "type": "integer", "minimum": 0 }
+      },
+      "XTruncated": {
+        "description": "`true` when the result was cut off by `_limit` / `max_row_limit`.",
+        "schema": { "type": "boolean" }
+      },
+      "XRequestId": {
+        "description": "Correlation id. Echoed from the request header when present.",
+        "schema": { "type": "string" }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Invalid request",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/XRequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "Unauthorized": {
+        "description": "Missing or invalid bearer token / session cookie",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/XRequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "Forbidden": {
+        "description": "Authenticated but role cannot perform this action (viewer vs operator vs admin)",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/XRequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "TooManyRequests": {
+        "description": "Login rate limit exceeded",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/XRequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "Conflict": {
+        "description": "Dashboard users already initialized",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/XRequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "NotFound": {
+        "description": "Resource not found",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/XRequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "Unavailable": {
+        "description": "Backend / peer unavailable",
+        "headers": { "X-Request-Id": { "$ref": "#/components/headers/XRequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "ClientList": {
+        "description": "Bare array by default; `{ items, ... }` when `format=page`.",
+        "headers": { "X-Row-Count": { "$ref": "#/components/headers/XRowCount" }, "X-Truncated": { "$ref": "#/components/headers/XTruncated" } },
+        "content": {
+          "application/json": {
+            "schema": {
+              "oneOf": [
+                { "type": "array", "items": { "$ref": "#/components/schemas/ClientSearchResult" } },
+                { "$ref": "#/components/schemas/Page" }
+              ]
+            }
+          }
+        }
+      },
+      "SubscriptionList": {
+        "description": "Bare array by default; page envelope when `format=page`.",
+        "headers": { "X-Row-Count": { "$ref": "#/components/headers/XRowCount" }, "X-Truncated": { "$ref": "#/components/headers/XTruncated" } },
+        "content": {
+          "application/json": {
+            "schema": {
+              "oneOf": [
+                { "type": "array", "items": { "$ref": "#/components/schemas/Subscription" } },
+                { "$ref": "#/components/schemas/Page" }
+              ]
+            }
+          }
+        }
+      },
+      "RouteList": {
+        "description": "Bare array by default; page envelope when `format=page`.",
+        "headers": { "X-Row-Count": { "$ref": "#/components/headers/XRowCount" }, "X-Truncated": { "$ref": "#/components/headers/XTruncated" } },
+        "content": {
+          "application/json": {
+            "schema": {
+              "oneOf": [
+                { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+                { "$ref": "#/components/schemas/Page" }
+              ]
+            }
+          }
+        }
+      },
+      "PluginList": {
+        "description": "Bare plugin array by default; page envelope when `format=page`.",
+        "headers": { "X-Row-Count": { "$ref": "#/components/headers/XRowCount" }, "X-Truncated": { "$ref": "#/components/headers/XTruncated" } },
+        "content": {
+          "application/json": {
+            "schema": {
+              "oneOf": [
+                { "type": "array", "items": { "$ref": "#/components/schemas/PluginInfo" } },
+                { "$ref": "#/components/schemas/Page" }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": ["code", "message"],
+        "properties": {
+          "code": { "type": "integer", "description": "Same value as the HTTP status code" },
+          "message": { "type": "string" },
+          "details": { "description": "Optional structured extras", "nullable": true },
+          "request_id": { "type": "string", "description": "Correlation id (also in X-Request-Id)" }
+        }
+      },
+      "Page": {
+        "type": "object",
+        "required": ["items", "offset", "limit", "truncated"],
+        "properties": {
+          "items": { "type": "array", "items": {} },
+          "offset": { "type": "integer", "minimum": 0 },
+          "limit": { "type": "integer", "minimum": 0 },
+          "truncated": { "type": "boolean" },
+          "total": { "type": "integer", "minimum": 0, "description": "Present only when the backend knows the full count" }
+        }
+      },
+      "ClusterNodeError": {
+        "type": "object",
+        "required": ["ok", "error"],
+        "properties": {
+          "ok": { "type": "boolean", "enum": [false] },
+          "node_id": { "type": "integer", "format": "int64" },
+          "node": { "description": "Present on stats/metrics (`{ id }`) and plugins (`integer`)" },
+          "error": { "type": "string" },
+          "plugins": { "type": "array", "items": {}, "description": "Empty array on plugin-group failures" }
+        }
+      },
+      "ApiEndpoint": {
+        "type": "object",
+        "required": ["name", "method", "path", "descr"],
+        "properties": {
+          "name": { "type": "string" },
+          "method": { "type": "string" },
+          "path": { "type": "string" },
+          "descr": { "type": "string" }
+        }
+      },
+      "BrokerInfo": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "node_id": { "type": "integer", "format": "int64" },
+          "node_name": { "type": "string" },
+          "datetime": { "type": "string" },
+          "running": { "type": "boolean" },
+          "version": { "type": "string" },
+          "rustc_version": { "type": "string" },
+          "uptime": { "type": "string" }
+        },
+        "additionalProperties": true
+      },
+      "NodeInfo": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "node_id": { "type": "integer", "format": "int64" },
+          "node_name": { "type": "string" },
+          "running": { "type": "boolean" },
+          "connections": { "type": "integer" },
+          "boottime": { "type": "string" },
+          "uptime": { "type": "string" },
+          "version": { "type": "string" },
+          "memory_used": { "type": "integer" },
+          "memory_total": { "type": "integer" },
+          "load1": { "type": "number" },
+          "load5": { "type": "number" },
+          "load15": { "type": "number" }
+        },
+        "additionalProperties": true
+      },
+      "Features": {
+        "type": "object",
+        "description": "Runtime capability flags. A flag is true when the backing implementation is loaded and enabled. Used by the dashboard for menu gating via FeaturesSummary.enabled.",
+        "required": ["retain", "message_storage", "session_storage", "delayed", "shared_subscription", "auto_subscription"],
+        "properties": {
+          "retain": { "type": "boolean", "description": "Retained messages (`ferromq-retainer`). Gates the Retains menu." },
+          "message_storage": { "type": "boolean", "description": "Persistent message storage (`ferromq-message-storage`)." },
+          "session_storage": { "type": "boolean", "description": "Persistent session storage (`ferromq-session-storage`)." },
+          "delayed": { "type": "boolean", "description": "Delayed publish (`$delayed/...`)." },
+          "shared_subscription": { "type": "boolean", "description": "Shared subscriptions `$share`." },
+          "auto_subscription": { "type": "boolean", "description": "Automatic subscriptions plugin." }
+        }
+      },
+      "FeaturesInfo": {
+        "type": "object",
+        "required": ["node_id", "node_name", "features"],
+        "properties": {
+          "node_id": { "type": "integer", "format": "int64" },
+          "node_name": { "type": "string" },
+          "features": { "$ref": "#/components/schemas/Features" }
+        }
+      },
+      "FeaturesNodeResult": {
+        "type": "object",
+        "required": ["node_id", "ok"],
+        "properties": {
+          "node_id": { "type": "integer", "format": "int64" },
+          "node_name": { "type": "string" },
+          "ok": { "type": "boolean" },
+          "features": { "$ref": "#/components/schemas/Features" },
+          "error": { "type": "string" }
+        }
+      },
+      "FeatureValueGroup": {
+        "type": "object",
+        "required": ["value", "node_ids"],
+        "properties": {
+          "value": { "type": "boolean" },
+          "node_ids": { "type": "array", "items": { "type": "integer", "format": "int64" } }
+        }
+      },
+      "FeatureConflict": {
+        "type": "object",
+        "required": ["feature", "values"],
+        "properties": {
+          "feature": { "type": "string" },
+          "values": { "type": "array", "items": { "$ref": "#/components/schemas/FeatureValueGroup" } }
+        }
+      },
+      "FeaturesSummary": {
+        "type": "object",
+        "required": ["consistent", "node_count", "failed_count", "partial", "enabled", "nodes"],
+        "properties": {
+          "consistent": { "type": "boolean" },
+          "node_count": { "type": "integer", "minimum": 0 },
+          "failed_count": { "type": "integer", "minimum": 0 },
+          "partial": { "type": "boolean" },
+          "enabled": { "$ref": "#/components/schemas/Features" },
+          "conflicts": { "type": "array", "items": { "$ref": "#/components/schemas/FeatureConflict" } },
+          "nodes": { "type": "array", "items": { "$ref": "#/components/schemas/FeaturesNodeResult" } }
+        }
+      },
+      "HealthStatus": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "ClientSearchResult": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "integer", "format": "int64" },
+          "clientid": { "type": "string" },
+          "username": { "type": "string" },
+          "superuser": { "type": "boolean" },
+          "proto_ver": { "type": "integer" },
+          "ip_address": { "type": "string", "nullable": true },
+          "port": { "type": "integer", "nullable": true },
+          "connected": { "type": "boolean" },
+          "connected_at": { "type": "string" },
+          "disconnected_at": { "type": "string" },
+          "disconnected_reason": { "type": "string" },
+          "keepalive": { "type": "integer" },
+          "clean_start": { "type": "boolean" },
+          "session_present": { "type": "boolean" },
+          "expiry_interval": { "type": "integer" },
+          "created_at": { "type": "string" },
+          "subscriptions_cnt": { "type": "integer" },
+          "max_subscriptions": { "type": "integer" },
+          "last_will": {},
+          "inflight": { "type": "integer" },
+          "max_inflight": { "type": "integer" },
+          "mqueue_len": { "type": "integer" },
+          "max_mqueue": { "type": "integer" }
+        },
+        "additionalProperties": true
+      },
+      "Subscription": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "integer", "format": "int64" },
+          "clientid": { "type": "string" },
+          "topic": { "type": "string" },
+          "qos": { "description": "Documented alias of opts.qos" },
+          "share": { "description": "Documented alias of opts.group" },
+          "opts": { "type": "object", "additionalProperties": true }
+        },
+        "additionalProperties": true
+      },
+      "RetainPublishInfo": {
+        "type": "object",
+        "properties": {
+          "topic": { "type": "string" },
+          "qos": { "type": "integer" },
+          "retain": { "type": "boolean" },
+          "dup": { "type": "boolean" },
+          "payload": { "type": "string", "description": "Base64 payload" },
+          "create_time": { "type": "integer", "nullable": true },
+          "properties": { "nullable": true }
+        }
+      },
+      "RetainInfo": {
+        "type": "object",
+        "properties": {
+          "topic": { "type": "string" },
+          "msg_id": { "nullable": true },
+          "from": {},
+          "publish": { "$ref": "#/components/schemas/RetainPublishInfo" },
+          "remaining_ttl": { "type": "integer", "nullable": true },
+          "client_id": { "type": "string", "nullable": true }
+        }
+      },
+      "RetainPage": {
+        "type": "object",
+        "required": ["items", "has_more"],
+        "properties": {
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/RetainInfo" } },
+          "has_more": { "type": "boolean" },
+          "offset": { "type": "integer" },
+          "limit": { "type": "integer" },
+          "truncated": { "type": "boolean" },
+          "total": { "type": "integer" }
+        }
+      },
+      "PublishParams": {
+        "type": "object",
+        "required": ["payload"],
+        "properties": {
+          "topic": { "type": "string" },
+          "topics": { "type": "string", "description": "Comma-separated topics" },
+          "clientid": { "type": "string", "default": "system" },
+          "payload": { "type": "string" },
+          "encoding": { "type": "string", "enum": ["plain", "base64"], "default": "plain" },
+          "qos": { "type": "integer", "minimum": 0, "maximum": 2, "default": 0 },
+          "retain": { "type": "boolean", "default": false },
+          "properties": { "type": "object", "additionalProperties": true }
+        }
+      },
+      "SubscribeParams": {
+        "type": "object",
+        "required": ["clientid"],
+        "properties": {
+          "topic": { "type": "string" },
+          "topics": { "type": "string" },
+          "clientid": { "type": "string" },
+          "qos": { "type": "integer", "minimum": 0, "maximum": 2, "default": 0 }
+        }
+      },
+      "UnsubscribeParams": {
+        "type": "object",
+        "required": ["topic", "clientid"],
+        "properties": {
+          "topic": { "type": "string" },
+          "clientid": { "type": "string" }
+        }
+      },
+      "PluginInfo": {
+        "type": "object",
+        "required": ["name", "inited", "active", "immutable"],
+        "properties": {
+          "name": { "type": "string" },
+          "version": { "type": "string", "nullable": true },
+          "descr": { "type": "string", "nullable": true },
+          "inited": { "type": "boolean" },
+          "active": { "type": "boolean", "description": "Canonical running flag (not `running`)" },
+          "immutable": { "type": "boolean" },
+          "attrs": { "nullable": true }
+        },
+        "additionalProperties": true
+      },
+      "PluginNodeGroup": {
+        "type": "object",
+        "required": ["node", "plugins", "ok"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "node": { "type": "integer", "format": "int64" },
+          "plugins": { "type": "array", "items": { "$ref": "#/components/schemas/PluginInfo" } },
+          "error": { "type": "string" }
+        }
+      },
+      "EffectiveMode": {
+        "type": "string",
+        "enum": ["hot", "reload", "restart_required"],
+        "description": "hot = already applied via plugin load_config (not a ferromqd restart). reload = file written, call PUT .../config/reload. restart_required = process restart needed; ferromqd is never hot-restarted."
+      },
+      "ConfigDiff": {
+        "type": "object",
+        "properties": {
+          "added": { "type": "array", "items": { "type": "string" } },
+          "removed": { "type": "array", "items": { "type": "string" } },
+          "changed": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "ConfigWriteBody": {
+        "type": "object",
+        "description": "Either the config object itself, or `{ \"toml\": \"...\" }`.",
+        "additionalProperties": true
+      },
+      "ConfigWriteResult": {
+        "type": "object",
+        "required": ["ok", "written", "applied", "effective", "diff"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "written": { "type": "boolean" },
+          "applied": { "type": "boolean" },
+          "effective": { "$ref": "#/components/schemas/EffectiveMode" },
+          "diff": { "$ref": "#/components/schemas/ConfigDiff" },
+          "backup": { "type": "string", "nullable": true },
+          "apply_error": { "type": "string", "nullable": true },
+          "plugin": { "type": "string" },
+          "node": { "type": "integer", "format": "int64" },
+          "section": { "type": "string" },
+          "note": { "type": "string" }
+        }
+      },
+      "ConfigValidateResult": {
+        "type": "object",
+        "required": ["ok", "valid", "effective", "diff"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "valid": { "type": "boolean" },
+          "effective": { "$ref": "#/components/schemas/EffectiveMode" },
+          "diff": { "$ref": "#/components/schemas/ConfigDiff" },
+          "errors": { "type": "array", "items": { "type": "string" } },
+          "plugin": { "type": "string" },
+          "node": { "type": "integer", "format": "int64" },
+          "section": { "type": "string" },
+          "note": { "type": "string" }
+        }
+      },
+      "ConfigVersion": {
+        "type": "object",
+        "required": ["version", "ts", "size"],
+        "properties": {
+          "version": { "type": "string" },
+          "ts": { "type": "integer", "format": "int64" },
+          "size": { "type": "integer", "format": "int64" }
+        }
+      },
+      "AclRule": {
+        "type": "object",
+        "properties": {
+          "index": { "type": "integer" },
+          "access": { "type": "string", "enum": ["allow", "deny"] },
+          "who": {},
+          "control": { "type": "string", "enum": ["all", "connect", "publish", "subscribe", "pubsub"] },
+          "topics": { "type": "array" },
+          "raw": { "type": "array" }
+        }
+      },
+      "AclRuleInput": {
+        "type": "object",
+        "description": "Structured rule or `{ \"raw\": [\"allow\", \"all\"] }` / a raw array.",
+        "properties": {
+          "access": { "type": "string", "enum": ["allow", "deny"] },
+          "who": {},
+          "control": { "type": "string" },
+          "topics": { "type": "array" },
+          "raw": { "type": "array" },
+          "index": { "type": "integer", "description": "Optional insert index on POST" }
+        }
+      },
+      "AclWriteBody": {
+        "type": "object",
+        "properties": {
+          "disconnect_if_pub_rejected": { "type": "boolean" },
+          "priority": { "type": "integer" },
+          "rules": { "type": "array", "items": { "$ref": "#/components/schemas/AclRuleInput" } }
+        }
+      },
+      "AclOverview": {
+        "type": "object",
+        "properties": {
+          "plugin": { "type": "string" },
+          "node": { "type": "integer" },
+          "available": { "type": "boolean" },
+          "active": { "type": "boolean" },
+          "inited": { "type": "boolean" },
+          "reloadable": { "type": "boolean" },
+          "disconnect_if_pub_rejected": { "type": "boolean" },
+          "priority": { "type": "integer" },
+          "rules": { "type": "array", "items": { "$ref": "#/components/schemas/AclRule" } },
+          "note": { "type": "string" }
+        }
+      },
+      "AuthProviderList": {
+        "type": "object",
+        "properties": {
+          "node": { "type": "integer" },
+          "providers": { "type": "array", "items": { "type": "object" } },
+          "note": { "type": "string" }
+        }
+      },
+      "ConnectivityTest": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "kind": { "type": "string", "enum": ["tcp_connect", "jwt_config"] },
+          "plugin": { "type": "string" },
+          "url": { "type": "string" },
+          "latency_ms": { "type": "integer" },
+          "error": { "type": "string", "nullable": true },
+          "note": { "type": "string" }
+        }
+      },
+      "CapabilityGap": {
+        "type": "object",
+        "required": ["available", "items", "gap"],
+        "properties": {
+          "available": { "type": "boolean", "enum": [false] },
+          "plugin": { "nullable": true },
+          "kind": { "type": "string" },
+          "items": { "type": "array" },
+          "gap": { "type": "string" },
+          "alternatives": { "type": "array" }
+        }
+      },
+      "Alarm": {
+        "type": "object",
+        "required": ["id", "name", "level", "message", "source", "activated_at", "acknowledged"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "level": { "type": "string", "enum": ["critical", "warning"] },
+          "node_id": { "type": "integer", "format": "int64", "nullable": true },
+          "message": { "type": "string" },
+          "source": { "type": "string", "enum": ["health", "features", "cluster"] },
+          "activated_at": { "type": "integer", "format": "int64" },
+          "acknowledged": { "type": "boolean" },
+          "acknowledged_at": { "type": "integer", "format": "int64" },
+          "acknowledged_by": { "type": "string" },
+          "cleared_at": { "type": "integer", "format": "int64" }
+        }
+      },
+      "AlarmList": {
+        "type": "object",
+        "required": ["available", "source", "items"],
+        "properties": {
+          "available": { "type": "boolean" },
+          "source": { "type": "string", "enum": ["derived"] },
+          "note": { "type": "string" },
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/Alarm" } }
+        }
+      },
+      "TopicMetrics": {
+        "type": "object",
+        "required": ["available", "kind", "items"],
+        "properties": {
+          "available": { "type": "boolean" },
+          "kind": { "type": "string", "enum": ["route_derived"] },
+          "note": { "type": "string" },
+          "sys_topic": { "type": "object" },
+          "alternatives": { "type": "array" },
+          "items": { "type": "array" },
+          "offset": { "type": "integer" },
+          "limit": { "type": "integer" },
+          "total": { "type": "integer", "minimum": 0 },
+          "truncated": { "type": "boolean" },
+          "source_truncated": { "type": "boolean", "description": "Raw routes hit max_row_limit before grouping" }
+        }
+      },
+      "ClusterTopology": {
+        "type": "object",
+        "required": ["available", "mode", "local_node_id", "membership", "nodes"],
+        "properties": {
+          "available": { "type": "boolean" },
+          "mode": { "type": "string", "enum": ["standalone", "raft", "broadcast"] },
+          "plugin": { "type": "string", "nullable": true },
+          "plugin_active": { "type": "boolean" },
+          "local_node_id": { "type": "integer", "format": "int64" },
+          "leader_id": { "type": "integer", "format": "int64", "nullable": true },
+          "role": { "type": "string" },
+          "peers": { "type": "array", "items": { "type": "integer" } },
+          "nodes": { "type": "array" },
+          "membership": {
+            "type": "object",
+            "properties": {
+              "join": { "type": "boolean" },
+              "leave": { "type": "boolean" },
+              "reason": { "type": "string" }
+            }
+          },
+          "raft": { "description": "Plugin::send({op:status}) payload when raft is active" },
+          "note": { "type": "string" }
+        }
+      },
+      "ClusterWriteResult": {
+        "type": "object",
+        "description": "Cluster membership write. Always includes a per-node result array. On 501 the same shape is in Error.details.",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "action": { "type": "string", "enum": ["join", "leave"] },
+          "available": { "type": "boolean" },
+          "message": { "type": "string" },
+          "membership": { "type": "object" },
+          "nodes": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ClusterNodeError" }
+          }
+        }
+      },
+      "BlacklistGap": {
+        "type": "object",
+        "required": ["available", "items", "gap"],
+        "properties": {
+          "available": { "type": "boolean" },
+          "plugin": { "nullable": true },
+          "items": { "type": "array" },
+          "gap": { "type": "string" },
+          "alternatives": { "type": "array" }
+        }
+      },
+      "BrokerConfigOverview": {
+        "type": "object",
+        "properties": {
+          "file": { "type": "string" },
+          "writable_sections": { "type": "array", "items": { "type": "string" } },
+          "effective": { "$ref": "#/components/schemas/EffectiveMode" },
+          "note": { "type": "string" },
+          "mqtt": { "type": "object", "additionalProperties": true },
+          "listener": { "type": "object", "additionalProperties": true },
+          "log": { "type": "object", "additionalProperties": true }
+        }
+      },
+      "StatsNode": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "node": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "integer", "format": "int64" },
+              "name": { "type": "string" },
+              "running": { "type": "boolean" }
+            }
+          },
+          "stats": { "type": "object", "additionalProperties": true },
+          "error": { "type": "string" }
+        }
+      },
+      "MetricsNode": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "node": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "integer", "format": "int64" },
+              "name": { "type": "string" }
+            }
+          },
+          "metrics": { "type": "object", "additionalProperties": true },
+          "error": { "type": "string" }
+        }
+      },
+      "HistoryData": {
+        "type": "object",
+        "properties": {
+          "node": { "type": "integer", "format": "int64" },
+          "from": { "type": "integer", "format": "int64" },
+          "to": { "type": "integer", "format": "int64" },
+          "count": { "type": "integer" },
+          "data": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "required": ["username", "password"],
+        "properties": {
+          "username": { "type": "string" },
+          "password": { "type": "string", "format": "password" }
+        }
+      },
+      "ChangePasswordRequest": {
+        "type": "object",
+        "required": ["old_password", "new_password"],
+        "properties": {
+          "old_password": { "type": "string", "format": "password" },
+          "new_password": { "type": "string", "format": "password", "minLength": 8 }
+        }
+      },
+      "SessionUser": {
+        "type": "object",
+        "required": ["username", "role", "auth"],
+        "properties": {
+          "username": { "type": "string" },
+          "role": { "type": "string", "enum": ["admin", "operator", "viewer"] },
+          "auth": { "type": "string", "enum": ["session", "bearer", "api_key", "anonymous"] },
+          "expires_in": { "type": "integer", "description": "Remaining idle seconds (session only)" },
+          "key_id": { "type": "string", "description": "Present when auth=api_key" },
+          "created": { "type": "boolean", "description": "Present on POST /auth/init" },
+          "ok": { "type": "boolean" }
+        }
+      },
+      "ChangePasswordResult": {
+        "type": "object",
+        "required": ["ok"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "session_rotated": { "type": "boolean" },
+          "username": { "type": "string" },
+          "role": { "type": "string", "enum": ["admin", "operator", "viewer"] },
+          "auth": { "type": "string", "enum": ["session"] },
+          "expires_in": { "type": "integer" }
+        }
+      },
+      "InitAdminResult": {
+        "type": "object",
+        "required": ["username", "role", "created"],
+        "properties": {
+          "username": { "type": "string" },
+          "role": { "type": "string", "enum": ["admin", "operator", "viewer"] },
+          "created": { "type": "boolean" }
+        }
+      },
+      "OkResult": {
+        "type": "object",
+        "required": ["ok"],
+        "properties": { "ok": { "type": "boolean" } }
+      },
+      "DashboardUser": {
+        "type": "object",
+        "required": ["username", "role", "enabled"],
+        "properties": {
+          "username": { "type": "string" },
+          "role": { "type": "string", "enum": ["admin", "operator", "viewer"] },
+          "enabled": { "type": "boolean" }
+        }
+      },
+      "CreateUserRequest": {
+        "type": "object",
+        "required": ["username", "password", "role"],
+        "properties": {
+          "username": { "type": "string" },
+          "password": { "type": "string", "format": "password", "minLength": 8 },
+          "role": { "type": "string", "enum": ["admin", "operator", "viewer"] }
+        }
+      },
+      "ApiKey": {
+        "type": "object",
+        "required": ["id", "name", "role", "created_at", "created_by"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "role": { "type": "string", "enum": ["admin", "operator", "viewer"] },
+          "created_at": { "type": "integer", "format": "int64" },
+          "created_by": { "type": "string" },
+          "last_used_at": { "type": "integer", "format": "int64", "nullable": true }
+        }
+      },
+      "ApiKeyCreated": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ApiKey" },
+          {
+            "type": "object",
+            "required": ["secret"],
+            "properties": {
+              "secret": { "type": "string", "description": "Plaintext secret, shown only on create. Use as Bearer token." }
+            }
+          }
+        ]
+      },
+      "CreateApiKeyRequest": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string" },
+          "role": { "type": "string", "enum": ["admin", "operator", "viewer"], "default": "operator" }
+        }
+      },
+      "AuditEvent": {
+        "type": "object",
+        "required": ["id", "ts", "request_id", "username", "role", "auth", "action", "ip", "success"],
+        "properties": {
+          "id": { "type": "integer", "format": "int64" },
+          "ts": { "type": "integer", "format": "int64", "description": "Unix milliseconds" },
+          "request_id": { "type": "string" },
+          "username": { "type": "string" },
+          "role": { "type": "string" },
+          "auth": { "type": "string", "enum": ["session", "bearer", "api_key", "anonymous"] },
+          "action": { "type": "string" },
+          "resource": { "type": "string" },
+          "ip": { "type": "string" },
+          "success": { "type": "boolean" },
+          "details": { "type": "object", "additionalProperties": true }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Static `http_bearer_token` (role=admin, username=operator) or a created API key secret (bound role)."
+      },
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "ferromq_session",
+        "description": "HttpOnly process-local session cookie issued by POST /api/v1/auth/login. User/password and API-key hashes are persisted per node."
+      }
+    }
+  }
+}
