@@ -99,7 +99,7 @@ impl Plugin for TopicRewritePlugin {
     async fn stop(&mut self) -> Result<bool> {
         log::info!("{} stop", self.name());
         self.register.stop().await;
-        Ok(false)
+        Ok(true)
     }
 }
 
@@ -309,5 +309,53 @@ impl Handler for TopicRewriteHandler {
             }
         }
         (true, acc)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferromq::types::{CodecPublish, From, Id, QoS};
+
+    #[tokio::test]
+    async fn dashboard_regression_stop_start_restores_publish_hook() {
+        let name = "ferromq-topic-rewrite";
+        let scx = ServerContext::new()
+            .node_id(7)
+            .busy_check_enable(false)
+            .plugins_config_map_add(
+                name,
+                r#"rules = [{ action = "publish", source_topic_filter = "test/in", dest_topic = "test/out" }]"#,
+            )
+            .build()
+            .await;
+        register_named(&scx, name, true, false).await.unwrap();
+        let from = From::from_custom(Id::from(7, "rewrite-test".into()));
+        let publish = Publish::from(CodecPublish {
+            dup: false,
+            retain: false,
+            qos: QoS::AtLeastOnce,
+            topic: "test/in".into(),
+            packet_id: None,
+            payload: "payload".into(),
+            properties: None,
+        });
+        let hooks = scx.extends.hook_mgr();
+
+        // Exercise the manager and the registered hook, not just stop()'s return value.
+        for _ in 0..2 {
+            assert!(scx.plugins.is_active(name));
+            let rewritten = hooks.message_publish(None, from.clone(), &publish).await.unwrap();
+            assert_eq!(rewritten.topic.to_string(), "test/out");
+            assert_eq!(rewritten.payload, publish.payload);
+
+            assert!(scx.plugins.stop(name).await.unwrap());
+            assert!(!scx.plugins.is_active(name));
+            assert!(hooks.message_publish(None, from.clone(), &publish).await.is_none());
+
+            scx.plugins.start(name).await.unwrap();
+        }
+        assert_eq!(hooks.message_publish(None, from, &publish).await.unwrap().topic.to_string(), "test/out");
+        assert!(scx.plugins.stop(name).await.unwrap());
     }
 }

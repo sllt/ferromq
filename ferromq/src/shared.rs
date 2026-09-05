@@ -721,6 +721,17 @@ impl DefaultShared {
 #[async_trait]
 impl Shared for DefaultShared {
     #[inline]
+    async fn check_health(&self) -> Result<HealthInfo> {
+        let status = self.health_status().await?;
+        Ok(HealthInfo { running: status.is_running(), descr: None, nodes: vec![status] })
+    }
+
+    #[inline]
+    async fn health_status(&self) -> Result<NodeHealthStatus> {
+        Ok(NodeHealthStatus { node_id: self.context().node.id(), ..NodeHealthStatus::default() })
+    }
+
+    #[inline]
     fn entry(&self, id: Id) -> Box<dyn Entry> {
         Box::new(LockEntry::new(id, self.clone(), None))
     }
@@ -1174,5 +1185,28 @@ mod tests {
         let deduped = dedup_retains_by_topic(retains);
         assert_eq!(deduped.len(), 1);
         assert_eq!(deduped[0].1.publish.payload.as_ref(), b"first");
+    }
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dashboard_regression_standalone_health_uses_configured_node_id() {
+        for node_id in [1, 42] {
+            let scx = ServerContext::new().node_id(node_id).busy_check_enable(false).build().await;
+            let shared = scx.extends.shared().await;
+            let status = shared.health_status().await.unwrap();
+            assert_eq!(status.node_id, node_id);
+            assert!(status.is_running());
+            assert_eq!(status.leader_id, None);
+
+            let health = shared.check_health().await.unwrap();
+            assert!(health.running);
+            assert_eq!(health.nodes.len(), 1);
+            assert_eq!(health.nodes[0].node_id, node_id);
+            assert_eq!(health.nodes[0].to_json(), status.to_json());
+        }
     }
 }

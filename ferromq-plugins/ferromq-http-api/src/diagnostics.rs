@@ -627,17 +627,24 @@ fn classify_cluster_plugin(name: &str) -> Option<ClusterMode> {
 }
 
 async fn detect_cluster_plugin(scx: &ServerContext) -> (ClusterMode, Option<String>, bool) {
+    // Registration advertises availability, not the running cluster mode.
     for name in [PLUGIN_CLUSTER_RAFT, PLUGIN_CLUSTER_BROADCAST] {
         if let Some(entry) = scx.plugins.get(name) {
+            if !entry.active() {
+                continue;
+            }
             if let Some(mode) = classify_cluster_plugin(name) {
-                return (mode, Some(name.to_string()), entry.active());
+                return (mode, Some(name.to_string()), true);
             }
         }
     }
     for entry in scx.plugins.iter() {
+        if !entry.active() {
+            continue;
+        }
         let name = entry.key().to_string();
         if let Some(mode) = classify_cluster_plugin(&name) {
-            return (mode, Some(name), entry.active());
+            return (mode, Some(name), true);
         }
     }
     (ClusterMode::Standalone, None, false)
@@ -723,7 +730,7 @@ pub(crate) async fn cluster_snapshot(scx: &ServerContext) -> Value {
         (ClusterMode::Standalone, _) => (
             false,
             false,
-            "No cluster plugin loaded. Topology is this process only.",
+            "No active cluster plugin. Topology is this process only.",
         ),
     };
 
@@ -1167,6 +1174,85 @@ mod tests {
         async fn attrs(&self) -> Value {
             json!({"raft_status": {"id": 1, "leader_id": 1}})
         }
+    }
+
+    async fn register_cluster_stub(scx: &ServerContext, name: &'static str, active: bool) {
+        scx.plugins
+            .register(name, active, false, move || {
+                Box::pin(
+                    async move { Ok(Box::new(RaftStub { name: name.into() }) as ferromq::plugin::DynPlugin) },
+                )
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dashboard_regression_inactive_cluster_plugins_are_standalone() {
+        let scx = ServerContext::new().node_id(42).busy_check_enable(false).build().await;
+        register_cluster_stub(&scx, PLUGIN_CLUSTER_RAFT, false).await;
+        register_cluster_stub(&scx, PLUGIN_CLUSTER_BROADCAST, false).await;
+        let cfg = Arc::new(RwLock::new(test_cfg()));
+        let svc = Service::new(route(scx, cfg, None, prome::Monitor::new(), None));
+
+        let mut cluster = TestClient::get("http://127.0.0.1:0/api/v1/cluster").send(&svc).await;
+        assert_eq!(cluster.status_code, Some(StatusCode::OK));
+        let body: Value = cluster.take_json().await.unwrap();
+        assert_eq!(body["mode"], "standalone");
+        assert_eq!(body["role"], "standalone");
+        assert!(body["plugin"].is_null());
+        assert_eq!(body["plugin_active"], false);
+        assert_eq!(body["membership"]["leave"], false);
+
+        for path in ["nodes", "brokers"] {
+            let mut response = TestClient::get(format!("http://127.0.0.1:0/api/v1/{path}")).send(&svc).await;
+            let body: Value = response.take_json().await.unwrap();
+            assert_eq!(body[0]["node_id"], 42);
+            assert_eq!(body[0]["cluster"]["mode"], "standalone");
+        }
+        for path in ["health/check", "health/check/42"] {
+            let mut response = TestClient::get(format!("http://127.0.0.1:0/api/v1/{path}")).send(&svc).await;
+            let body: Value = response.take_json().await.unwrap();
+            // Both aggregate and per-node APIs must refer to the actual node.
+            let status = body.get("nodes").map(|nodes| &nodes[0]).unwrap_or(&body);
+            assert_eq!(status["node_id"], 42, "{path}: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn dashboard_regression_active_broadcast_wins_over_inactive_raft() {
+        let scx = ServerContext::new().node_id(1).busy_check_enable(false).build().await;
+        register_cluster_stub(&scx, PLUGIN_CLUSTER_RAFT, false).await;
+        register_cluster_stub(&scx, PLUGIN_CLUSTER_BROADCAST, true).await;
+        let snapshot = cluster_snapshot(&scx).await;
+        assert_eq!(snapshot["mode"], "broadcast");
+        assert_eq!(snapshot["plugin"], PLUGIN_CLUSTER_BROADCAST);
+        assert_eq!(snapshot["plugin_active"], true);
+        assert_eq!(snapshot["role"], "member");
+        assert_eq!(snapshot["membership"]["leave"], false);
+
+        scx.plugins.stop(PLUGIN_CLUSTER_BROADCAST).await.unwrap();
+        assert_eq!(cluster_snapshot(&scx).await["mode"], "standalone");
+        scx.plugins.start(PLUGIN_CLUSTER_RAFT).await.unwrap();
+        let snapshot = cluster_snapshot(&scx).await;
+        assert_eq!(snapshot["mode"], "raft");
+        assert_eq!(snapshot["role"], "leader");
+        assert_eq!(snapshot["membership"]["leave"], true);
+    }
+
+    #[tokio::test]
+    async fn dashboard_regression_custom_cluster_names_require_activation() {
+        let scx = ServerContext::new().node_id(1).busy_check_enable(false).build().await;
+        register_cluster_stub(&scx, PLUGIN_CLUSTER_RAFT, false).await;
+        register_cluster_stub(&scx, "custom-cluster-raft", false).await;
+        register_cluster_stub(&scx, "custom-cluster-broadcast", false).await;
+        assert_eq!(cluster_snapshot(&scx).await["mode"], "standalone");
+
+        scx.plugins.start("custom-cluster-broadcast").await.unwrap();
+        let snapshot = cluster_snapshot(&scx).await;
+        assert_eq!(snapshot["mode"], "broadcast");
+        assert_eq!(snapshot["plugin"], "custom-cluster-broadcast");
+        assert_eq!(snapshot["plugin_active"], true);
     }
 
     #[tokio::test]

@@ -342,8 +342,8 @@ fn plugin_toml_path(dir: &str, name: &str) -> PathBuf {
 }
 
 fn history_dir(dir: &str, name: &str) -> PathBuf {
-    let dir = dir.trim_end_matches(['/', '\\']);
-    PathBuf::from(format!("{dir}/.config-history/{name}"))
+    // Preserve absolute roots, but keep a bare filename's empty parent relative to cwd.
+    Path::new(dir).join(".config-history").join(name)
 }
 
 fn atomic_write(path: &Path, contents: &str) -> Result<()> {
@@ -1785,6 +1785,25 @@ mod tests {
         assert_eq!(r["nested"]["ok"], 1);
         assert_eq!(r["empty_token"], "");
         assert!(r["null_secret"].is_null());
+    }
+
+    #[test]
+    fn dashboard_regression_bare_config_history_stays_relative() {
+        let file = Path::new("ferromq.toml");
+        let parent = file.parent().unwrap().to_str().unwrap();
+        assert_eq!(parent, "");
+        let history = history_dir(parent, "ferromq");
+        let root = Path::new(std::path::MAIN_SEPARATOR_STR);
+        assert_eq!(
+            history_dir(root.to_str().unwrap(), "ferromq"),
+            root.join(".config-history").join("ferromq")
+        );
+        assert!(!history.is_absolute());
+        assert_eq!(history, Path::new(".config-history").join("ferromq"));
+        assert_eq!(
+            history_dir("configs/", "ferromq"),
+            Path::new("configs").join(".config-history").join("ferromq")
+        );
     }
 
     #[test]
